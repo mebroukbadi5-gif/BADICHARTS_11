@@ -373,7 +373,6 @@ svg{vertical-align:middle;flex-shrink:0}
           <button id="assetPrev" class="cbtn" title="Scroll the currencies back" aria-label="Scroll back"></button>
           <button id="assetNext" class="cbtn" title="Scroll the currencies forward" aria-label="Scroll forward"></button>
           <div id="assetChips" class="achips"></div>
-          <button id="clearBtn" class="ibtn ghost" title="Clear all drawings" aria-label="Clear all drawings"></button>
           <button id="fitBtn" class="ibtn ghost" title="Fit view to all data" aria-label="Fit view"></button>
         </div>
         <!-- شريط تمرير مصغر متصل — بعرض الشريط كاملاً تحت أسماء العملات -->
@@ -1811,7 +1810,6 @@ function buildStatic() {
   $("assetPrev").innerHTML = icon("chevron-left", 13);
   $("assetNext").innerHTML = icon("chevron-right", 13);
   $("amSearchIco").innerHTML = icon("search", 14);
-  $("clearBtn").innerHTML = icon("trash", 14);
   $("fitBtn").innerHTML = icon("maximize", 14);
   $("sigSound").innerHTML = icon(soundOn ? "volume" : "volumex", 14);
   $("sigClear").innerHTML = icon("trash", 12);
@@ -2267,10 +2265,6 @@ function bindEvents() {
   });
   /* زر فتح مجلد التطبيق (BadiCharts) — يضع فيه المستخدم المؤشرات والأدوات مباشرة */
   $("dirBtn").addEventListener("click", function () { badiSend("opendir"); });
-  $("clearBtn").addEventListener("click", function () {
-    const ch = aChart();
-    if (ch) { ch.clearDrawings(); log("info", "🧹 All drawings cleared"); }
-  });
   $("fitBtn").addEventListener("click", function () { const ch = aChart(); if (ch) ch.resetView(); });
 
   /* Run button: ▶ run / ■ stop / ↻ re-run with the new code */
@@ -4385,6 +4379,9 @@ class Backend(QObject):
         self._timer = QTimer(self)
         self._timer.setInterval(1000)
         self._timer.timeout.connect(self._on_tick)
+        # تشغيل المؤقت فعليًا — بلا هذا السطر كان محرك الشموع الحية متوقفًا تمامًا
+        # ولهذا لم تكن شموع جديدة تظهر في التطبيق (الشارت متجمد)
+        self._timer.start()
 
     # ---------- خصائص الواجهة ----------
     def _get_lang(self):
