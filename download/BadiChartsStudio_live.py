@@ -199,7 +199,7 @@ svg{vertical-align:middle;flex-shrink:0}
 .sig-res.loss{background:rgba(255,77,94,.16);color:#FF4D5E}
 .sig-etime{font-size:10.5px;font-weight:700;color:var(--sc);direction:ltr;white-space:nowrap}
 .sig-pair{display:flex;align-items:center;gap:7px;font-size:16.5px;font-weight:800;letter-spacing:.3px;margin:5px 0 6px;color:#F2F5F3;white-space:nowrap}
-.sig-pair .aflag{width:22px;height:12px;border-radius:2px}
+.sig-pair .aflag{width:23px;height:12px;border-radius:2px}
 .sig-rows{border-top:1px solid #1E272D;padding-top:4px;display:flex;flex-direction:column;gap:1px}
 .sig-row{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:3px 0;font-size:11px}
 .sig-row span{color:#8D9993;flex-shrink:0;display:inline-flex;align-items:center;gap:5px}
@@ -347,7 +347,7 @@ svg{vertical-align:middle;flex-shrink:0}
 .achip .adel{display:grid;width:15px;height:15px;place-items:center;border-radius:4px;color:var(--t-dim2);flex-shrink:0;transition:.15s}
 .achip .adel:hover{color:var(--err);background:rgba(248,113,113,.16)}
 .achip .adel svg{display:block;width:8px;height:8px}
-.aflag{display:block;width:16px;height:11px;border-radius:2px}
+.aflag{display:block;width:21px;height:11px;border-radius:2px}
 .aempty{font-size:10.5px;color:var(--t-dim2);white-space:nowrap}
 
 @media(max-width:640px){.tfs,.tf-arrow{display:none}}
@@ -360,7 +360,7 @@ svg{vertical-align:middle;flex-shrink:0}
 #amList{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;padding:5px}
 .am-row{display:flex;width:100%;align-items:center;gap:8px;border:0;background:transparent;border-radius:8px;padding:6px 8px;cursor:pointer;color:var(--t-bright);text-align:left}
 .am-row:hover{background:var(--btn-bg)}
-.am-row .aflag{width:24px;height:13px;flex-shrink:0}
+.am-row .aflag{width:25px;height:13px;flex-shrink:0}
 .am-row b{flex:1;min-width:0;font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .am-row .apay{font-style:normal;font-size:10px;font-weight:800;color:var(--ok);flex-shrink:0}
 .am-tog{display:grid;width:20px;height:20px;flex-shrink:0;place-items:center;border-radius:6px;border:1px solid var(--border2);color:var(--t-dim)}
@@ -3272,11 +3272,15 @@ from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtWebEngineQuick import QtWebEngineQuick
 
 # ═══════════════════ LIVE SERVER EDITION — QX ENGINE LOADER ═══════════════════
-# التطبيق يشغّل خادم Quotex الخاص بنا (qx_server_v13.py) الموجود بجانبه مباشرة:
+# التطبيق يشغّل خادم Quotex الخاص بنا (qx_server_v14.py) الموجود بجانبه مباشرة:
 #   • نفس تسجيل الدخول (connect_quotex) ونفس جلب الشموع الأصلي دون أي تغيير.
 #   • BRLUSD_otc: 300 شمعة فوراً بعد الدخول + الحالة ونسبة الدفع.
 #   • بقية العملات واحدة تلو الأخرى (300 شمعة لكل عملة) + بث حي لكل عملة.
 #   • دفعات التمرير للخلف (300 شمعة) عبر fetch_older_batch().
+#   • v14.1 (مثل تريدنغ فيو): التمرير للخلف يُطلب عند اقتراب بداية البيانات من
+#     الربع الأيسر من الشاشة (لا انتظار آخر 5 شموع)، مع ذاكرة «لا يوجد أقدم»
+#     لكل عملة+فريم، ودمج الدفعة موسوماً بالعملة والفريم فلا يختلط، وإعادة
+#     طلب تلقائية ما دمت متعمقاً في التاريخ.
 #   • التيكات في الذاكرة فقط وتُحذف بعد 5 دقائق (سياسة الخادم نفسها).
 _QX_MOD = None
 
@@ -3697,9 +3701,19 @@ FLAGS = {
 }
 
 
+def _flag_code_clean(s):
+    """تنظيف اسم العملة من لاحقة OTC وأي قوسين: «BRL (OTC)» → «BRL»."""
+    s = str(s or "").strip()
+    s = s.split("(")[0]                    # اسقط كل ما بعد القوسين
+    s = re.sub(r"\bOTC\b", "", s, flags=re.I)
+    return s.strip()
+
+
 def asset_flag(name):
-    """علم العملة الأولى في الزوج كـ data-URI (BTC/ETH/XAU لها أيقونة خاصة)."""
-    base = name.split("/")[0]
+    """علم العملة الأولى في الزوج كـ data-URI (BTC/ETH/XAU لها أيقونة خاصة).
+    v14.1: تنظيف لاحقة (OTC) — الأسماء الحقيقية من الخادم مثل «USD/BRL (OTC)»
+    كانت تفشل في البحث عن العلم بسبب القوسين فيظهر علم واحد فقط."""
+    base = _flag_code_clean(str(name).split("/")[0])
     return _flag_uri(FLAGS[base]) if base in FLAGS else ""
 
 
@@ -3709,16 +3723,31 @@ _RIM_WHITE = ('<rect x="0.4" y="0.4" width="19.2" height="13.2" rx="2" fill="non
               ' stroke="rgba(255,255,255,.9)" stroke-width="1.4"/>')
 
 
+def _flag_cell(code, rim):
+    """خلية علم واحدة داخل SVG مدموج — والعملة غير المعروفة تُرسم كشارة
+    رمز محايدة (لا يظهر أبداً زوج بعلم واحد ناقص — طلب المستخدم:
+    «العملة فيها عملتين يجب أن تضع علمين وليس علم واحد»)."""
+    body = FLAGS.get(code)
+    if body is None:
+        body = ('<rect width="20" height="14" rx="2" fill="#4b5563"/>'
+                f'<text x="10" y="9.6" font-size="6.2" font-weight="bold" '
+                f'text-anchor="middle" fill="#e5e7eb" '
+                f'font-family="Arial,sans-serif">{code[:4] or "?"}</text>')
+    return f'<g transform="scale(0.7)">{body}{rim}</g>'
+
+
 def pair_flag_uri(name):
-    """علمان جنب بعض في SVG واحد مدموجين بشكل نظيف (العملة الأولى + عملة الاقتباس)."""
-    parts = name.split("/")
-    base = parts[0]
-    quote = parts[1].replace(" OTC", "") if len(parts) > 1 else ""
-    if not quote or quote not in FLAGS or base not in FLAGS:
+    """علمان جنب بعض في SVG واحد مدموجين بشكل نظيف (العملة الأولى + عملة الاقتباس).
+    v14.1: يعمل مع كل صيغ الأسماء — «USD/BRL (OTC)» و«USD/BRL OTC» و«USD/BRL» —
+    وإن نقص علم أحد الطرفين تُرسم شارة رمزه بدل أن يسقط الزوج لعلم واحد."""
+    parts = str(name).split("/")
+    base = _flag_code_clean(parts[0])
+    quote = _flag_code_clean(parts[1]) if len(parts) > 1 else ""
+    if not quote:
         return asset_flag(name)
     svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 27 14">'
-           f'<g transform="translate(0,2.1) scale(0.7)">{FLAGS[base]}{_RIM_GRAY}</g>'
-           f'<g transform="translate(13,2.1) scale(0.7)">{FLAGS[quote]}{_RIM_WHITE}</g></svg>')
+           f'<g transform="translate(0,2.1)">{_flag_cell(base, _RIM_GRAY)}</g>'
+           f'<g transform="translate(13,2.1)">{_flag_cell(quote, _RIM_WHITE)}</g></svg>')
     return "data:image/svg+xml;utf8," + urllib.parse.quote(svg)
 
 
@@ -6950,6 +6979,7 @@ class Backend(QObject):
 
     def _qx_older_worker(self, arg):
         batch = []
+        b_asset, b_tf = "", ""
         try:
             try:
                 req = json.loads(arg or "{}")
@@ -6958,6 +6988,7 @@ class Backend(QObject):
             before = int(req.get("before") or 0)
             asset = str(req.get("asset") or self._asset)
             tf = str(req.get("tf") or self._tf)
+            b_asset, b_tf = asset, tf
             qx = _qx_module()
             api = self._qx_symbols.get(asset) or self._api_from_display(asset)
             tf_sec = dict(TFS).get(tf, 60)
@@ -6967,7 +6998,7 @@ class Backend(QObject):
                     # (v13.2: 300 وليس 170 — طلب المستخدم؛ وأولوية أمامية عبر بوابة الجلب)
                     fut = asyncio.run_coroutine_threadsafe(
                         qx.fetch_older_batch(api, before, qx.PAGINATION_BATCH), qx.ASYNC_LOOP)
-                    fut.result(timeout=90)
+                    fut.result(timeout=120)
                     batch = [c for c in self._qx_engine_candles(api) if c["t"] < before][-qx.PAGINATION_BATCH:]
                 else:
                     # v13.2: نفس CLIENT.get_candles الأصلي لكن عبر البوابة الأمامية —
@@ -7005,7 +7036,9 @@ class Backend(QObject):
             self._log("err", "older batch: " + str(e)[:120])
         finally:
             self._qx_older_busy = False
-        self._emit_qx({"type": "older", "candles": batch})
+        # v14.1: الدفعة موسومة بالعملة والفريم — الصفحة ترفض أي دفعة لا تطابق
+        # الشارت الحالي (حماية من اختلاط الدفعات عند تبديل العملة أثناء الجلب)
+        self._emit_qx({"type": "older", "candles": batch, "asset": b_asset, "tf": b_tf})
 
     # ---------- مؤشرات بايثون ----------
     _SAFE_BUILTINS = {"abs": abs, "min": min, "max": max, "len": len, "range": range,
@@ -7952,7 +7985,7 @@ window.__badiSend = send;
 /* ═══ LIVE SERVER EDITION: دفعة التمرير للخلف (300 شمعة) ═══
    عندما يقترب التمرير من بداية البيانات يُطلب من الخادم دفعة أقدم؛ وصولها
    يُدمج في الشارت مع تثبيت العرض الحالي تماماً (لا قفزة ولا إعادة ضبط). */
-var OLDER = { loading: false, at: 0, asset: "", tf: "" };
+var OLDER = { loading: false, at: 0, asset: "", tf: "", key: null, anchor: null, exhausted: null, consec: 0 };
 /* ═══ v13.2 (طلب المستخدم): دائرة تحميل داخل الشارت ═══
    عندما تُفتح عملة لم تُجلب بعد تظهر دائرة تحميل وسط الشارت مع نص
    «جارٍ جلب الشموع من الخادم» — وتختفي فور وصول أول شموع — بدل شارت أسود فارغ */
@@ -7988,7 +8021,7 @@ function renderChartLoading() {
     if (el) el.hidden = !(CHLOAD.on && empty);
   } catch (e) {}
 }
-window.__badiMaybeLoadOlder = function (p) {
+window.__badiMaybeLoadOlder = function (p, auto) {
   try {
     if (!window.__BADI_EMBEDDED || !p || !window.__badiPrimary || p !== window.__badiPrimary()) return;
     /* v13.1: فريمات الثواني (5s/10s/15s/30s) تاريخها يُبنى من تيكات الخادم
@@ -7997,6 +8030,10 @@ window.__badiMaybeLoadOlder = function (p) {
     if (p.tf && /^[0-9]+s$/.test(String(p.tf))) return;
     var dd = p.dataArr;
     if (!dd || dd.length < 30 || !p.chart) return;
+    /* v14.1 (مثل تريدنغ فيو): الذاكرة خاصة بكل عملة+فريم — تغيير أحدهما
+       يصفّر حالة التحميل وذاكرة «لا يوجد أقدم» ولا يختلط عملة بأخرى */
+    var key = String(p.asset || "") + "|" + String(p.tf || "");
+    if (OLDER.key !== key) { OLDER.key = key; OLDER.loading = false; OLDER.exhausted = null; OLDER.consec = 0; }
     if (OLDER.loading) {
       if (Date.now() - OLDER.at > 8000) OLDER.loading = false; else return;
     }
@@ -8005,12 +8042,25 @@ window.__badiMaybeLoadOlder = function (p) {
     var N = ch.sim.candles.length;
     var visible = (ch.chartRight - ch.chartLeft) / (ch.barSpacing || 8);
     var firstIdx = N - 1 + ch.rightOffset - visible;
-    if (firstIdx > 4) return;
-    var t0 = dd[0].time;
+    /* v14.1: عتبة تريدنغ فيو — لا ننتظر وصول أول شمعة إلى الحافة اليسرى
+       بالضبط (كان يستلزم سحباً طويلاً حتى آخر 5 شموع فقط)؛ يكفي أن تقترب
+       بداية البيانات من الربع الأيسر من الشاشة فيُطلب المزيد فوراً */
+    if (firstIdx > Math.max(6, visible * 0.2)) return;
+    /* v14.1: سحب المستخدم الجديد يبدأ جلسة دفعات جديدة (العدّاد يتجاوز فقط
+       في الدفعات التلقائية المتسلسلة بعد الدمج — auto=true) */
+    if (auto === true) { if ((OLDER.consec || 0) >= 8) return; }
+    else OLDER.consec = 0;
+    /* v14.1: الذاكرة — إن أجاب الخادم سابقاً «لا يوجد أقدم» لنفس المرساة
+       فلا تكرر الطلب على نفس النقطة؛ تُصفَّر الذاكرة فور وصول دفعة جديدة */
+    var t0 = ch.sim.candles[0].time;   /* أقدم شمعة في الشارت نفسه (الأدق) */
+    if (t0 === undefined || t0 === null) t0 = dd[0].time;
     if (t0 > 1e11) t0 = Math.floor(t0 / 1000);
+    t0 = Math.floor(t0);
+    if (OLDER.exhausted === t0) return;
     OLDER.loading = true; OLDER.at = Date.now();
+    OLDER.anchor = t0;
     OLDER.asset = String(p.asset || ""); OLDER.tf = String(p.tf || "");
-    send("older", JSON.stringify({ before: Math.floor(t0), asset: OLDER.asset, tf: OLDER.tf }));
+    send("older", JSON.stringify({ before: t0, asset: OLDER.asset, tf: OLDER.tf }));
   } catch (e) { OLDER.loading = false; }
 };
 function reportFiles() {
@@ -8627,20 +8677,30 @@ function defineBadiApp() {
         } catch (e) {}
       } catch (e) {}
     },
-    prependCandles: function (arr) {
+    prependCandles: function (arr, asset, tf) {
       /* LIVE SERVER EDITION: دمج دفعة الشموع الأقدم (تمرير للخلف) دون أي تأثير
          على الشارت — نفس الشموع تبقى في نفس مكانها بالضبط، فقط يزداد التاريخ
-         على اليسار مثل المنصات الاحترافية. تعيد عدد الشموع المضافة. */
+         على اليسار مثل المنصات الاحترافية. تعيد عدد الشموع المضافة.
+         v14.1: الدفعة موسومة باسم العملة والفريم من الخادم — تُرفض إن كانت
+         لعملة/فريم آخر (حماية من اختلاط الدفعات عند تبديل سريع)، وذاكرة
+         «لا يوجد أقدم» تُصفَّر عند وصول أي دفعة، وبعد الدمج يُعاد فحص
+         التمرير مباشرة — إن كنت ما زلت متعمقاً في التاريخ تُطلب دفعة أخرى
+         تلقائياً (سلوك تريدنغ فيو) بحد أقصى 8 دفعات متتالية لكل جلسة سحب. */
       try {
         OLDER.loading = false;
         var pr = window.__badiPrimary ? window.__badiPrimary() : null;
         if (!pr || !pr.chart) return 0;
+        /* v14.1: التحقق من تطابق العملة والفريم مع الشارت الحالي */
+        if (asset !== undefined && asset !== null && String(asset) !== "" &&
+            String(pr.asset || "") !== String(asset)) { OLDER.exhausted = null; return 0; }
+        if (tf !== undefined && tf !== null && String(tf) !== "" &&
+            String(pr.tf || "") !== String(tf)) { OLDER.exhausted = null; return 0; }
         var add = normArr(arr || []);
-        if (!add.length || !pr.dataArr.length) return 0;
+        if (!add.length || !pr.dataArr.length) { OLDER.exhausted = pr.dataArr.length ? OLDER.anchor : null; return 0; }
         var firstT = pr.dataArr[0].time;
         var pre = [];
         for (var i = 0; i < add.length; i++) { if (add[i].time < firstT) pre.push(add[i]); }
-        if (!pre.length) return 0;
+        if (!pre.length) { OLDER.exhausted = OLDER.anchor; return 0; }   /* لا شموع أقدم — لا تكرر الطلب لنفس المرساة */
         pre.sort(function (a, b) { return a.time - b.time; });
         pr.dataArr = pre.concat(pr.dataArr);
         var ch = pr.chart, sim = ch.sim;
@@ -8658,6 +8718,14 @@ function defineBadiApp() {
         try { ch.invalidateTimeMarks(); } catch (e) {}
         ch.autoScale(); ch.invalidate();
         try { runSignals(); } catch (e) {}
+        /* v14.1: وصلت دفعة حقيقية — صفّر ذاكرة الانتهاء وعدّاد الدفعات المتتالية
+           يزداد فقط هنا، ثم أعد الفحص فوراً: إن كنت ما زلت متعمقاً (المرساة
+           الجديدة داخل الربع الأيسر) اطلب دفعة إضافية مثل تريدنغ فيو */
+        OLDER.exhausted = null;
+        OLDER.consec = (OLDER.consec || 0) + 1;
+        if (OLDER.consec <= 8 && typeof window.__badiMaybeLoadOlder === "function") {
+          setTimeout(function () { try { window.__badiMaybeLoadOlder(window.__badiPrimary(), true); } catch (e2) {} }, 120);
+        }
         return pre.length;
       } catch (e) {
         OLDER.loading = false;
@@ -9712,7 +9780,11 @@ ApplicationWindow {
                 return
             }
             if (e.type === "older") {
-                win.webCall("__badiApp.prependCandles(" + JSON.stringify(e.candles) + ")",
+                /* v14.1: الدفعة موسومة بالعملة والفريم — prependCandles ترفض
+                   أي دفعة لا تطابق الشارت الحالي (حماية من الاخلاط عند التبديل السريع) */
+                win.webCall("__badiApp.prependCandles(" + JSON.stringify(e.candles || []) + ","
+                            + JSON.stringify(String(e.asset || "")) + ","
+                            + JSON.stringify(String(e.tf || "")) + ")",
                             function (res) {
                                 /* مزامنة عدّاد الشموع حتى لا تُعاد تهيئة الشارت
                                    بعد دمج الدفعة — العرض يبقى ثابتاً تماماً.

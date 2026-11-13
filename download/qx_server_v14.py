@@ -642,17 +642,62 @@ class WebsocketClient:
                     self.api.candle_v2_data[asset] = message
                     self.api.candles.candles_data = message.get("candles") or message.get("data") or message.get("history")
 
-                    asyncio.run_coroutine_threadsafe(
-                        self.api.event_registry.set_event(f'candles_ready_{asset}', message),
-                        loop
-                    )
-
+                    # ===== FIX: توجيه حدث الجلب للرد الحقيقي فقط (v14.1) =====
+                    # مشكلة سببت «الرجوع للخلف لا يجلب شموعاً»:
+                    #   الحدث candles_ready_<asset> كان يُرفع لأي رسالة تحمل
+                    #   شموعاً لنفس العملة — بما فيها لقطات البث الحي
+                    #   (instruments/update) — فتسرق اللقطة الحية الحدث قبل وصول
+                    #   رد history/load الحقيقي، فيأخذ الانتظار شموعاً حديثة
+                    #   لا تنفع التمرير للخلف (تُفلتر كلها لأنها ليست أقدم من
+                    #   before_time) وتظهر النتيجة فارغة دائماً.
+                    # الحل (نفس بروتوكول pyquotex): رد history/load الحقيقي يرد
+                    #   بـ«index» مطابق للطلب — لذلك:
+                    #   - رسالة تحمل index = رد تاريخ حقيقي → ترفع الحدثين
+                    #     (العام + المفهرس) كما كان تماماً — طريقة الجلب الأصلية
+                    #     لم تُمَس حرفياً.
+                    #   - رسالة بلا index = لقطة بث حي → تُحدّث الكاش فقط، ولا
+                    #     ترفع حدث الجلب ما دام طلب history لهذه العملة معلّقاً
+                    #     وحديثاً (سجل _history_pending يملؤه send_websocket_request
+                    #     عند رؤية أي history/load صادر).
                     index = message.get("index")
+                    pending = None
+                    try:
+                        pending = self.api._history_pending.get(asset)
+                    except Exception:
+                        pending = None
+                    pending_fresh = False
+                    if pending is not None:
+                        try:
+                            pending_fresh = (time.time() - float(pending[1])) < 15.0
+                        except Exception:
+                            pending_fresh = False
                     if index is not None:
+                        # رد history/load الحقيقي — نفس السلوك الأصلي كاملاً
+                        asyncio.run_coroutine_threadsafe(
+                            self.api.event_registry.set_event(f'candles_ready_{asset}', message),
+                            loop
+                        )
                         asyncio.run_coroutine_threadsafe(
                             self.api.event_registry.set_event(f'candles_ready_{asset}_{index}', message),
                             loop
                         )
+                        try:
+                            self.api._history_pending.pop(asset, None)
+                            self.api._history_reply_count += 1
+                        except Exception:
+                            pass
+                    elif not pending_fresh:
+                        # لقطة حية بلا أي طلب تاريخ معلّق — سلوك أصلي متوافق
+                        asyncio.run_coroutine_threadsafe(
+                            self.api.event_registry.set_event(f'candles_ready_{asset}', message),
+                            loop
+                        )
+                    else:
+                        # لقطة حية تحاول سرقة حدث جلب معلّق — تُسَقَط (الكاش تُحدّث أعلاه)
+                        try:
+                            self.api._history_stolen_suppressed += 1
+                        except Exception:
+                            pass
 
             if isinstance(message, dict) and (message.get("liveBalance") or message.get("demoBalance")):
                 self.api.account_balance = message
@@ -779,6 +824,14 @@ class QuotexAPI:
         self.event_registry = EventRegistry()
         self._async_loop: Optional[asyncio.AbstractEventLoop] = None
         self._temp_status = ""
+        # ===== v14.1: سجل طلبات history/load المعلّقة (توجيه رد الجلب الحقيقي) =====
+        # send_websocket_request يسجل هنا كل طلب history/load صادر:
+        #   asset -> (index, time_sent)
+        # وموجّه الرسائل يستخدمه لمنع لقطات البث الحي من سرقة حدث
+        # candles_ready_<asset> قبل وصول رد history/load الحقيقي.
+        self._history_pending: Dict[str, tuple] = {}
+        self._history_reply_count: int = 0
+        self._history_stolen_suppressed: int = 0
         # ===== STALE-WATCHDOG ADDITION =====
         # WS . watchdog
         # .
@@ -872,6 +925,20 @@ class QuotexAPI:
                 pass
         self.state.ssl_Mutual_exclusion_write = True
         try:
+            # ===== v14.1: سجّل أي طلب history/load صادر (توجيه رد الجلب الحقيقي) =====
+            # لا يغيّر الرسالة ولا طريقة الجلب بأي شكل — مجرد دفتر انتظار يقرؤه
+            # موجّه الرسائل لمنع لقطات البث من سرقة حدث candles_ready_<asset>.
+            if isinstance(data, str) and '"history/load"' in data:
+                try:
+                    _pl_start = data.find("{")
+                    _pl_end = data.rfind("}")
+                    if _pl_start >= 0 and _pl_end > _pl_start:
+                        _pl = json.loads(data[_pl_start:_pl_end + 1])
+                        if isinstance(_pl, dict) and _pl.get("asset"):
+                            self._history_pending[str(_pl["asset"])] = (
+                                _pl.get("index"), time.time())
+                except Exception:
+                    pass
             if self.websocket_client and self.websocket_client.wss:
                 self.websocket_client.wss.send(data)
         finally:
@@ -4502,6 +4569,13 @@ class MT4Writer:
             snap = self.load_snapshot(derived_symbol)
             if snap and len(snap) >= 2:
                 snap = sorted(snap, key=lambda x: x['time'])[-INITIAL_CANDLES:]
+                # v14.1: اللقطة نفسها قد تحمل فجوات (حُفظت في جلسة انقطع فيها
+                # البث) — سدّها بنفس الطريقة الأصلية قبل العرض حتى لا يعود
+                # الثغل من قاعدة البيانات إلى الشارت في كل إعادة تشغيل.
+                try:
+                    snap = _fill_missing_slots(snap, PERIOD_SECONDS, max_gap=1440)
+                except Exception:
+                    pass
                 # populate sync_state from the snapshot
                 self.sync_state[derived_symbol] = {
                     'period': period,
@@ -4575,6 +4649,30 @@ class MT4Writer:
                 pass  # — main fetch loop
             return False
 
+    def _scan_line_holes(self, candles: list, period_seconds: int,
+                         max_reasonable_gap_periods: int = 120) -> bool:
+        """فحص قرائي فقط: هل خط الشموع يحتوي فجوات زمنية حقيقية؟
+
+        v14.1 — يستعمله فرع علامة التجمد في fill_gap_once ليعرف إن كانت
+        الطريقة الأصلية مطلوبة فعلاً. الفجوة «حقيقية» إذا فرق الوقت بين شمعتين
+        متجاورتين أكثر من فترة واحدة وأقل من حد الإغلاق المعقول (120 فترة
+        = ساعتين للفريم الدقيقة — إغلاقات الأسواق الحقيقية أطول من ذلك
+        ولا تُعتبر فقداناً، نفس عتبة مدقق v14).
+        """
+        try:
+            if not candles or len(candles) < 2:
+                return False
+            period_s = max(1, int(period_seconds or PERIOD_SECONDS))
+            max_gap_s = period_s * int(max_reasonable_gap_periods)
+            line = sorted(candles, key=lambda c: int(c.get('time', 0)))
+            for a, b in zip(line, line[1:]):
+                gap = int(b.get('time', 0)) - int(a.get('time', 0))
+                if period_s < gap <= max_gap_s:
+                    return True
+            return False
+        except Exception:
+            return False
+
     async def fill_gap_once(self, client, asset_obj, period: int):
         """ GAP_FILL_CANDLES + .
 
@@ -4606,10 +4704,42 @@ class MT4Writer:
         # at all. This is the entire fix for the 'candles flicker' symptom -
         # the original algorithm is preserved 1:1, we only skip it after the
         # first successful run.
+        #
+        # ===== v14.1 FIX — «طريقة سد الثغرات صارت لا تعمل اطلاقاً» =====
+        # سبب التعطيل: علامة التجمد (gap_state.filled=1 في candles.db) تبقى
+        # مكتوبة للأبد بعد أول سد ناجح — حتى بعد إعادة تشغيل البرنامج — فكانت
+        # كل نداءات fill_gap_once لاحقاً (من الحلقة الشاملة mt4_gap_filler ومن
+        # مدقق الفقدان v14_gap_fill_for_asset) تخرج فوراً دون أي عمل، وأي فجوة
+        # جديدة (انقطاع بث، فجوة خادم، دفعة تمرير أقدم) تبقى بلا سد للأبد.
+        # الحل مع الحفاظ على الطريقة الأصلية حرفياً: عند وجود علامة تجمد نفحص
+        # خط الشموع الحالي — إن كانت سليمة بلا فجوات نخرج كما كان، وإن كانت
+        # فيها فجوات حقيقية نلغي التجمد وندع الخوارزمية الأصلية نفسها تنفذ
+        # (نفس الأصل: جلب GAP_FILL_CANDLES شمعة حديثة + دمج + _fill_missing_slots).
         try:
             is_filled, _last_at = self.candle_store.is_gap_filled(derived_symbol)
             if is_filled:
-                return    # frozen - keep candles exactly as they were
+                _hole_line = None
+                if asset_obj is not None and getattr(asset_obj, "candles", None):
+                    _hole_line = list(asset_obj.candles)
+                elif isinstance(self.sync_state.get(derived_symbol), dict) \
+                        and self.sync_state[derived_symbol].get("candles"):
+                    _hole_line = list(self.sync_state[derived_symbol]["candles"])
+                _holes_found = self._scan_line_holes(_hole_line, PERIOD_SECONDS)
+                if not _holes_found:
+                    return    # frozen - keep candles exactly as they were (original behaviour)
+                # فجوات حقيقية موجودة — ألغِ التجمد ودع الطريقة الأصلية تسدّها
+                try:
+                    self.candle_store.set_gap_filled(derived_symbol, False, time.time())
+                except Exception:
+                    pass
+                self._gap_filled[derived_symbol] = False
+                self._gap_filled_at[derived_symbol] = 0.0
+                try:
+                    logmsg(f"[gap:{derived_symbol}] freeze lifted — "
+                           f"{len(_hole_line or [])} candles scanned, holes found → "
+                           f"original fill_gap_once runs again")
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -4931,10 +5061,16 @@ async def qx_fetch_window_raw(api_symbol: str, end_time: int, seconds: int,
                    f"— retry {attempt + 1}/{max(1, int(retries) + 1)}")
             await asyncio.sleep(0.8)
         try:
-            _FETCH_GATE_CACHE[key] = (time.time(), raw)
-            if len(_FETCH_GATE_CACHE) > 96:
-                for _k in list(_FETCH_GATE_CACHE.keys())[:48]:
-                    _FETCH_GATE_CACHE.pop(_k, None)
+            # v14.1: لا نخزّن رداً None في الكاش — الرد الفاشل المُخزَّن كان
+            # يسمّم نفس نافذة التمرير للخلف لمدة TTL كاملة (كل إعادة طلب
+            # لنفس before_time كانت ترجع None فوراً من الكاش بدل الخادم).
+            if raw is not None:
+                _FETCH_GATE_CACHE[key] = (time.time(), raw)
+                if len(_FETCH_GATE_CACHE) > 96:
+                    for _k in list(_FETCH_GATE_CACHE.keys())[:48]:
+                        _FETCH_GATE_CACHE.pop(_k, None)
+            elif key in _FETCH_GATE_CACHE:
+                _FETCH_GATE_CACHE.pop(key, None)
         except Exception:
             pass
         return raw
@@ -5351,11 +5487,27 @@ async def fetch_older_batch(api_symbol: str, before_time=None, count: int = PAGI
     before_time = int(before_time)
     # v13.1: التمرير للخلف = طلب أمامي بأولوية عالية (يتقدم على التحميل المسبق
     # ولا يختلط معه بعد الآن — البوابة الواحدة + أولوية المستخدم)
-    res = await _fetch_candle_window(api_symbol, before_time,
-                                     count * PERIOD_SECONDS + PERIOD_SECONDS,
-                                     foreground=True)
-    candles = _format_raw_candles(res)
-    older = [c for c in candles if c['time'] < before_time][-count:]
+    # v14.1: تحقق وأعد المحاولة مرة واحدة — إن جاء الرد بلا شموع أقدم من
+    # before_time فالمرجح أن لقطة حية سرقت الحدث أو الرد مكسور؛ إعادة الطلب
+    # بنفس الطريقة الأصلية (نفس CLIENT.get_candles عبر البوابة) تعطي الفرصة
+    # للرد الحقيقي أن يصل.
+    older = []
+    candles = []
+    for _attempt in range(2):
+        res = await _fetch_candle_window(api_symbol, before_time,
+                                         count * PERIOD_SECONDS + PERIOD_SECONDS,
+                                         foreground=True)
+        candles = _format_raw_candles(res)
+        older = [c for c in candles if c['time'] < before_time][-count:]
+        if older:
+            break
+        # لا شموع أقدم في هذا الرد — سجّل وأعد المحاولة مرة واحدة قبل الاستسلام
+        if _attempt == 0:
+            got = len(candles)
+            logmsg(f"[older:{api_symbol}] attempt 1 got {got} candles but none older "
+                   f"than {time.strftime('%Y-%m-%d %H:%M', time.gmtime(before_time))} "
+                   f"— retrying once (stolen/broken response guard)")
+            await asyncio.sleep(0.6)
     if not older:
         logmsg(f"[older:{api_symbol}] server returned nothing older than "
                f"{time.strftime('%Y-%m-%d %H:%M', time.gmtime(before_time))} (history end?)")
@@ -5403,6 +5555,41 @@ PAGINATION_API = {
 # ════════════════════════════════════════════════════════════════════════════
 # ═══════════════════ QX SERVER v14 — STRENGTHENING LAYER (طبقة التقوية) ═════
 # ════════════════════════════════════════════════════════════════════════════
+#
+# ─────────────────────────────── v14.1 (2026-11-14) ──────────────────────────
+# إصلاح طلبات المستخدم الحرفية:
+#
+#   «الرجوع الى الخلف مزال لا يجلب الشموع ... كما تفعل المنصات الحديثة مثل
+#    تريدنغ فيو»
+#   «طريقة سد الثغرات يجب ان تاخذها من هذا الكود لانني رايت صارت لا تعمل
+#    اطلاقا»
+#
+# 1) سبب «التمرير للخلف لا يجلب شموعاً» — الجذر الحقيقي (توجيه رد الجلب):
+#    الحدث candles_ready_<asset> كان يُرفع لأي رسالة تحمل شموعاً لنفس
+#    العملة — بما فيها لقطات البث الحي (instruments/update) — فتسرق اللقطة
+#    الحية الحدث قبل وصول رد history/load الحقيقي، فيأخذ انتظار الجلب شموعاً
+#    حديثة لا تنفع التمرير للخلف (تُفلتر كلها لأنها ليست أقدم من before_time)
+#    فتظهر النتيجة فارغة دائماً. الحل (بروتوكول pyquotex نفسه): رد history/load
+#    الحقيقي يرد بـ«index» مطابق للطلب — موجّه الرسائل الآن يميّز الرد الحقيقي
+#    (يحمل index → يرفع الحدث كما كان) عن اللقطة الحية (بلا index → تحديث
+#    الكاش فقط وما دام طلب history معلّقاً). send_websocket_request يسجّل كل
+#    طلب history/load صادر في _history_pending — لا تغيير على طريقة الجلب
+#    نفسها ولا على الرسائل المرسلة.
+#
+# 2) fetch_older_batch: تحقق + إعادة محاولة واحدة عند رد بلا شموع أقدم
+#    (حماية إضافية من أي لقطة متسللة)، وكاش البوابة لا يخزّن رداً None
+#    بعد الآن (كان يسمّم نفس المرساة لمدة TTL).
+#
+# 3) سد الثغرات (الطريقة الأصلية حرفياً من الكود المرجعي):
+#    علامة التجمد الدائمة (gap_state.filled=1 في candles.db) كانت تمنع
+#    fill_gap_once من العمل للأبد بعد أول سد ناجح — حتى بعد إعادة التشغيل —
+#    فتبدو «لا تعمل اطلاقاً». الآن: عند وجود التجمد يُفحص خط الشموع — سليم
+#    → خروج كما كان (لا وميض)؛ فيه فجوات حقيقية → تُرفع التجمد وتنفذ
+#    الخوارزمية الأصلية نفسها (جلب GAP_FILL_CANDLES شمعة حديثة + دمج +
+#    _fill_missing_slots). ولقطة seed_history تُسدّ بنفس _fill_missing_slots
+#    قبل العرض حتى لا تعود الفجوات من قاعدة البيانات في كل إعادة تشغيل.
+#
+# ─────────────────────────────────────────────────────────────────────────────
 #
 # v14.0 (طلب المستخدم الحرفي):
 #
@@ -5503,7 +5690,7 @@ from typing import Optional as _v14_Optional
 from typing import Set as _v14_Set
 from typing import Tuple as _v14_Tuple
 
-_V14_VERSION = "14.0"
+_V14_VERSION = "14.1"
 _V14_STARTED_AT = time.time()
 
 
@@ -9428,7 +9615,7 @@ if __name__ == "__main__":
     # ════════════════════════════════════════════════════════════════════
     print()
     print(f"{Colors.CYAN}{'═' * 64}{Colors.RESET}")
-    print(f"{Colors.BOLD}  QX SERVER v14.0 — Chart-Driven Loading + Strengthened Server (طبقة تقوية){Colors.RESET}")
+    print(f"{Colors.BOLD}  QX SERVER v14.1 — Chart-Driven Loading + Strengthened Server (طبقة تقوية){Colors.RESET}")
     print(f"  {Colors.DIM}BRLUSD_otc: 300 شمعة فوراً بعد الدخول + الحالة ونسبة الدفع{Colors.RESET}")
     print(f"  {Colors.DIM}أي عملة أخرى: 300 شمعة تُجلب فقط عند فتح شارتها — واحدة تلو الأخرى{Colors.RESET}")
     print(f"  {Colors.DIM}التمرير للخلف: دفعة 300 شمعة أقدم في كل تمرير{Colors.RESET}")
