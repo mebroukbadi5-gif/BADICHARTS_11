@@ -2184,29 +2184,42 @@ function note(freq, at, dur, o) {
     osc.start(t); osc.stop(t + dur + 0.05);
   });
 }
-/* طلب المستخدم: صوت واحد فقط حتى لو كانت ألف إشارة — دفعة إشارات دفعة واحدة = نغمة واحدة،
-   فالمؤشر الذي يطلق على كل شمعة جديدة وعلى كل عملة لا يصدر 10 أصوات معًا ولا يُثقل المتصفح */
-let sndGateSig = 0, sndGateRes = 0;
-function sndAllow(kind, winMs) {
-  const n = Date.now();
-  if (kind === "sig") { if (n - sndGateSig < winMs) return false; sndGateSig = n; return true; }
-  if (n - sndGateRes < winMs) return false; sndGateRes = n; return true;
+/* طلب المستخدم: صوت واحد في كل لحظة — لا تداخل أبدًا بين نغمتين (نجاح وخسارة معًا مثلاً).
+   المجدول يحجز مدة السماعة لكل نغمة: النغمة التالية تبدأ بعد انتهاء الحالية مباشرة (تسلسل بلا تصادم)،
+   ودفعة إشارات متقاربة (600 مللي ثانية) = نغمة واحدة فقط، والطابور الأبعد من 4 ثوانٍ يُهمَل بدل التكديس */
+let sndBusyUntil = 0, sndLastSigAt = 0;
+function sndSlot(dur) {
+  const c = audioCtx(); if (!c) return -1;
+  const now = c.currentTime;
+  const at = Math.max(0, sndBusyUntil - now);
+  if (at > 4) return -1;                    /* الطابور أطول من 4 ثوانٍ — أهمِل النغمة الجديدة بدل التصادم */
+  sndBusyUntil = now + at + dur;
+  return at;
 }
+/* فك قفل الصوت من أول لمسة للمستخدم (سياسة المتصفحات) — مثل ملف المستخدم التجريبي */
+document.addEventListener("pointerdown", function () { try { audioCtx(); } catch (e) {} }, { once: true });
 /* New signal: BUY = rising two-note chime, SELL = falling two-note chime */
 function playSignal(type) {
-  if (!soundOn || !sndAllow("sig", 2500)) return;
-  if (type === "buy") { note(659.25, 0, .35); note(987.77, .11, .6); }
-  else { note(987.77, 0, .35); note(659.25, .11, .6); }
+  if (!soundOn) return;
+  const n = Date.now();
+  if (n - sndLastSigAt < 600) return;       /* دفعة إشارات دفعة واحدة = نغمة واحدة (طلب المستخدم) */
+  sndLastSigAt = n;
+  const at = sndSlot(0.85);
+  if (at < 0) return;
+  if (type === "buy") { note(659.25, at, .35); note(987.77, at + .11, .6); }
+  else { note(987.77, at, .35); note(659.25, at + .11, .6); }
 }
 /* Result: WIN = bright rising arpeggio, LOSS = low soft falling tone */
 function playResult(r) {
-  if (!soundOn || !sndAllow("res", 1600)) return;
+  if (!soundOn) return;
+  const at = sndSlot(r === "win" ? 1.2 : 0.95);
+  if (at < 0) return;
   if (r === "win") {
-    [523.25, 659.25, 783.99].forEach((f, i) => note(f, i * .09, .35, { vol: .17 }));
-    note(1046.5, .27, .9, { vol: .2 });
+    [523.25, 659.25, 783.99].forEach((f, i) => note(f, at + i * .09, .35, { vol: .17 }));
+    note(1046.5, at + .27, .9, { vol: .2 });
   } else {
-    note(196.00, 0, .45, { type: "triangle", vol: .26, lp: 900, over: [[2, .12]] });
-    note(146.83, .17, .75, { type: "triangle", vol: .26, lp: 800, over: [[2, .1]] });
+    note(196.00, at, .45, { type: "triangle", vol: .26, lp: 900, over: [[2, .12]] });
+    note(146.83, at + .17, .75, { type: "triangle", vol: .26, lp: 800, over: [[2, .1]] });
   }
 }
 function renderSigSound() {
