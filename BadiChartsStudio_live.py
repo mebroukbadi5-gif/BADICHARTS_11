@@ -6374,8 +6374,8 @@ class Backend(QObject):
     #  دخول حقيقي، BRLUSD_otc فوراً (300 شمعة)، بقية العملات واحدة تلو الأخرى،
     #  بث حي لكل عملة فُتح شارتها، ودفعات 300 شمعة عند التمرير للوراء.
     # ═════════════════════════════════════════════════════════════════════
-    _QX_FEED_CAP = 8000          # حد الشموع في ذاكرة الواجهة (v14.3: كان 3000 — يسمع حتى 30 يوم من فريمات أعلى)
-    _QX_FEED_TRIM = 7600         # القص عند التجاوز (نفس سلوك الجسر في الصفحة)
+    _QX_FEED_CAP = 45000         # حد الشموع في ذاكرة الواجهة (v14.6: يسمع حتى 30 يوم من فريم الدقيقة نفسه — 43200 شمعة)
+    _QX_FEED_TRIM = 44000        # القص عند التجاوز (نفس سلوك الجسر في الصفحة)
 
     def _emit_qx(self, obj):
         """بث حدث خادم QML (الدخول / لوحة العملات / دفعات التمرير)."""
@@ -6675,8 +6675,14 @@ class Backend(QObject):
             # دمج الدفعة في ذاكرة المحرك نفسها (نفس دمج fetch_older_batch الأصلية)
             if tf_sec == 60 and eng_all:
                 try:
+                    # v14.6: حماية الشمعة الحية — نفس حماية fill_gap_once الأصلية
+                    # في الكود المرجعي (t >= current_period_start → لا تُلمس):
+                    # دفعة التاريخ لا تعيد الشمعة الحية المتشكلة من البث إلى الخلف
+                    # (كان هذا يُظهر الشموع وكأنها تقفز أثناء وصول الدفعات)
+                    cur_start = qx._align_time(int(time.time()))
                     t_lo, t_hi = chunk[0]["t"], chunk[-1]["t"]
-                    eng_chunk = [c for c in eng_all if t_lo <= c["time"] <= t_hi]
+                    eng_chunk = [c for c in eng_all
+                                 if t_lo <= c["time"] <= t_hi and c["time"] < cur_start]
                     asset = qx._get_or_create_asset(api)
                     merged = list(eng_chunk) + list(asset.candles or [])
                     seen, unique = set(), []
@@ -6713,6 +6719,24 @@ class Backend(QObject):
             time.sleep(0.12)
         return n_pushed
 
+    @staticmethod
+    def _qx_gap_holes(candles, period_seconds):
+        """عدد الثغرات الحقيقية في خط الشموع: فترات زمنية بلا أي شمعة (حتى
+        الشموع المسطحة المملوءة تُحسب شموعاً). تُستخدم للتحقق أن آلة السد
+        فعلت شيئاً فعلاً قبل/بعد كل محاولة."""
+        try:
+            if not candles or len(candles) < 2 or period_seconds <= 0:
+                return 0
+            ts = sorted({int(c["time"]) for c in candles})
+            holes = 0
+            for i in range(1, len(ts)):
+                g = (ts[i] - ts[i - 1]) // period_seconds
+                if g > 1:
+                    holes += int(g) - 1
+            return holes
+        except Exception:
+            return 0
+
     def _qx_seal_gaps(self, api):
         """سد ثغرات العملة — الآلة الأصلية حرفياً من qx_server_v10.py
         (MT4_WRITER.fill_gap_once كما هي، نفس نداء mt4_gap_filler الأصلي).
@@ -6720,10 +6744,13 @@ class Backend(QObject):
         لماذا لم تكن تعمل مع كل العملات؟ علامة التجمّد المحفوظة
         (gap_state.filled=1 في candles.db) كانت تجعل الآلة تعود فوراً بلا سد
         لأي عملة جمّدتها جلسة سابقة — فتبقى مثقوبة. هنا تُرفع العلامة عن هذه
-        العملة وحدها ثم تُنفَّذ الخوارزمية الأصلية نفسها كما هي (سد أقل من
-        ثانية: جلب آخر 10 شموع حقيقية واستبدال الناقص منها). وبعد السد يُعاد
-        الخطر الكامل للذاكرة حتى لا يقص السد التاريخ المجلوب (v10 كان يحتفظ
-        بآخر 1000 شمعة فقط — v14 يحتفظ بكل دفعات التاريخ)."""
+        العملة وحدها **بكل أشكال الرمز الممكنة** (v14.6: الرمز كان مخزّناً
+        بصيغة مختلفة عن الصيغتين المطلوبتين فلا تُرفع العلامة ولا يحدث سد —
+        سبب «بعضها لا تسد ثغرات»)، ثم تُنفَّذ الخوارزمية الأصلية نفسها كما هي
+        (سد أقل من ثانية: جلب آخر 10 شموع حقيقية واستبدال الناقص منها) مع
+        إعادة محاولة تحققية حتى 3 مرات حتى تصبح الخط بلا ثغرات فعلية. وبعد
+        السد يُعاد الخطر الكامل للذاكرة حتى لا يقص السد التاريخ المجلوب
+        (v10 كان يحتفظ بآخر 1000 شمعة فقط — v14 يحتفظ بكل دفعات التاريخ)."""
         qx = _qx_module()
         if not qx or getattr(qx, "CLIENT", None) is None:
             return
@@ -6731,26 +6758,55 @@ class Backend(QObject):
             asset = qx._get_or_create_asset(api)
         except Exception:
             return
-        try:
-            variants = [api]
-            if getattr(asset, "symbol", ""):
-                variants.append(asset.symbol)
-            qx.clear_gap_flag_any(variants)
+        period_seconds = int(getattr(qx, "PERIOD_SECONDS", 60) or 60)
+
+        # كل أشكال الرمز الممكنة (v14.6): صيغ الـ db قد تختلف عن رمز الذاكرة
+        variants = set()
+        for s in (api, getattr(asset, "symbol", ""), getattr(asset, "api_symbol", "")):
+            s = str(s or "").strip()
+            if not s:
+                continue
+            for v in (s, s.upper(), s.lower(),
+                      s.replace("_", "-"), s.replace("-", "_"),
+                      s.upper().replace("_", "-"), s.upper().replace("-", "_"),
+                      s.lower().replace("_", "-"), s.lower().replace("-", "_")):
+                variants.add(v)
+
+        def _clear_freeze():
             try:
-                qx.MT4_WRITER._gap_filled[asset.symbol] = False
+                qx.clear_gap_flag_any(list(variants))
             except Exception:
                 pass
-        except Exception:
-            pass
+            for sym in {str(getattr(asset, "symbol", "") or api)}:
+                try:
+                    qx.MT4_WRITER._gap_filled[sym] = False
+                except Exception:
+                    pass
+                try:
+                    qx.MT4_WRITER._gap_filled_at.pop(sym, None)
+                except Exception:
+                    pass
+
         full_before = list(asset.candles or [])
-        try:
-            fut = asyncio.run_coroutine_threadsafe(
-                qx.MT4_WRITER.fill_gap_once(qx.CLIENT, asset,
-                                            int(getattr(qx, "PERIOD", 1))),
-                qx.ASYNC_LOOP)
-            fut.result(timeout=30)
-        except Exception:
-            return
+        holes_before = self._qx_gap_holes(full_before, period_seconds)
+        # v14.6: حتى 3 محاولات تحققية — الأصلية نفسها بلا أي تغيير، فقط نتحقق
+        # بعد كل محاولة أن الثغرات انخفضت فعلاً (إذا فشل جلب الرد مرة واحدة
+        # بسبب ضغط البث لا تبقى العملة مثقوبة للأبد)
+        for _attempt in range(3):
+            _clear_freeze()
+            try:
+                fut = asyncio.run_coroutine_threadsafe(
+                    qx.MT4_WRITER.fill_gap_once(qx.CLIENT, asset,
+                                                int(getattr(qx, "PERIOD", 1))),
+                    qx.ASYNC_LOOP)
+                fut.result(timeout=30)
+            except Exception:
+                break
+            holes_after = self._qx_gap_holes(list(asset.candles or []), period_seconds)
+            if holes_after == 0 or holes_after >= holes_before:
+                # سُدّت كل الثغرات، أو المحاولة لم تحسّن شيئاً (لا تكرر بلا فائدة)
+                break
+            holes_before = holes_after
         # إعادة الخط الكامل: شموع الآلة المُصلحة تحل محل المطابق زمنياً فقط —
         # لا فقدان لأي شمعة من دفعات التاريخ (طلب المستخدم: لا نريد فقدان الشموع)
         try:
@@ -6817,80 +6873,65 @@ class Backend(QObject):
             except Exception:
                 horizon = 0
             pushed_t = set()
-            # ═══ طلب واحد بمدى الأيام كاملاً — نفس طريقة الجلب الأصلية ═══
-            end = int(time.time())
+            # ═══ v14.6 (طلب المستخدم حرفياً: «انضر الى هذا الكود لا توجد فيه
+            #     تلك المشاكل»): طريقة الجلب نفسها من الكود المرجعي حرفياً —
+            #     CLIENT.get_historical_candles (5 عمال × مرساة متحركة × دفعة
+            #     ~200 شمعة كل 0.1 ثانية) وهي نفسها التي تجلب 1000 شمعة في ثوانٍ
+            #     ومئات آلاف الشموع. طلب واحد بمدى الأيام كاملاً ولا طلب 300
+            #     شمعة بمرساة ثابتة تعيد نفس الدفعة الأولى. ═══
+            import queue as _bq
+            batch_q = _bq.Queue()
+
+            def _on_batch(batch, worker_id):
+                """مرصد الدفعات (يعمل داخل حلقة الخادم — لا يبطئه أبداً):
+                يسلم كل دفعة فور وصولها إلى عاملي السلسلة عبر طابور خفيف."""
+                try:
+                    if batch:
+                        batch_q.put(list(batch))
+                except Exception:
+                    pass
+
             fut = asyncio.run_coroutine_threadsafe(
-                qx.qx_fetch_window_raw(api, end, target + tf_sec, tf_sec,
-                                       foreground=True, timeout=60.0, retries=1),
+                qx.CLIENT.get_historical_candles(
+                    api, amount_of_seconds=target, period=tf_sec,
+                    max_workers=5, batch_callback=_on_batch),
                 qx.ASYNC_LOOP)
-            res = fut.result(timeout=90)
-            if _stale():
-                return
-            if res:
-                total_pushed += self._qx_chain_push_message(
-                    api, tf_label, tf_sec, res, horizon, pushed_t, _viewing)
-            # ═══ بقية دفعات الخادم لنفس الطلب — كل دفعة تصل تُرفع فوراً ═══
-            try:
-                er = qx.CLIENT.api.event_registry
-                quiet_until = time.time() + 2.5
-                hard_until = time.time() + 15.0
-                while time.time() < hard_until and time.time() < quiet_until:
-                    if _stale():
-                        return
-                    f2 = asyncio.run_coroutine_threadsafe(
-                        er.wait_event(f"candles_ready_{api}", timeout=2.0),
-                        qx.ASYNC_LOOP)
-                    msg = f2.result(timeout=4.0)
-                    if not msg:
+            # ═══ كل دفعة تصل تُعالج وتُرفع إلى الشارت فوراً — لا انتظار انتهاء
+            #     الجلب كله (طلب المستخدم: اي دفعة جلبها يرفعها الى الشارت) ═══
+            while True:
+                if _stale():
+                    try:
+                        fut.cancel()
+                    except Exception:
+                        pass
+                    return
+                try:
+                    batch = batch_q.get(timeout=0.2)
+                except Exception:
+                    if fut.done():
                         break
-                    raw = []
-                    if isinstance(msg, dict):
-                        raw = (msg.get("candles") or msg.get("data")
-                               or msg.get("history") or [])
-                    if raw:
-                        n_new = self._qx_chain_push_message(
-                            api, tf_label, tf_sec, raw, horizon, pushed_t, _viewing)
-                        if n_new > 0:
-                            total_pushed += n_new
-                            quiet_until = time.time() + 2.5
-                    else:
-                        time.sleep(0.15)
+                    continue
+                n = self._qx_chain_push_message(
+                    api, tf_label, tf_sec, batch, horizon, pushed_t, _viewing)
+                if n > 0:
+                    total_pushed += n
+            try:
+                res = fut.result(timeout=180)
             except Exception:
-                pass
-            # ═══ تكملة المدى إن قصّ الخادم الرد الأول — نفس طريقة الجلب الأصلية
-            #     بنافذة زمنية متبقية (وليس 300 شمعة ثابتة التي كانت تعيد نفس
-            #     الدفعة الأولى). التكرار مستحيل: كل شمعة تُرفع مرة واحدة فقط
-            #     (pushed_t) والصفحة ترفض أي شمعة ليست أقدم من رأس الشارت. ═══
-            steps = 0
-            while steps < 6 and not _stale():
-                try:
-                    cur_oldest = min(pushed_t) if pushed_t else (
-                        horizon if horizon > 0 else int(time.time()))
-                except Exception:
-                    break
-                covered = int(time.time()) - int(cur_oldest)
-                if covered >= target:
-                    break                      # بلوغ عدد الأيام المضبوط — توقف
-                remaining = target - covered
-                try:
-                    fut3 = asyncio.run_coroutine_threadsafe(
-                        qx.qx_fetch_window_raw(api, cur_oldest, remaining + tf_sec,
-                                               tf_sec, foreground=True,
-                                               timeout=60.0, retries=1),
-                        qx.ASYNC_LOOP)
-                    res3 = fut3.result(timeout=90)
-                except Exception:
-                    break
-                if not res3:
-                    break                      # نهاية تاريخ الخادم لهذه العملة
-                n3 = self._qx_chain_push_message(
-                    api, tf_label, tf_sec, res3, horizon, pushed_t, _viewing)
-                if n3 <= 0:
-                    break                      # لا جديد فعلاً — لا تكرر نفس المرساة
-                total_pushed += n3
-                steps += 1
+                res = None
             if _stale():
                 return
+            # ═══ صافي الأمان: أي دفعة أفلتت من الرفع الحي تُرفع من النتيجة
+            #     الكاملة (pushed_t يمنع التكرار — كل شمعة تُرفع مرة واحدة فقط) ═══
+            if res:
+                n = self._qx_chain_push_message(
+                    api, tf_label, tf_sec, res, horizon, pushed_t, _viewing)
+                if n > 0:
+                    total_pushed += n
+            # ═══ الدمج النهائي لذاكرة الخادم (نفس دلالات الكود المرجعي:
+            #     _fill_missing_slots يسد فجوات حتى يوم كامل) دون لمس الشمعة الحية ═══
+            if tf_sec == 60:
+                self._qx_chain_final_merge(qx, api)
             # ═══ سد الثغرات — الآلة الأصلية حرفياً من v10، لكل عملة تُفتح دون استثناء ═══
             if tf_sec == 60:
                 self._qx_seal_gaps(api)
@@ -6899,6 +6940,20 @@ class Backend(QObject):
             if total_pushed:
                 self._log("ok", f"history: +{total_pushed} candles ({days} days) — "
                                 f"{self._asset if _viewing() else api} {tf_label}")
+            # v14.6: إصلاحات سد الثغرات ودمج الدفعات تصل إلى الشارت في مكانها عبر
+            # patchCandles (بلا setData وبلا إعادة ضبط) — الزوم والموضع يبقيان حرين.
+            # غذاء الواجهة يُنسّق أولاً من ذاكرة الخادم نفسها حتى تصل إصلاحات
+            # السد الداخلية إلى الصفحة وليس إصلاحات الذيل فقط.
+            if _viewing():
+                if tf_sec == 60:
+                    try:
+                        eng = self._qx_engine_candles(api)
+                        if eng:
+                            self._candles = eng[-self._QX_FEED_CAP:]
+                            self._qx_last_sig = None   # المضخة تدفع الغذاء المُصلَح فوراً
+                    except Exception:
+                        pass
+                self._qx_resync_pending = True
         except Exception as e:
             self._log("err", f"history chain {tf_label}: " + str(e)[:120])
         finally:
@@ -6913,6 +6968,37 @@ class Backend(QObject):
                 self._qx_chain_set_active(still_active)
             except Exception:
                 self._qx_chain_set_active(False)
+
+    def _qx_chain_final_merge(self, qx, api):
+        """v14.6: دمج نهائي واحد لذاكرة الخادم بعد اكتمال دفعات التاريخ.
+        نفس دلالات الكود المرجعي: شموع حقيقية + _fill_missing_slots (سقف يوم
+        كامل كما في fill_gap_once الأصلية) — لكن الشمعة الحية المتشكلة من البث
+        لا تُلمس أبداً (نفس حماية fill_gap_once الأصلية: t >= current_period_start)."""
+        try:
+            asset = qx._get_or_create_asset(api)
+        except Exception:
+            return
+        try:
+            merged = list(asset.candles or [])
+            if not merged:
+                return
+            seen, unique = set(), []
+            for c in sorted(merged, key=lambda x: x["time"]):
+                if c["time"] not in seen:
+                    seen.add(c["time"])
+                    unique.append(c)
+            cur_start = qx._align_time(int(time.time()))
+            # حماية الشمعة الحية: إن كان البث الحي يشكّل شمعة الآن تبقى نسخته هي
+            # المرجع — الدفعات لا تعيدها للخلف (هذا سبب «الشموع تقفز» سابقاً)
+            live_map = {c["time"]: c for c in (asset.candles or [])
+                        if c["time"] >= cur_start}
+            if live_map:
+                unique = [live_map.get(c["time"], c) if c["time"] >= cur_start else c
+                          for c in unique]
+            unique = unique[-int(getattr(qx, "ASSET_MAX_CANDLES", 45000)):]
+            qx._apply_candles_to_asset(asset, unique)
+        except Exception:
+            pass
 
     def _qx_tail_repaired(self, engine):
         """v14.3: كشف إصلاحات آلة سد الثغرات داخل منطقة الذيل (آخر 40 شمعة).
@@ -9226,8 +9312,9 @@ function defineBadiApp() {
             /* أثناء التمرير للخلف: ولادة شمعة جديدة لا تُزيح العرض — يبقى ثابتاً
                مثل المنصات الاحترافية (وليس اتباع الشمعة الحية) */
             try { if (pr.chart && pr.chart.rightOffset < 0) pr.chart.rightOffset -= 1; } catch (e) {}
-            if (pr.dataArr.length > 8000) {
-              var excess = pr.dataArr.length - 7600;
+            /* v14.6: السقف يوازن ذاكرة الواجهة البايثونية — لا فقدان شموع حتى 30 يوم M1 */
+            if (pr.dataArr.length > 45000) {
+              var excess = pr.dataArr.length - 44000;
               pr.dataArr.splice(0, excess);
               try { if (pr.chart && pr.chart.sim && pr.chart.sim.candles) pr.chart.sim.candles.splice(0, excess); } catch (e) {}
             }
@@ -9258,8 +9345,9 @@ function defineBadiApp() {
             pr.dataArr.push(k);
             /* أثناء التمرير للخلف: ولادة شمعة جديدة لا تُزيح العرض */
             try { if (ch && ch.rightOffset < 0) ch.rightOffset -= 1; } catch (e) {}
-            if (pr.dataArr.length > 8000) {
-              var excess = pr.dataArr.length - 7600;
+            /* v14.6: السقف يوازن ذاكرة الواجهة البايثونية — لا فقدان شموع حتى 30 يوم M1 */
+            if (pr.dataArr.length > 45000) {
+              var excess = pr.dataArr.length - 44000;
               pr.dataArr.splice(0, excess);
               try { if (ch && ch.sim && ch.sim.candles) ch.sim.candles.splice(0, excess); } catch (e) {}
             }
@@ -10288,6 +10376,11 @@ ApplicationWindow {
                    الثغرات يُدمج في الشارت في مكانه — تحديث الشموع بالوقت وإضافة
                    الناقص بلا setData وبلا أي إعادة ضبط — الزوم والموضع يبقان
                    حرين تماماً كما هما */
+                /* v14.6: مزامنة العدّاد بعد الدمج — أي نبضة candlesChanged تالية
+                   ترى الفرق صفراً فلا تُعيد ضبط الشارت أبداً (syncFull محظورة) */
+                win.lastLen = backend.candlesCount
+                win.lastAsset = backend.assetLabel
+                win.lastTf = backend.tfLabel
                 win.webCall("__badiApp.patchCandles(" + backend.candlesJson + ")")
                 return
             }
