@@ -350,6 +350,10 @@ svg{vertical-align:middle;flex-shrink:0}
 .amdot{display:inline-block;width:6px;height:6px;border-radius:50%;flex-shrink:0}
 .amdot.open{background:var(--ok)}
 .amdot.closed{background:var(--err)}
+/* علامة × الصغيرة داخل بطاقة العملة — إزالة العملة من الشريط مباشرة من البطاقة نفسها (طلب المستخدم) */
+.achip .adel{display:grid;width:15px;height:15px;place-items:center;border-radius:4px;color:var(--t-dim2);flex-shrink:0;transition:.15s}
+.achip .adel:hover{color:var(--err);background:rgba(248,113,113,.16)}
+.achip .adel svg{display:block;width:8px;height:8px}
 .aflag{display:block;width:16px;height:11px;border-radius:2px}
 .aempty{font-size:10.5px;color:var(--t-dim2);white-space:nowrap}
 
@@ -2049,8 +2053,8 @@ function closeEditor() {
   window.dispatchEvent(new Event("resize"));
 }
 
-/* ═════ Currency strip: chips = flag + name + payout only — add/remove from the + menu
-   (no delete icon next to the currencies — user request) ═════ */
+/* ═════ Currency strip: chips = flag + name + payout + market dot + a SMALL × ON the card
+   to remove that currency from the strip (the × back on the card itself — user request) ═════ */
 var BOARD = [];
 var ADDED = null;          /* embedded mode: the desktop app is the source of truth */
 const ASSETS_KEY = "badiAssetsV1";
@@ -2109,19 +2113,23 @@ function renderAssets() {
   const box = $("assetChips");
   if (!box) return;
   const cur = curAssetLabel();
-  /* شريحة العملة بلا أيقونة حذف — الحذف والإضافة من قائمة + فقط (طلب المستخدم) */
+  /* بطاقة العملة تنتهي بعلامة × الصغيرة: النقر عليها يزيل العملة من الشريط فورًا —
+     والنقر على باقي البطاقة يفتح شارتها (طلب المستخدم: إعادة × إلى البطاقة نفسها) */
   box.innerHTML = addedNames().map((n) => {
     const it = BOARD.filter((x) => x.name === n)[0];
     if (!it) return "";
     const ar = window.__BADI_LANG__ === "ar";
     const open = (typeof badiMarketOpen === "function") ? badiMarketOpen(it.name) : true;
     const stT = ar ? (open ? "السوق مفتوح" : "السوق مغلوق") : (open ? "Market open" : "Market closed");
+    const delT = ar ? "إزالة " + it.name + " من الشريط" : "Remove " + it.name + " from the strip";
     return '<span class="achip' + (it.name === cur ? " on" : "") + '" data-asset="' + esc(it.name) +
       '" title="' + esc(it.name) + ' — open this chart">'
       + (it.flag ? '<img class="aflag" src="' + it.flag + '" alt="">': "")
       + "<b>" + esc(it.name) + "</b>"
       + '<i class="apay">' + Number(it.payout || 0) + "%</i>"
-      + '<i class="amdot ' + (open ? "open" : "closed") + '" title="' + stT + '"></i></span>';
+      + '<i class="amdot ' + (open ? "open" : "closed") + '" title="' + stT + '"></i>'
+      + '<i class="adel" data-del="' + esc(it.name) + '" title="' + esc(delT) + '">'
+      + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></i></span>';
   }).join("") || '<span class="aempty">No currencies — add them from the + menu</span>';
 }
 window.__badiRenderAssets = renderAssets;   /* the desktop bridge refreshes it on setMarket */
@@ -2411,6 +2419,9 @@ function bindEvents() {
   $("badiImp").addEventListener("click", function () { encSend("badi-import"); });
   $("badiImpEmpty").addEventListener("click", function () { encSend("badi-import"); });
   $("assetChips").addEventListener("click", function (e) {
+    /* علامة × داخل البطاقة = إزالة العملة من الشريط فقط ولا تفتح الشارت (طلب المستخدم) */
+    const d = e.target.closest("[data-del]");
+    if (d) { toggleAsset(d.dataset.del); return; }
     const c = e.target.closest("[data-asset]");
     if (c) openAssetChart(c.dataset.asset);
   });
