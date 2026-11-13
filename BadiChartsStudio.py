@@ -128,6 +128,8 @@ svg{vertical-align:middle;flex-shrink:0}
 .pane-pay{font-size:9.5px;font-weight:800;color:var(--ok);flex-shrink:0}
 .pane-cv{position:relative;flex:1;min-height:0}
 .pane-cv canvas{position:absolute;inset:0;display:block;width:100%;height:100%}
+/* المؤقت التنازلي بجانب الشمعة الحية — رقمان فقط بلا إطار أو خلفية (طلب المستخدم) */
+.cdigit{position:absolute;left:0;top:0;font:800 13px/1 -apple-system,"Segoe UI",Roboto,sans-serif;font-variant-numeric:tabular-nums;direction:ltr;pointer-events:none;white-space:nowrap;text-shadow:0 1px 3px rgba(0,0,0,.4);transform:translateY(-50%);z-index:3}
 #libLoading{position:absolute;inset:0;display:grid;place-items:center;background:var(--bg);z-index:5}
 .loadbox{display:flex;flex-direction:column;align-items:center;gap:12px}
 .spin{height:32px;width:32px;border-radius:9999px;border:2px solid var(--border2);border-top-color:var(--accent-h);animation:spin 1s linear infinite}
@@ -178,6 +180,7 @@ svg{vertical-align:middle;flex-shrink:0}
 .sigcard.pop{animation:sigpop .9s ease-out}
 @keyframes sigpop{0%{box-shadow:0 0 0 0 var(--scbg)}100%{box-shadow:0 0 0 14px transparent}}
 @media (prefers-reduced-motion:reduce){.sigcard.pop{animation:none}}
+.sig-top{display:flex;direction:ltr;align-items:center;justify-content:space-between;gap:8px;margin:0 0 1px}
 .sig-badge{display:inline-flex;align-items:center;gap:5px;background:var(--sc);color:#04100A;font-weight:800;font-size:10.5px;padding:3px 9px;border-radius:999px;letter-spacing:.4px}
 .sigcard.sell .sig-badge{color:#1b0407}
 .sig-badge svg{width:11px;height:11px}
@@ -1645,7 +1648,7 @@ function addPane() {
   el.className = "pane";
   el.dataset.pane = i;
   el.title = "Open this chart — click to select it";
-  el.innerHTML = '<div class="pane-head"></div><div class="pane-cv"><canvas></canvas></div>';
+  el.innerHTML = '<div class="pane-head"></div><div class="pane-cv"><canvas></canvas><div class="cdigit" dir="ltr" hidden></div></div>';
   $("gridHost").appendChild(el);
   const cv = el.querySelector("canvas");
   const cfg = assetCfg(name);
@@ -1654,7 +1657,7 @@ function addPane() {
     timeframe: { label: "1m", ms: tfMs("1m") },
     theme: window.__BADI_CHART_THEME__ || { drawing: "#38bdf8", drawingActive: "#7dd3fc" }
   });
-  const p = { el: el, head: el.querySelector(".pane-head"), cv: cv, chart: chart, asset: name, tf: "1m", dataArr: [], tick: 0 };
+  const p = { el: el, head: el.querySelector(".pane-head"), cv: cv, chart: chart, asset: name, tf: "1m", dataArr: [], tick: 0, cd: el.querySelector(".cdigit") };
   setupChart(chart, p);
   chart.start();
   p.dataArr = generateCandles(cfg, p.tf, 620);
@@ -1779,7 +1782,64 @@ function liveTick() {
     }
   }
   sigLocalResolve();
+  sigExpireSweep();
 }
+
+/* ═══ انتهاء بطاقة الإشارة مع انتهاء شمعة الفريم (طلب المستخدم) ═══
+   البطاقة الجارية تختفي من قائمة الإشارات بمجرد انقضاء مدتها —
+   والنتيجة (WIN/LOSS) تُسجَّل في تبويب السجل عند وصولها من المحرك. */
+function sigExpireSweep() {
+  let changed = false;
+  const now = Date.now();
+  for (const g of SIGS) {
+    if (!g.result && !g.expired && g.durSec > 0 && now - g.at >= g.durSec * 1000) { g.expired = true; changed = true; }
+  }
+  if (changed) renderSignals();
+}
+
+/* ═══ المؤقت التنازلي بجانب الشمعة الحية (طلب المستخدم) ═══
+   رقمان فقط — الثواني المتبقية لإغلاق الشمعة الحالية (أقصاه 99) —
+   بلا إطار ولا خلفية، بإزاحة صغيرة عن الشمعة (ليس ملتصقًا بها)،
+   وبلون اتجاه الشمعة نفسه، ويتبع الشمعة عند التحريك والتكبير. */
+function padCd(n) { n = Math.max(0, Math.min(99, Math.ceil(n))); return (n < 10 ? "0" : "") + n; }
+function cdFrame() {
+  const nowS = Date.now() / 1000;
+  const th = window.__BADI_CHART_THEME__ || {};
+  const bull = th.bull || "#22E08A", bear = th.bear || "#FF4D5E";
+  for (let i = 0; i < panes.length; i++) {
+    const p = panes[i];
+    const cd = p.cd;
+    if (!cd) continue;
+    try {
+      const ch = p.chart;
+      /* نقرأ الشموع المرسومة فعلاً على الشارت (sim) — لا dataArr — حتى يجاور
+         الرقم الشمعة الحية الحقيقية في كل الأوضاع (محرك / محاكاة) */
+      const sim = ch && ch.sim && ch.sim.candles ? ch.sim.candles : null;
+      const last = sim && sim.length ? sim[sim.length - 1] : null;
+      if (!last || !ch || typeof ch.indexToX !== "function" || typeof ch.priceToY !== "function") { if (!cd.hidden) cd.hidden = true; continue; }
+      const n = sim.length;
+      const tS = last.time > 1e11 ? last.time / 1000 : last.time;
+      let rem = tS + tfMs(p.tf) / 1000 - nowS;
+      if (rem < 0) rem = 0;
+      const gap = Math.max(9, Math.min(20, (ch.barSpacing || 8) * 0.8));
+      let x = ch.indexToX(n - 1) + gap;
+      const cr = ch.chartRight || 0;
+      if (cr && x > cr - 24) x = cr - 24;   /* يبقى الرقم داخل مساحة الرسم بجانب محور السعر */
+      const y = ch.priceToY(last.close);
+      const ok = isFinite(x) && isFinite(y) && x > (ch.chartLeft || 0) + 4 && y > 8 && y < (ch.chartBottom || 1e9) - 8;
+      if (!ok) { if (!cd.hidden) cd.hidden = true; continue; }
+      const txt = padCd(rem), col = last.close >= last.open ? bull : bear;
+      if (cd.textContent !== txt) cd.textContent = txt;
+      const lx = Math.round(x) + "px", ly = Math.round(y) + "px";
+      if (cd.style.left !== lx) cd.style.left = lx;
+      if (cd.style.top !== ly) cd.style.top = ly;
+      if (cd.style.color !== col) cd.style.color = col;
+      if (cd.hidden) cd.hidden = false;
+    } catch (e) { if (!cd.hidden) cd.hidden = true; }
+  }
+  requestAnimationFrame(cdFrame);
+}
+requestAnimationFrame(cdFrame);
 
 function showLibError(msg) {
   const box = $("libLoading");
@@ -2089,19 +2149,32 @@ function setSigTab(tab) {
 /* تسميات التبويبين بعدد كل قسم — عربية/إنجليزية حسب لغة التطبيق */
 function updateSigTabs() {
   const ar = window.__BADI_LANG__ === "ar";
-  let pend = 0;
-  for (const g of SIGS) if (!g.result) pend++;
-  const done = SIGS.length - pend;
+  let pend = 0, done = 0;
+  for (const g of SIGS) { if (!g.result && !g.expired) pend++; else if (g.result) done++; }
   const a = $("sigTabSig"), b = $("sigTabHist");
   if (a) a.innerHTML = (ar ? "الإشارات" : "Signals") + " <b>" + pend + "</b>";
   if (b) b.innerHTML = (ar ? "السجل" : "History") + " <b>" + done + "</b>";
+}
+/* بطاقة الإشارة قابلة للتصميم من المؤشر نفسه (طلب المستخدم):
+   signal({…, card: "HTML حر"}) أو card:{html, bg, accent, color} — البطاقة غير ثابتة */
+function normSigCard(c) {
+  try {
+    if (!c) return null;
+    if (typeof c === "string") c = { html: c };
+    if (typeof c !== "object") return null;
+    const html = String(c.html || "");
+    if (!html.trim()) return null;
+    const clean = (v) => String(v || "").replace(/"/g, "'").slice(0, 120);
+    return { html: html.slice(0, 6000), bg: clean(c.bg), accent: clean(c.accent), color: clean(c.color) };
+  } catch (e) { return null; }
 }
 window.__badiPushSignal = function (s) {
   try {
     SIGS.unshift({ asset: String(s.asset || ""), tf: String(s.tf || ""),
                    dir: s.dir === "down" ? "down" : "up", price: Number(s.price || 0),
                    indicator: String(s.indicator || ""), at: Date.now(),
-                   durSec: Number(s.durSec || 0), result: null });
+                   durSec: Number(s.durSec || 0), result: null,
+                   card: normSigCard(s.card) });
     if (SIGS.length > 60) SIGS.length = 60;
     renderSignals();
     playSignal(s.dir === "down" ? "sell" : "buy");
@@ -2142,13 +2215,23 @@ function sigCard(g) {
   const t = new Date(g.at);
   const pad = (n) => String(n).padStart(2, "0");
   const etime = pad(t.getHours()) + ":" + pad(t.getMinutes()) + ":" + pad(t.getSeconds());
+  /* بطاقة مصممة من المؤشر نفسه (طلب المستخدم): card: '<b>…</b>' أو {html, bg, accent, color} */
+  if (g.card && String(g.card.html || "").trim()) {
+    let st = "";
+    if (g.card.bg) st += "background:" + g.card.bg + ";";
+    if (g.card.accent) st += "--sc:" + g.card.accent + ";";
+    if (g.card.color) st += "color:" + g.card.color + ";";
+    return '<article class="sigcard custom ' + (buy ? "buy" : "sell") + '" data-asset="' + esc(g.asset) + '"'
+      + (st ? ' style="' + st + '"' : "") + ' title="' + esc(g.asset) + " — open its chart\">"
+      + String(g.card.html) + "</article>";
+  }
   const arrow = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round">' + (buy ? ICONS.up : ICONS.down) + "</svg>";
   const res = g.result
     ? '<span class="sig-res ' + g.result + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round">' + (g.result === "win" ? '<path d="M5 12.5l4.5 4.5L19 7"/>' : '<path d="M6 6l12 12M18 6L6 18"/>') + "</svg>" + (g.result === "win" ? "WIN" : "LOSS") + "</span>"
     : '<span class="sig-etime">' + etime + "</span>";
   return '<article class="sigcard ' + (buy ? "buy" : "sell") + '" data-asset="' + esc(g.asset) +
       '" title="' + esc(g.asset) + " — open its chart\">"
-    + '<div class="sig-top"><span class="sig-badge">' + arrow + (buy ? "BUY" : "SELL") + "</span>" + res + "</div>"
+    + '<div class="sig-top">' + res + '<span class="sig-badge">' + arrow + (buy ? "BUY" : "SELL") + "</span></div>"
     + '<h3 class="sig-pair">' + (it.flag ? '<img class="aflag" src="' + it.flag + '" alt="">' : "") + esc(g.asset || "—") + "</h3>"
     + '<div class="sig-rows">'
     + '<div class="sig-row"><span>' + (window.__BADI_LANG__ === "ar" ? "المدة" : "Duration") + "</span><b>" + esc(g.tf || "—") + "</b></div>"
@@ -2160,7 +2243,7 @@ function renderSignals() {
   const box = $("sigList");
   if (!box) return;
   updateSigTabs();
-  const pend = SIGS.filter((g) => !g.result);
+  const pend = SIGS.filter((g) => !g.result && !g.expired);
   const done = SIGS.filter((g) => !!g.result);
   const list = SIG_TAB === "sig" ? pend : done;
   const cnt = $("sigCount");
@@ -4283,6 +4366,20 @@ GUIDE_JS = """/* ═════════════════════
                   'all'   → كل العملات
        minPayout: 85            ← الحد الأدنى مع scope: 'high'
 
+     🎨 تصميم بطاقة الإشارة بنفسك — البطاقة غير ثابتة (طلب المستخدم):
+       أضف card إلى الإشارة، وقيمتها HTML حر أو كائن:
+         signal({dir:'up', card:'<div style="padding:6px 10px"><b>MY SIGNAL</b></div>'})
+         signal({dir:'down', card:{html:'…', bg:'#101820', accent:'#FF4D5E', color:'#ffffff'}})
+           html   : محتوى البطاقة كاملًا — أي HTML وستايل تريده (حرية تامة)
+           bg     : خلفية البطاقة          accent : لون الشريط الجانبي للبطاقة
+           color  : لون النص الافتراضي
+       بدون card تظهر البطاقة الافتراضية. ملاحظات:
+       • توقيت الإشارة يظهر في الزاوية اليسرى للبطاقة.
+       • البطاقة تختفي تلقائيًا بعد انتهاء شمعة الفريم، والنتيجة (WIN/LOSS)
+         تُسجَّل في تبويب السجل.
+       • المؤقت التنازلي بجانب الشمعة الحية (رقمان فقط بلا إطار) تلقائي —
+         يعرض الثواني المتبقية لإغلاق الشمعة الحالية.
+
    ── 5) الرسم الحر — الشارت يقبل رسم أي شيء (Canvas 2D كامل) ───────────────
      render(ctx, values, h, s) اختيارية — بدونها تُرسم النتائج خطوطًا تلقائيًا.
        ctx    : سياق Canvas 2D — خطوط، مستطيلات، دوائر، نصوص، تدرجات، ظلال...
@@ -6002,7 +6099,8 @@ function runSignals() {
                                         tf: String(tfL),
                                         dir: String(sig.dir), price: Number(sig.price || 0),
                                         indicator: String(s.fileName || s.def.label || s.id),
-                                        durSec: Math.round((window.tfMs ? window.tfMs(tfL) : 60000) / 1000) });
+                                        durSec: Math.round((window.tfMs ? window.tfMs(tfL) : 60000) / 1000),
+                                        card: sig.card || null });
             }
           }
         } catch (e) {}
@@ -6058,7 +6156,8 @@ function scanSignals() {
         if (window.__badiPushSignal) {
           window.__badiPushSignal({ asset: nm, tf: String(tf), dir: String(sig.dir), price: px,
                                     indicator: String(s.fileName || s.def.label || s.id),
-                                    durSec: Math.round((window.tfMs ? window.tfMs(tf) : 60000) / 1000) });
+                                    durSec: Math.round((window.tfMs ? window.tfMs(tf) : 60000) / 1000),
+                                    card: sig.card || null });
         }
         send("signal", { id: s.id, label: String(s.fileName || s.def.label || s.id),
                          dir: String(sig.dir), price: px, asset: nm,
