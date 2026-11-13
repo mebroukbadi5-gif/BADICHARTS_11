@@ -174,6 +174,9 @@ svg{vertical-align:middle;flex-shrink:0}
 /* زر الإخفاء داخل رأس البطاقة — بحد واضح بلون الزر حتى يكون ظاهرًا بوضوح */
 #sigHead .ibtn{width:22px;height:22px;border-radius:6px;color:var(--accent-h);border-color:var(--acc-bd);background:var(--acc-soft)}
 #sigHead .ibtn:hover{background:var(--acc-bd)}
+/* زر فتح/غلق البطاقة ثابت لا يختفي + شارة العدد الحمراء الصغيرة 1 2 3 (طلب المستخدم) */
+#sigShow{position:relative;flex-shrink:0}
+#sigBadge{position:absolute;top:-4px;inset-inline-end:-4px;min-width:15px;height:15px;border-radius:8px;background:#FF4D5E;color:#fff;font-size:9px;font-weight:800;line-height:15px;text-align:center;padding:0 4px;direction:ltr;font-style:normal;box-shadow:0 1px 4px rgba(0,0,0,.45);pointer-events:none}
 #sigHead .chip{height:15px;padding:0 6px;font-size:9px}
 /* تبويبا لوحة الإشارات: الإشارات (الجارية الآن) + السجل (المنتهية بنتيجتها) — طلب المستخدم */
 .sig-tab{display:inline-flex;height:20px;align-items:center;gap:4px;flex-shrink:1;min-width:0;max-width:122px;padding:0 8px;border-radius:999px;border:1px solid transparent;background:transparent;color:var(--t-dim);font-size:9.5px;font-weight:800;letter-spacing:.04em;cursor:pointer;transition:.15s;text-transform:uppercase;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
@@ -258,11 +261,17 @@ svg{vertical-align:middle;flex-shrink:0}
 .empty-new:hover{border-color:var(--acc-bd);color:var(--accent-h)}
 .code-ta{width:100%;height:100%;resize:none;background:var(--panel2);color:var(--text);border:0;outline:none;padding:12px;font:13px/20px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;tab-size:2}
 
-/* ═══ Console ═══ */
+/* ═══ Console — يُسحب من رأسه إلى الأعلى ليكبر ويُخفى بزر (طلب المستخدم) ═══ */
 #consoleBox{display:flex;height:84px;flex-shrink:0;flex-direction:column;background:var(--bg);border-top:1px solid var(--border)}
-#consoleHead{display:flex;height:24px;flex-shrink:0;align-items:center;justify-content:space-between;padding:0 12px;font-size:10px;font-weight:700;color:var(--t-dim)}
+#consoleBox.min{height:24px!important}
+#consoleBox.min #consoleMsgs{display:none}
+#consoleHead{display:flex;height:24px;flex-shrink:0;align-items:center;justify-content:space-between;padding:0 12px;font-size:10px;font-weight:700;color:var(--t-dim);cursor:ns-resize;user-select:none}
+#consoleBox.min #consoleHead{color:var(--t-mid)}
+.chead-btns{display:flex;align-items:center;gap:4px}
 #cClear{color:var(--t-dim2);display:flex}
 #cClear:hover{color:var(--t-bright)}
+#cHide{color:var(--t-dim2);display:flex}
+#cHide:hover{color:var(--t-bright)}
 #consoleMsgs{flex:1;min-height:0;overflow-y:auto;padding:0 12px 6px}
 .cempty{font-size:10px;color:var(--t-dim3)}
 .msg{display:flex;gap:8px;padding:1px 0;font:10.5px/16px ui-monospace,Menlo,Consolas,monospace}
@@ -385,7 +394,8 @@ svg{vertical-align:middle;flex-shrink:0}
     <section id="chartPane">
       <div id="chartBar">
         <div class="cbar-top">
-          <button id="sigShow" class="ibtn" hidden title="Show the signals panel" aria-label="Show the signals panel"></button>
+          <!-- طلب المستخدم: زر واحد ثابت لفتح وغلق بطاقة الإشارات لا يختفي أبدًا + شارة حمراء بعدد الإشارات -->
+          <button id="sigShow" class="ibtn" title="Open or close the signals panel" aria-label="Open or close the signals panel"><i id="sigBadge" hidden></i></button>
           <!-- زر فتح قائمة العملات: بجانب السهمين وبحجم زر فتح بطاقة الإشارات (طلب المستخدم) -->
           <button id="assetAdd" class="ibtn" title="Add or remove currencies" aria-label="Open the currency list"></button>
           <button id="assetPrev" class="cbtn" title="Scroll the currencies back" aria-label="Scroll back"></button>
@@ -464,9 +474,12 @@ svg{vertical-align:middle;flex-shrink:0}
       <div id="codeHost" dir="ltr"></div>
 
       <div id="consoleBox">
-        <div id="consoleHead">
+        <div id="consoleHead" title="Drag up to enlarge the console — double-click or the arrow button to hide and show">
           <span>Console</span>
-          <button id="cClear" title="Clear console" aria-label="Clear console"></button>
+          <span class="chead-btns">
+            <button id="cClear" title="Clear console" aria-label="Clear console"></button>
+            <button id="cHide" title="Hide or show the console — drag the header up to enlarge it" aria-label="Hide or show the console"></button>
+          </span>
         </div>
         <div id="consoleMsgs" class="custom-scroll"></div>
       </div>
@@ -563,6 +576,7 @@ const ICONS = {
   "candle": '<path d="M9 5v4"/><rect x="7" y="9" width="4" height="6" rx="1"/><path d="M9 15v2"/><path d="M17 3v2"/><rect x="15" y="5" width="4" height="8" rx="1"/><path d="M17 13v3"/><path d="M3 3v16a2 2 0 0 0 2 2h16"/>',
   "check": '<path d="M20 6 9 17l-5-5"/>',
   "chevron-down": '<path d="m6 9 6 6 6-6"/>',
+  "chevron-up": '<path d="m18 15-6-6-6 6"/>',
   "chevron-left": '<path d="m15 18-6-6 6-6"/>',
   "code": '<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>',
   "zap": '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
@@ -1935,7 +1949,9 @@ function buildStatic() {
   $("webLogout").innerHTML = icon("logout", 15);
   /* أزرار الإخفاء داخل رأس البطاقة + زر الإظهار في شريط أدوات الشارت */
   $("sigHide").innerHTML = icon("chevron-left", 14);
-  $("sigShow").innerHTML = icon("bell", 14);
+  /* الجرس + شارة العدد — الشارة تُعاد مع الأيقونة لأن innerHTML يمسح الأبناء (طلب المستخدم) */
+  $("sigShow").innerHTML = icon("bell", 14) + '<i id="sigBadge" hidden></i>';
+  updateSigBadge();
   $("assetAdd").innerHTML = icon("plus", 13);
   $("assetPrev").innerHTML = icon("chevron-left", 13);
   $("assetNext").innerHTML = icon("chevron-right", 13);
@@ -1944,6 +1960,7 @@ function buildStatic() {
   $("sigSound").innerHTML = icon(soundOn ? "volume" : "volumex", 14);
   $("sigClear").innerHTML = icon("trash", 12);
   $("cClear").innerHTML = icon("x", 12);
+  $("cHide").innerHTML = icon("chevron-down", 12);
   $("delBtn").innerHTML = icon("trash", 13);
   $("saveBtn").innerHTML = icon("save", 13);
   $("emptyNew").innerHTML = icon("file-plus", 22) + "<span>Create a new file (indicator or drawing tool)</span>";
@@ -2171,15 +2188,23 @@ function note(freq, at, dur, o) {
     osc.start(t); osc.stop(t + dur + 0.05);
   });
 }
+/* طلب المستخدم: صوت واحد فقط حتى لو كانت ألف إشارة — دفعة إشارات دفعة واحدة = نغمة واحدة،
+   فالمؤشر الذي يطلق على كل شمعة جديدة وعلى كل عملة لا يصدر 10 أصوات معًا ولا يُثقل المتصفح */
+let sndGateSig = 0, sndGateRes = 0;
+function sndAllow(kind, winMs) {
+  const n = Date.now();
+  if (kind === "sig") { if (n - sndGateSig < winMs) return false; sndGateSig = n; return true; }
+  if (n - sndGateRes < winMs) return false; sndGateRes = n; return true;
+}
 /* New signal: BUY = rising two-note chime, SELL = falling two-note chime */
 function playSignal(type) {
-  if (!soundOn) return;
+  if (!soundOn || !sndAllow("sig", 2500)) return;
   if (type === "buy") { note(659.25, 0, .35); note(987.77, .11, .6); }
   else { note(987.77, 0, .35); note(659.25, .11, .6); }
 }
 /* Result: WIN = bright rising arpeggio, LOSS = low soft falling tone */
 function playResult(r) {
-  if (!soundOn) return;
+  if (!soundOn || !sndAllow("res", 1600)) return;
   if (r === "win") {
     [523.25, 659.25, 783.99].forEach((f, i) => note(f, i * .09, .35, { vol: .17 }));
     note(1046.5, .27, .9, { vol: .2 });
@@ -2307,10 +2332,19 @@ function sigCard(g) {
     + '<div class="sig-row"><span>' + (window.__BADI_LANG__ === "ar" ? "الدخول" : "Entry") + "</span><b>" + etime + " · " + (isFinite(g.price) ? g.price : "—") + "</b></div>"
     + "</div></article>";
 }
+/* شارة العدد الحمراء على زر فتح/غلق البطاقة — رقم صغير 1 2 3 حسب عدد الإشارات الجارية (طلب المستخدم) */
+function updateSigBadge() {
+  const bd = $("sigBadge");
+  if (!bd) return;
+  const n = SIGS.filter((g) => !g.result && !g.expired).length;
+  bd.textContent = n > 99 ? "99+" : String(n);
+  bd.hidden = n === 0;
+}
 function renderSignals() {
   const box = $("sigList");
   if (!box) return;
   updateSigTabs();
+  updateSigBadge();
   const pend = SIGS.filter((g) => !g.result && !g.expired);
   const done = SIGS.filter((g) => !!g.result);
   const list = SIG_TAB === "sig" ? pend : done;
@@ -2429,6 +2463,60 @@ function bindEvents() {
   $("saveBtn").addEventListener("click", saveNow);
   $("delBtn").addEventListener("click", function () { if (activeId) deleteFile(activeId); });
   $("cClear").addEventListener("click", function () { msgs = []; renderConsole(); });
+  /* ═══ الكونسول: سحب الرأس إلى الأعلى لتكبيره + إخفاء/إظهار بزر — الحجم والحالة محفوظان (طلب المستخدم) ═══ */
+  let conH = 84, conMin = false;
+  try {
+    conH = Math.max(30, parseInt(localStorage.getItem("badiConH") || "84", 10) || 84);
+    conMin = localStorage.getItem("badiConMin") === "1";
+  } catch (e) {}
+  function applyConH(persist) {
+    const cb = $("consoleBox");
+    if (!cb) return;
+    conH = Math.max(30, Math.min(conH, Math.max(140, Math.round(window.innerHeight * 0.6))));
+    cb.style.height = conMin ? "24px" : conH + "px";
+    cb.classList.toggle("min", conMin);
+    const h = $("cHide");
+    if (h) {
+      h.innerHTML = icon(conMin ? "chevron-up" : "chevron-down", 12);
+      h.title = conMin ? "Show the console" : "Hide the console";
+    }
+    if (persist) {
+      try { localStorage.setItem("badiConH", String(conH)); localStorage.setItem("badiConMin", conMin ? "1" : "0"); } catch (e) {}
+    }
+  }
+  function toggleConMin() { conMin = !conMin; applyConH(true); }
+  $("cHide").addEventListener("click", toggleConMin);
+  (function () {
+    const head = $("consoleHead");
+    let drag = null;
+    head.addEventListener("mousedown", function (e) {
+      if (e.target.closest("button")) return;
+      drag = { y: e.clientY, h: conH, wasMin: conMin };
+      e.preventDefault();
+    });
+    window.addEventListener("mousemove", function (e) {
+      if (!drag) return;
+      const dy = drag.y - e.clientY;                /* سحب إلى الأعلى = أكبر */
+      if (drag.wasMin) {
+        if (dy > 16) { conMin = false; applyConH(); drag.wasMin = false; drag.h = conH; drag.y = e.clientY; }
+        return;
+      }
+      const nh = Math.max(30, drag.h + dy);
+      if (nh !== conH) { conH = nh; applyConH(); }
+    });
+    window.addEventListener("mouseup", function (e) {
+      if (!drag) return;
+      const moved = Math.abs(e.clientY - drag.y), wasMin = drag.wasMin;
+      drag = null;
+      if (wasMin && moved < 5) conMin = false;      /* نقرة على الرأس المخفي تكفي لإظهاره */
+      applyConH(true);
+    });
+    head.addEventListener("dblclick", function (e) {
+      if (e.target.closest("button")) return;
+      toggleConMin();
+    });
+  })();
+  applyConH(false);
   $("sigSound").addEventListener("click", toggleSound);
   /* تبويبا الإشارات/السجل — طلب المستخدم */
   $("sigTabSig").addEventListener("click", function () { setSigTab("sig"); });
@@ -2470,19 +2558,22 @@ function bindEvents() {
   });
 
 
-  /* side panel show/hide (signals) — الدالة كانت مفقودة فصارت اللوحة ثابتة لا تُخفى (إصلاح طلب المستخدم) */
+  /* side panel show/hide (signals) — الدالة كانت مفقودة فصارت اللوحة ثابتة لا تُخفى (إصلاح طلب المستخدم)
+     وتحديثًا لطلب المستخدم: زر الجرس واحد ثابت لفتح وغلق البطاقة — لم يعد يُخفى عند فتح اللوحة */
   function setSigHidden(off) {
     const p = $("sigPane");
     if (p) p.classList.toggle("off", !!off);
-    const sb = $("sigShow");
-    if (sb) sb.hidden = !off;
     try { localStorage.setItem("badiSigHidden", off ? "1" : "0"); } catch (e) {}
     /* عرض الشارت تغيّر — أعِد تخطيط الكانفس (المكتبة تسمع لـ window.resize فقط) */
     try { window.dispatchEvent(new Event("resize")); } catch (e) {}
   }
   window.setSigHidden = setSigHidden;   /* متاحة لجسر سطح المكتب (__badiApp.setSigHidden) */
   $("sigHide").addEventListener("click", function () { setSigHidden(true); });
-  $("sigShow").addEventListener("click", function () { setSigHidden(false); });
+  /* الجرس نفسه يفتح ويغلق البطاقة — يبقى ظاهرًا في الحالتين ولا يختفي عند ظهور الإشارات (طلب المستخدم) */
+  $("sigShow").addEventListener("click", function () {
+    const p = $("sigPane");
+    setSigHidden(!p.classList.contains("off"));
+  });
   /* لا تُفتح لوحة الإشارات تلقائيًا عند الإقلاع أبدًا — يفتحها المستخدم من زر الجرس (طلب المستخدم) */
   setSigHidden(true);
 
@@ -2729,6 +2820,8 @@ T = {
         "lead": "Code your own indicators, get signals with chart snapshots, and trade smarter — all in one studio.",
         "cardSub": "Sign in to continue to your studio", "remember": "Remember me",
         "errEmpty": "Please enter your username and password.", "signing": "Signing in…", "signinok": "Signed in successfully",
+        "tgsave1": "Saved bot token", "tgonly": "One bot only — saving a new token replaces the previous one.",
+        "tgdel": "Delete the saved token", "tgcleared": "Saved token deleted",
     },
     "ar": {
         "login": "تسجيل الدخول", "user": "اسم المستخدم", "pass": "كلمة المرور",
@@ -2795,6 +2888,8 @@ T = {
         "lead": "برمج مؤشراتك، واستلم إشارات مع لقطات الشارت، وتداول بذكاء — كل ذلك في استوديو واحد.",
         "cardSub": "سجّل دخولك لمتابعة العمل في الاستوديو", "remember": "تذكّرني",
         "errEmpty": "يرجى إدخال اسم المستخدم وكلمة المرور.", "signing": "جارٍ الدخول…", "signinok": "تم الدخول بنجاح",
+        "tgsave1": "توكن البوت المحفوظ", "tgonly": "بوت واحد فقط — عند حفظ توكن جديد يستبدل التوكن السابق.",
+        "tgdel": "حذف التوكن المحفوظ", "tgcleared": "تم حذف التوكن المحفوظ",
     },
 }
 
@@ -3968,10 +4063,13 @@ BADI_THUMB_DIR = os.path.join(BADI_DIR, "Thumbs")
 # والشرح الكامل داخل تعليقاته: بنية المؤشر، الحساب والدوال الجاهزة، API السوق
 # (نسبة الدفع + مفتوح/مغلق)، الإشارات وتلجرام والنطاق، الرسم الحر على الشارت،
 # وأدوات الرسم التفاعلية. إذا حذفه المستخدم يُعاد عند الإقلاع التالي.
-GUIDE_FILE_NAME = "دليل البرمجة والرسم على الشارت.js"
+# طلب المستخدم: أسماء ملفات البرمجة بالإنجليزية — وليس بالعربية
+GUIDE_FILE_NAME = "BadiCharts_Programming_Guide.js"
+# النسخ القديمة ذات الاسم العربي تُحذف عند الإقلاع (ترحيل)
+LEGACY_GUIDE_FILES = ("دليل البرمجة والرسم على الشارت.js",)
 
 GUIDE_JS = """/* ═══════════════════════════════════════════════════════════════════════════
-   دليل البرمجة والرسم على الشارت — BadiCharts Studio  (ملف الشرح الكامل)
+   BadiCharts Programming Guide — دليل البرمجة والرسم على الشارت (الشرح الكامل)
    ═══════════════════════════════════════════════════════════════════════════
 
    هذا الملف مؤشر حقيقي يعمل على الشارت — والشرح الكامل في التعليقات أدناه.
@@ -4066,7 +4164,7 @@ GUIDE_JS = """/* ═════════════════════
    ═══════════════════════════════════════════════════════════════════════════ */
 
 return {
-  label: 'دليل البرمجة والرسم',
+  label: 'BADI Guide',
   type: 'overlay',
   color: '#22E08A',
   settings: { period: 20, mult: 2 },
@@ -4140,8 +4238,16 @@ return {
 
 
 def _seed_guide_file():
-    """كتابة ملف دليل البرمجة والرسم في مجلد Indicators (مرة واحدة)."""
+    """كتابة ملف دليل البرمجة والرسم في مجلد Indicators (مرة واحدة) — الاسم بالإنجليزية (طلب المستخدم)."""
     try:
+        # ترحيل: حذف النسخ القديمة ذات الاسم العربي إن وُجدت
+        for old in LEGACY_GUIDE_FILES:
+            op = os.path.join(BADI_IND_DIR, old)
+            if os.path.exists(op):
+                try:
+                    os.remove(op)
+                except Exception:
+                    pass
         p = os.path.join(BADI_IND_DIR, GUIDE_FILE_NAME)
         if not os.path.exists(p):
             with open(p, "w", encoding="utf-8") as fh:
@@ -4467,7 +4573,10 @@ class Backend(QObject):
                         "fileName": f"{base_names[s['kind']]}.{ext}", "kind": s["kind"],
                         "code": s["code"], "enabled": False})
         if isinstance(data, list) and data:
-            out = data
+            # ترحيل اسم الدليل للإنجليزية (طلب المستخدم): تجاهل المدخل القديم ذا الاسم العربي
+            # حتى لا تعيد المزامنة كتابته إلى القرص بعد حذفه
+            out = [f for f in data if isinstance(f, dict)
+                   and str(f.get("fileName") or "") not in LEGACY_GUIDE_FILES]
         return out
 
     def _log(self, kind, text):
@@ -8275,6 +8384,48 @@ QML += r'''
                                         }
                                         Label { text: sigPage.status; font.pixelSize: 11; color: backend.c.good }
                                         Item { Layout.fillWidth: true }
+                                    }
+                                    /* طلب المستخدم: بطاقة تحت زر الحفظ تعرض التوكن المحفوظ مختصرًا (يظهر قليلًا منه)
+                                       وبجانبه أيقونة حذف — وبوت واحد فقط: التوكن الجديد يستبدل السابق */
+                                    Rectangle {
+                                        visible: sigPage.token !== ""
+                                        Layout.fillWidth: true
+                                        Layout.preferredHeight: 46
+                                        radius: 12
+                                        color: backend.c.bg; border.width: 1; border.color: backend.c.border
+                                        RowLayout {
+                                            anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 8; spacing: 8
+                                            Icon { name: "lock"; sz: 14; tint: backend.c.good }
+                                            ColumnLayout {
+                                                spacing: 0
+                                                Layout.fillWidth: true
+                                                Label { text: backend.s.tgsave1; font.pixelSize: 9; font.bold: true; color: backend.c.sub }
+                                                Label {
+                                                    text: sigPage.token.length > 24 ? sigPage.token.substring(0, 14) + "…" + sigPage.token.substring(sigPage.token.length - 4) : sigPage.token
+                                                    font.pixelSize: 11; font.family: "monospace"; color: backend.c.fg
+                                                    Layout.fillWidth: true; elide: Text.ElideRight
+                                                }
+                                            }
+                                            Rectangle {
+                                                width: 30; height: 30; radius: 8
+                                                color: tgDelMa.containsMouse ? Qt.rgba(0.94, 0.27, 0.27, 0.14) : "transparent"
+                                                Icon { name: "trash"; sz: 14; tint: backend.c.bad; anchors.centerIn: parent }
+                                                MouseArea {
+                                                    id: tgDelMa; anchors.fill: parent; hoverEnabled: true
+                                                    cursorShape: Qt.PointingHandCursor
+                                                    onClicked: {
+                                                        backend.saveTg("", "", JSON.stringify({ attach: sigPage.attach }))
+                                                        sigPage.token = ""
+                                                        sigPage.status = backend.s.tgcleared
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Label {
+                                        text: backend.s.tgonly
+                                        font.pixelSize: 10; color: backend.c.sub
+                                        wrapMode: Text.WordWrap; Layout.fillWidth: true
                                     }
                                     Item { Layout.fillHeight: true }
                                 }
