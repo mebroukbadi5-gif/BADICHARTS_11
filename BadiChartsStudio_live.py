@@ -3372,6 +3372,9 @@ T = {
         "mktOpen": "Open", "mktClosed": "Closed",
         "otherSett": "Other settings", "darkMode": "Dark mode", "langLbl": "Language", "sndLbl": "Signal sounds",
         "sbLbl": "Status bar", "cdLbl": "Candle countdown",
+        "histDays": "History candles — days", "histSave": "Save",
+        "histDaysHint": "When you open a currency it loads a batch of 300 candles then another 300 (like before) up to this many days (0.5 – 30). Default: 2 days. Type the number and press Save.",
+        "histSaved": "History days saved — opening a currency now loads the new range",
         "badiSect": "Encrypted indicators (BADI)", "keyFp": "Key fingerprint:",
         "notifT": "Notifications", "notifEmpty": "No notifications yet",
         "notifHint": "Notifications from your paid indicators appear here — the developer sends them from his own server (updates, subscription reminders). No files can ever pass through this channel.",
@@ -3451,6 +3454,9 @@ T = {
         "mktOpen": "مفتوح", "mktClosed": "مغلوق",
         "otherSett": "إعدادات أخرى", "darkMode": "الوضع الليلي", "langLbl": "اللغة", "sndLbl": "أصوات الإشارات",
         "sbLbl": "شريط الحالة", "cdLbl": "العد التنازلي على الشارت",
+        "histDays": "شموع التاريخ — عدد الأيام", "histSave": "حفظ",
+        "histDaysHint": "عند فتح العملة تُجلب دفعة 300 شمعة ثم 300 اخرى (مثل السابق) حتى بلوغ هذا العدد من الأيام (0.5 – 30). الافتراضي يومان. اكتب الرقم واضغط حفظ.",
+        "histSaved": "تم حفظ عدد الأيام — فتح العملة يجلب المدى الجديد",
         "badiSect": "المؤشرات المشفرة (BADI)", "keyFp": "بصمة المفتاح:",
         "notifT": "الإشعارات", "notifEmpty": "لا توجد إشعارات بعد",
         "notifHint": "تظهر هنا إشعارات المؤشرات المدفوعة — المبرمج يرسلها من خادمه (تحديثات، تذكير بالاشتراك). لا يمكن لأي ملف أن يمر عبر هذه القناة إطلاقًا.",
@@ -5530,6 +5536,13 @@ class Backend(QObject):
         cfg = _read_json(CFG_FILE, {})
         self._lang = cfg.get("lang", "en")
         self._dark = bool(cfg.get("dark", True))
+        # v14.3 (طلب المستخدم): عدد أيام شموع التاريخ المجلوبة عند فتح العملة —
+        # الافتراضي يومان، يقبل 0.5 حتى 30 يوم. يُضبط من بطاقة الإعدادات وحفظ.
+        try:
+            _hd = float(str(cfg.get("hist_days", 2.0)).replace(",", "."))
+        except Exception:
+            _hd = 2.0
+        self._hist_days = max(0.5, min(30.0, _hd))
         self._market = "real"        # قسم الحساب الحقيقي/التجريبي حُذف — يبقى وسم السوق للعملات OTC فقط
         # LIVE SERVER EDITION (طلب المستخدم): العملة الافتراضية ثابتة دائماً —
         # الشارت يفتح على BRLUSD_otc (باسمها الحقيقي USD/BRL (OTC) كما في الخادم —
@@ -5559,6 +5572,7 @@ class Backend(QObject):
         self._qx_feed_key = ("", "")   # مفتاح الغذاء الحالي (العملة، الفريم)
         self._qx_last_sig = None       # بصمة آخر شمعة مُرسلة للشارت (t, c)
         self._qx_older_busy = False    # دفعة تمرير للخلف جارية
+        self._qx_resync_pending = False  # v14.3: مزامنة كاملة بعد إصلاح سد الثغرات
         self._qx_pre_log = 0.0         # خنق سجلات حالة التحميل المسبق
         self._qx_tf_retry = 0.0        # خنق إعادة محاولة جلب فريم أعلى
         self._qx_ensure_at = {}        # v13.1: آخر جلب فوري لكل عملة (خنق 15 ثانية)
@@ -5569,6 +5583,11 @@ class Backend(QObject):
         self._qx_load_pending = set()  # العملات المنتظرة في الطابور (منع التكرار)
         self._qx_load_lock = threading.Lock()
         self._qx_load_busy = False     # عامل الطابور يعمل الآن
+        # v14.3 (طلب المستخدم): دفعات التاريخ المتسلسلة عند فتح العملة فقط —
+        # دفعة 300 ثم 300 حتى عدد الأيام المضبوط، وكل دفعة تُرفع للشارت فوراً
+        self._qx_chain_busy = set()    # عملات/فريمات تجري عليها الدفعات الآن
+        self._qx_chain_done = set()    # عملات/فريمات بلغت هدف الأيام أو نفد تاريخها
+        self._qx_chain_lock = threading.Lock()
         self._files = self._load_files()
         _ensure_badi_dirs()
         self.syncDiskFiles(emit=False)     # استيراد أي ملفات وضعها المستخدم في مجلد BadiCharts
@@ -5842,7 +5861,8 @@ class Backend(QObject):
         _write_json(CFG_FILE, {"lang": self._lang, "dark": self._dark,
                                "asset": self._asset, "tf": self._tf,
                                "added": self._added,
-                               "chart_theme": self._chart_theme})
+                               "chart_theme": self._chart_theme,
+                               "hist_days": self._hist_days})
 
     def _load_files(self):
         data = _read_json(FILES_FILE, None)
@@ -6350,8 +6370,8 @@ class Backend(QObject):
     #  دخول حقيقي، BRLUSD_otc فوراً (300 شمعة)، بقية العملات واحدة تلو الأخرى،
     #  بث حي لكل عملة فُتح شارتها، ودفعات 300 شمعة عند التمرير للوراء.
     # ═════════════════════════════════════════════════════════════════════
-    _QX_FEED_CAP = 3000          # حد الشموع في ذاكرة الواجهة (نفس سياسة الخادم)
-    _QX_FEED_TRIM = 2600         # القص عند التجاوز (نفس سلوك الجسر في الصفحة)
+    _QX_FEED_CAP = 8000          # حد الشموع في ذاكرة الواجهة (v14.3: كان 3000 — يسمع حتى 30 يوم من فريمات أعلى)
+    _QX_FEED_TRIM = 7600         # القص عند التجاوز (نفس سلوك الجسر في الصفحة)
 
     def _emit_qx(self, obj):
         """بث حدث خادم QML (الدخول / لوحة العملات / دفعات التمرير)."""
@@ -6520,6 +6540,9 @@ class Backend(QObject):
                     self._log("ok", f"{api}: {n} candles loaded + live stream ON")
                     self._qx_ensure_fail[api] = 0
                     self._qx_last_sig = None   # المضخة تدفع الغذاء الجديد فوراً
+                    # v14.3 (طلب المستخدم): عند فتح العملة وفقط — دفعة 300 ثم
+                    # 300 حتى عدد الأيام المضبوط، وكل دفعة تُرفع إلى الشارت فوراً
+                    self._qx_start_history_chain(api, "1m")
                 else:
                     self._qx_ensure_fail[api] = self._qx_ensure_fail.get(api, 0) + 1
             except Exception as e:
@@ -6530,6 +6553,183 @@ class Backend(QObject):
                     self._qx_load_pending.discard(api)
             # v13.2: فاصل بين عملة وأخرى — الجلب واحداً تلو الآخر بلا تسرّع
             time.sleep(1.0)
+
+    # ---------- v14.3: دفعات التاريخ المتسلسلة عند فتح العملة (300 ثم 300) ----------
+    def _hist_days(self):
+        """عدد أيام شموع التاريخ المضبوط من الإعدادات (0.5 حتى 30، الافتراضي 2)."""
+        try:
+            return max(0.5, min(30.0, float(self._hist_days)))
+        except Exception:
+            return 2.0
+
+    @Property(str, constant=True)
+    def histDaysStr(self):
+        return str(self._hist_days)
+
+    @Slot(str)
+    def setHistDays(self, v):
+        """v14.3 (طلب المستخدم): يكتب الرقم في بطاقة الإعدادات ويضغط حفظ —
+        يقبل 0.5 يوم حتى 30 يوم، والافتراضي يومان. فتح العملة بعد الحفظ يجلب
+        المدى الجديد بالدفعات المتسلسلة."""
+        try:
+            d = float(str(v or "").replace(",", ".").strip())
+        except Exception:
+            self._log("err", "History days: invalid number")
+            return
+        if not (0.5 <= d <= 30.0):
+            self._log("err", "History days: allowed range 0.5 – 30")
+            return
+        self._hist_days = d
+        self._save_cfg()
+        qx = _qx_module()
+        if qx:
+            try:
+                qx.QX_HISTORY_DAYS = d
+            except Exception:
+                pass
+        self._log("ok", T[self._lang].get("histSaved", "History days saved"))
+        # أعِد دفعات التاريخ للعملة الحالية فوراً بالمدى الجديد
+        api = self._qx_symbols.get(self._asset) or self._api_from_display(self._asset)
+        if api:
+            with self._qx_chain_lock:
+                self._qx_chain_done.discard((api, self._tf))
+                if self._tf != "1m":
+                    self._qx_chain_done.discard((api, "1m"))
+            self._qx_start_history_chain(api, self._tf)
+            if self._tf != "1m":
+                self._qx_start_history_chain(api, "1m")
+
+    def _qx_start_history_chain(self, api, tf_label="1m"):
+        """v14.3 (طلب المستخدم حرفياً): «عند فتح العملة يجلب دفعة 300 شمعة ثم
+        يجلب 300 اخرى مثل ماكانت تفعل في السابق خليها تجلب 2 يوم ... اي دفعة
+        تجلبها ترفعها الى الشارت». تعمل عند فتح العملة وفقط، وتتوقف عند بلوغ
+        عدد الأيام المضبوط أو عند نهاية تاريخ الخادم. طريقة الرجوع للخلف
+        (التمرير) أُلغيت — لا طلبات من التمرير ولا رسائل في الترمينال."""
+        qx = _qx_module()
+        if not qx or not api or not self._qx_logged:
+            return
+        key = (api, tf_label)
+        with self._qx_chain_lock:
+            if key in self._qx_chain_busy or key in self._qx_chain_done:
+                return
+            self._qx_chain_busy.add(key)
+        threading.Thread(target=self._qx_chain_worker, args=(api, tf_label),
+                         daemon=True, name="qxHistChain").start()
+
+    def _qx_chain_worker(self, api, tf_label):
+        key = (api, tf_label)
+        try:
+            qx = _qx_module()
+            if not qx or getattr(qx, "CLIENT", None) is None:
+                return
+            days = self._hist_days()
+            target = max(60, int(days * 86400))
+            tf_sec = dict(TFS).get(tf_label, 60)
+
+            def _viewing():
+                """هل الشارت الحالي يعرض نفس العملة والفريم؟ (مطابقة على مستوى رمز الخادم)"""
+                try:
+                    cur_api = self._qx_symbols.get(self._asset) or self._api_from_display(self._asset)
+                    return cur_api == api and self._tf == tf_label
+                except Exception:
+                    return False
+            try:
+                qx.QX_HISTORY_DAYS = days
+            except Exception:
+                pass
+            batches = 0
+            max_batches = max(2, int((days * 86400) // max(1, 300 * tf_sec)) + 3)
+            while True:
+                if getattr(qx, "CLIENT", None) is None or not getattr(qx, "CONNECTION_ALIVE", False):
+                    break
+                if tf_sec == 60:
+                    feed = self._qx_engine_candles(api)
+                else:
+                    feed = list(self._candles) if _viewing() else []
+                if not feed:
+                    break
+                oldest = int(feed[0]["t"])
+                if int(time.time()) - oldest >= target:
+                    break                     # بلوغ عدد الأيام المضبوط — توقف
+                prev_oldest = oldest
+                if tf_sec == 60:
+                    # دفعة الخادم الرسمية: 300 شمعة أقدم تُدمج في ذاكرة الخادم
+                    # نفسها (نفس الطريقة الأصلية — fetch_older_batch)
+                    fut = asyncio.run_coroutine_threadsafe(
+                        qx.fetch_older_batch(api, prev_oldest, qx.PAGINATION_BATCH),
+                        qx.ASYNC_LOOP)
+                    n = int(fut.result(timeout=90) or 0)
+                    if not n:
+                        break                 # نهاية تاريخ الخادم لهذه العملة
+                    feed = self._qx_engine_candles(api)
+                    batch = [c for c in feed if c["t"] < prev_oldest][-qx.PAGINATION_BATCH:]
+                    if not batch:
+                        break                 # لا تقدم فعلي — لا تكرر نفس المرساة
+                else:
+                    fut = asyncio.run_coroutine_threadsafe(
+                        qx.qx_fetch_window_raw(api, prev_oldest,
+                                               qx.PAGINATION_BATCH * tf_sec, tf_sec,
+                                               foreground=True, timeout=45.0), qx.ASYNC_LOOP)
+                    res = fut.result(timeout=60)
+                    batch = [c for c in self._qx_fmt_raw(res, tf_sec)
+                             if c["t"] < prev_oldest][-qx.PAGINATION_BATCH:]
+                    if not batch:
+                        break
+                    feed = batch + list(self._candles)
+                batches += 1
+                # رفع الدفعة إلى الشارت فوراً (طلب المستخدم: أي دفعة تجلبها ترفعها)
+                if batch and _viewing():
+                    if tf_sec == 60:
+                        self._candles = feed[-self._QX_FEED_CAP:]
+                    else:
+                        seen_t = set()
+                        merged = []
+                        for c in sorted(feed, key=lambda x: x["t"]):
+                            if c["t"] not in seen_t:
+                                seen_t.add(c["t"])
+                                merged.append(c)
+                        self._candles = merged[-self._QX_FEED_CAP:]
+                    self._qx_last_sig = None
+                    # دمج سلس في الصفحة (prepend بلا إعادة ضبط ولا قفزة)
+                    self._emit_qx({"type": "older", "candles": batch,
+                                   "asset": self._asset, "tf": tf_label})
+                    self.candlesChanged.emit()
+                if batches >= max_batches:
+                    break
+                time.sleep(0.25)
+            with self._qx_chain_lock:
+                self._qx_chain_done.add(key)
+            if batches:
+                self._log("ok", f"history: +{batches} batches ({days} days target) — {self._asset if _viewing() else api} {tf_label}")
+        except Exception as e:
+            self._log("err", f"history chain {tf_label}: " + str(e)[:120])
+        finally:
+            with self._qx_chain_lock:
+                self._qx_chain_busy.discard(key)
+
+    def _qx_tail_repaired(self, engine):
+        """v14.3: كشف إصلاحات آلة سد الثغرات داخل منطقة الذيل (آخر 40 شمعة).
+
+        الآلة الأصلية (fill_gap_once كما هي من v10) تستبدل الشموع المغلقة
+        الناقصة داخل ذاكرة الخادم — الدمج الذيلي فقط لا يوصل هذه الإصلاحات
+        إلى الشارت (كانت تبقى الفجوة ظاهرة رغم عمل الآلة). هنا يُكتشف الإصلاح
+        فيُحدَّث غذاء الشارت كاملاً مرة واحدة."""
+        try:
+            if not self._candles or not engine:
+                return False
+            win = {c["t"]: c for c in self._candles[-40:]}
+            for c in engine[-40:]:
+                o = win.get(c["t"])
+                if o is None:
+                    continue
+                if (round(o["o"], 10) != round(c["o"], 10)
+                        or round(o["h"], 10) != round(c["h"], 10)
+                        or round(o["l"], 10) != round(c["l"], 10)
+                        or round(o["c"], 10) != round(c["c"], 10)):
+                    return True
+        except Exception:
+            return False
+        return False
 
     def _qx_load_feed(self, force=False):
         """تحميل غذاء الشارت الحقيقي للعملة/الفريم الحاليين من الخادم."""
@@ -6547,6 +6747,9 @@ class Backend(QObject):
             if candles and (force or not self._candles or self._qx_feed_key != key):
                 self._candles = candles[-self._QX_FEED_CAP:]
                 self._qx_feed_key = key
+                # v14.3 (طلب المستخدم): فتح العملة — دفعة 300 ثم 300 حتى عدد
+                # الأيام المضبوط في الإعدادات، وكل دفعة تُرفع إلى الشارت فوراً
+                self._qx_start_history_chain(api, "1m")
             elif not candles:
                 # v13.1: لا شموع بعد (لم يصل دور التحميل المسبق) — جلب فوري أمامي
                 self._qx_ensure_asset(api)
@@ -6596,6 +6799,9 @@ class Backend(QObject):
                     self._qx_feed_key = (asset_name, tf_key)
                     self.candlesChanged.emit()
                     self._log("ok", f"loaded {len(candles)} candles — {asset_name} {tf_key}")
+                    # v14.3 (طلب المستخدم): عند فتح العملة وفقط — دفعة 300 ثم 300
+                    # حتى عدد الأيام المضبوط، وكل دفعة تُرفع إلى الشارت فوراً
+                    self._qx_start_history_chain(api, tf_key)
             except Exception as e:
                 self._log("err", f"fetch {asset_name} {tf_key}: {str(e)[:120]}")
 
@@ -6817,6 +7023,12 @@ class Backend(QObject):
                 if not self._candles or self._qx_feed_key != key:
                     self._candles = candles[-self._QX_FEED_CAP:]
                     self._qx_feed_key = key
+                elif self._qx_tail_repaired(candles):
+                    # v14.3: آلة سد الثغرات أصلحت شموعاً مغلقة في ذاكرة الخادم —
+                    # الدمج الذيلي لا يوصل إصلاحات المنصف، تحديث كامل واحد يُظهرها
+                    # (هنا تُغلق فجوة «بين شمعة الحية والشموع التي قبلها»)
+                    self._candles = candles[-self._QX_FEED_CAP:]
+                    self._qx_resync_pending = True
                 else:
                     self._qx_merge_tail_full(candles, tf_sec)
             elif self._qx_feed_key != key:
@@ -6881,6 +7093,10 @@ class Backend(QObject):
                 if self._py_mods:
                     self._compute_py()
                 self.candlesChanged.emit()
+        # v14.3: إصلاح سد الثغرات وصل — مزامنة كاملة واحدة تُظهر الشموع المُصلَحة
+        if getattr(self, "_qx_resync_pending", False):
+            self._qx_resync_pending = False
+            self._emit_qx({"type": "resync"})
 
     # ---------- الدخول الحقيقي عبر خادم Quotex (بديل تسجيل الدخول الوهمي) ----------
     @Property(str, constant=True)
@@ -6959,6 +7175,21 @@ class Backend(QObject):
                         pass
             self._qx_logged = True
             self._qx_load_feed(force=True)
+            # v14.3 (طلب المستخدم): تصفير علامات تجمّد السد القديمة + مزامنة إعداد
+            # الأيام + دفعات التاريخ المتسلسلة لعملة فتح الشارت (300 ثم 300 حتى
+            # عدد الأيام المضبوط — كل دفعة تُرفع إلى الشارت فوراً)
+            try:
+                qx.reset_gap_flags()
+            except Exception:
+                pass
+            try:
+                qx.QX_HISTORY_DAYS = self._hist_days()
+            except Exception:
+                pass
+            try:
+                self._qx_start_history_chain(qx.PRELOAD_FIRST_SYMBOL, "1m")
+            except Exception:
+                pass
             self._log("ok", "QX server connected — " + host + " | opener: " + str(qx.PRELOAD_FIRST_SYMBOL))
             self._emit_qx({"type": "login", "state": "ok"})
         except Exception as e:
@@ -8037,46 +8268,12 @@ function renderChartLoading() {
   } catch (e) {}
 }
 window.__badiMaybeLoadOlder = function (p, auto) {
-  try {
-    if (!window.__BADI_EMBEDDED || !p || !window.__badiPrimary || p !== window.__badiPrimary()) return;
-    /* v13.1: فريمات الثواني (5s/10s/15s/30s) تاريخها يُبنى من تيكات الخادم
-       الحية (نافذة 5 دقائق — سياسة الخادم نفسها) — لا يوجد تاريخ أقدم يُجلب،
-       فلا تُرسل طلبات older تكرارية بلا فائدة */
-    if (p.tf && /^[0-9]+s$/.test(String(p.tf))) return;
-    var dd = p.dataArr;
-    if (!dd || dd.length < 30 || !p.chart) return;
-    /* v14.1 (مثل تريدنغ فيو): الذاكرة خاصة بكل عملة+فريم — تغيير أحدهما
-       يصفّر حالة التحميل وذاكرة «لا يوجد أقدم» ولا يختلط عملة بأخرى */
-    var key = String(p.asset || "") + "|" + String(p.tf || "");
-    if (OLDER.key !== key) { OLDER.key = key; OLDER.loading = false; OLDER.exhausted = null; OLDER.consec = 0; }
-    if (OLDER.loading) {
-      if (Date.now() - OLDER.at > 8000) OLDER.loading = false; else return;
-    }
-    var ch = p.chart;
-    if (typeof ch.rightOffset !== "number" || !ch.sim || !ch.sim.candles || !ch.sim.candles.length) return;
-    var N = ch.sim.candles.length;
-    var visible = (ch.chartRight - ch.chartLeft) / (ch.barSpacing || 8);
-    var firstIdx = N - 1 + ch.rightOffset - visible;
-    /* v14.1: عتبة تريدنغ فيو — لا ننتظر وصول أول شمعة إلى الحافة اليسرى
-       بالضبط (كان يستلزم سحباً طويلاً حتى آخر 5 شموع فقط)؛ يكفي أن تقترب
-       بداية البيانات من الربع الأيسر من الشاشة فيُطلب المزيد فوراً */
-    if (firstIdx > Math.max(6, visible * 0.2)) return;
-    /* v14.1: سحب المستخدم الجديد يبدأ جلسة دفعات جديدة (العدّاد يتجاوز فقط
-       في الدفعات التلقائية المتسلسلة بعد الدمج — auto=true) */
-    if (auto === true) { if ((OLDER.consec || 0) >= 8) return; }
-    else OLDER.consec = 0;
-    /* v14.1: الذاكرة — إن أجاب الخادم سابقاً «لا يوجد أقدم» لنفس المرساة
-       فلا تكرر الطلب على نفس النقطة؛ تُصفَّر الذاكرة فور وصول دفعة جديدة */
-    var t0 = ch.sim.candles[0].time;   /* أقدم شمعة في الشارت نفسه (الأدق) */
-    if (t0 === undefined || t0 === null) t0 = dd[0].time;
-    if (t0 > 1e11) t0 = Math.floor(t0 / 1000);
-    t0 = Math.floor(t0);
-    if (OLDER.exhausted === t0) return;
-    OLDER.loading = true; OLDER.at = Date.now();
-    OLDER.anchor = t0;
-    OLDER.asset = String(p.asset || ""); OLDER.tf = String(p.tf || "");
-    send("older", JSON.stringify({ before: t0, asset: OLDER.asset, tf: OLDER.tf }));
-  } catch (e) { OLDER.loading = false; }
+  /* v14.3 (طلب المستخدم): طريقة الرجوع الى الخلف لجلب الشموع التاريخية أُلغيت
+     نهائياً — لم تنجح. البديل الرسمي: عند فتح العملة فقط يجلب الخادم دفعة
+     300 شمعة ثم 300 اخرى (مثلما كان في السابق) حتى عدد الأيام المضبوط في
+     الإعدادات، وكل دفعة تُرفع إلى الشارت فور وصولها عبر prependCandles.
+     لذلك لا تُرسل طلبات older من التمرير ولا تُطبع أي رسائل في الترمينال. */
+  return;
 };
 function reportFiles() {
   try {
@@ -8761,8 +8958,8 @@ function defineBadiApp() {
             /* أثناء التمرير للخلف: ولادة شمعة جديدة لا تُزيح العرض — يبقى ثابتاً
                مثل المنصات الاحترافية (وليس اتباع الشمعة الحية) */
             try { if (pr.chart && pr.chart.rightOffset < 0) pr.chart.rightOffset -= 1; } catch (e) {}
-            if (pr.dataArr.length > 3000) {
-              var excess = pr.dataArr.length - 2600;
+            if (pr.dataArr.length > 8000) {
+              var excess = pr.dataArr.length - 7600;
               pr.dataArr.splice(0, excess);
               try { if (pr.chart && pr.chart.sim && pr.chart.sim.candles) pr.chart.sim.candles.splice(0, excess); } catch (e) {}
             }
@@ -8793,8 +8990,8 @@ function defineBadiApp() {
             pr.dataArr.push(k);
             /* أثناء التمرير للخلف: ولادة شمعة جديدة لا تُزيح العرض */
             try { if (ch && ch.rightOffset < 0) ch.rightOffset -= 1; } catch (e) {}
-            if (pr.dataArr.length > 3000) {
-              var excess = pr.dataArr.length - 2600;
+            if (pr.dataArr.length > 8000) {
+              var excess = pr.dataArr.length - 7600;
               pr.dataArr.splice(0, excess);
               try { if (ch && ch.sim && ch.sim.candles) ch.sim.candles.splice(0, excess); } catch (e) {}
             }
@@ -9794,6 +9991,13 @@ ApplicationWindow {
                 win.webCall("__badiApp.setBoard(" + JSON.stringify(e.board) + ")")
                 return
             }
+            if (e.type === "resync") {
+                /* v14.3: إصلاح سد الثغرات وصل إلى ذاكرة الخادم — مزامنة كاملة
+                   واحدة تُظهر الشموع المُصلَحة (سد الفجوة بين شمعة الحية
+                   والشموع التي قبلها) بلا أي إعادة طلب */
+                win.syncFull()
+                return
+            }
             if (e.type === "older") {
                 /* v14.1: الدفعة موسومة بالعملة والفريم — prependCandles ترفض
                    أي دفعة لا تطابق الشارت الحالي (حماية من الاخلاط عند التبديل السريع) */
@@ -10070,6 +10274,42 @@ ApplicationWindow {
                         win.webCall("__badiApp.setCd(" + win.webCd + ")")
                     }
                 }
+            }
+            /* ───── v14.3 (طلب المستخدم): عدد أيام شموع التاريخ — يُكتب الرقم
+               ويُضغط حفظ (0.5 حتى 30 يوم، الافتراضي يومان). عند فتح العملة
+               تُجلب دفعة 300 ثم 300 حتى بلوغ هذا العدد وكل دفعة تُرفع للشارت ───── */
+            Rectangle { Layout.fillWidth: true; height: 1; color: backend.c.border }
+            RowLayout {
+                spacing: 8
+                Icon { name: "candle"; sz: 14; tint: backend.c.accent }
+                Label { text: backend.s.histDays; font.pixelSize: 13; font.bold: true; color: backend.c.fg }
+                Item { Layout.fillWidth: true }
+                Btn { text: backend.s.histSave; iconName: "ok"; implicitHeight: 30; font.pixelSize: 10
+                      onClicked: backend.setHistDays(histDaysField.text) }
+            }
+            Label {
+                text: backend.s.histDaysHint; font.pixelSize: 10; color: backend.c.sub
+                wrapMode: Text.WordWrap; Layout.fillWidth: true
+            }
+            TextField {
+                id: histDaysField
+                Layout.fillWidth: true
+                implicitHeight: 38
+                font.pixelSize: 12; font.family: "monospace"
+                color: backend.c.fg
+                text: backend.histDaysStr
+                placeholderText: "2"
+                placeholderTextColor: backend.c.sub
+                selectByMouse: true
+                leftPadding: 12; rightPadding: 12
+                inputMethodHints: Qt.ImhPreferNumbers
+                validator: DoubleValidator { bottom: 0.5; top: 30; decimals: 1; locale: "C"; notation: DoubleValidator.StandardNotation }
+                background: Rectangle {
+                    radius: 10; color: backend.c.bg
+                    border.width: histDaysField.activeFocus ? 2 : 1
+                    border.color: histDaysField.activeFocus ? backend.c.accent : backend.c.border
+                }
+                onAccepted: backend.setHistDays(histDaysField.text)
             }
             /* ───── مظهر الشارت: تغيير الخلفية وألوان الشموع بحرية (طلب المستخدم) ───── */
             Rectangle { Layout.fillWidth: true; height: 1; color: backend.c.border }

@@ -1961,6 +1961,11 @@ WRITE_INTERVAL = 0.5
 PRELOAD_FIRST_SYMBOL = "BRLUSD_otc"
 PRELOAD_CANDLES = 300          # 300 شمعة لكل عملة عند فتح شارتها (طلب المستخدم)
 PAGINATION_BATCH = 300         # v13.2: دفعة التمرير للخلف 300 شمعة وليس 170 (طلب المستخدم)
+# v14.3 (طلب المستخدم حرفياً): «عند فتح العملة يجلب دفعة 300 شمعة ثم يجلب
+# 300 اخرى مثل ماكانت تفعل في السابق خليها تجلب 2 يوم ... ضع في الاعدادات
+# كم يريد ان يسحب عدد الايام تبع الشموع ... الافتراضي 2 يوم يمكنه جعله
+# 1 يوم 0.5 يوم 3 يوم حتا ل 30 يوم». التطبيق يضبط هذه القيمة من بطاقة الإعدادات.
+QX_HISTORY_DAYS = 2.0          # الافتراضي يومان (0.5 حتى 30 يوم)
 PRELOAD_MIN_CANDLES = 30       # أقل عدد مقبول من الشموع لعملة واحدة
 PRELOAD_ASSET_DELAY = 1.0      # ثانية واحدة بين عملة وأخرى (واحدة تلو الأخرى)
 PRELOAD_TIMEOUT = 25.0         # مهلة طلب الشموع لكل عملة
@@ -1973,8 +1978,8 @@ TICK_PURGE_INTERVAL = 30
 TICK_CACHE_MAXLEN = 600        # حد أقصى للتيكات المحفوظة لكل عملة
 # أمان القرص:
 MT4_WRITE_THROTTLE = 1.0       # كان 0.2s لعملة واحدة؛ مع ~90 عملة = 1.0s لكتابة HST
-ASSET_MAX_CANDLES = 3000       # كان 1000؛ رُفع لكي تتراكم دفعات التمرير للخلف
-CANDLESTORE_KEEP_PER_SYMBOL = 5000  # أقصى شموع محفوظة في candles.db لكل عملة
+ASSET_MAX_CANDLES = 45000      # v14.3: كان 3000؛ رُفع ليستوعب دفعات التاريخ المتسلسلة حتى 30 يوم من شموع الدقيقة
+CANDLESTORE_KEEP_PER_SYMBOL = 50000  # v14.3: أقصى شموع محفوظة في candles.db لكل عملة
 DB_TRIM_INTERVAL = 3600        # فحص حجم candles.db كل ساعة
 LOG_MAX_BYTES = 10 * 1024 * 1024    # تدوير qxchart.log عند 10MB
 STALE_DATA_TIMEOUT = 180
@@ -3631,6 +3636,88 @@ async def fetch_1s_and_aggregate_to_1m(asset: Asset, idx: int = 1, total: int = 
     return candles_1m, len(candles_1s)
 
 
+async def apply_1s_bridge_to_asset(asset: Asset, idx: int = 1, total: int = 1) -> bool:
+    """v14.3 — خط آلة سد الثغرات الحرفي من qx_server_v10.py (fetch_loop).
+
+    المستخدم طلب حرفياً: «لقد ارسلت لك الكود الصحيح كيف تقوم بسدها عن طريق
+    جلب شموع 1 ثانية ثم تركيبهم لماذا لا تفهم». هذا هو الكود نفسه من v10
+    (خطوات b/c/d في حلقة الجلب الأصلية) بلا أي تغيير في المنهج:
+
+      a) fetch_1s_and_aggregate_to_1m — جلب شموع 1 ثانية ثم تجميعها إلى 1m
+         (نفس الدالة الأصلية كما هي).
+      b) الدمج: استبدال آخر M1_BRIDGE_REPLACE_COUNT شمعة تاريخية بشموع
+         1s المركّبة (الأدق بلا ثغرات — 60 شمعة 1s متتالية = شمعة 1m كاملة)
+         + إضافة شموع الجسر الأحدث من آخر شمعة تاريخية.
+      c) sort + إزالة التكرار بالوقت (نفس منطق _bridge_fetch_recent_candles).
+      d) الكتابة: HST + sync_state + snapshot (نفس خطوة d في v10).
+
+    تُعيد True إذا أضافت/استبدلت شيئاً فعلاً. أي فشل لا يكسر التحميل أبداً.
+    """
+    if PERIOD_SECONDS != 60:
+        return False
+    # ── (a) جلب شموع 1 ثانية وتركيبها إلى 1m — الدالة الأصلية كما هي ──────
+    try:
+        bridge_1m_candles, _n_1s_fetched = await fetch_1s_and_aggregate_to_1m(
+            asset, idx=idx, total=total)
+    except Exception as e:
+        logmsg(f"[1s_bridge:{asset.symbol}] bridge failed (non-fatal): {e}")
+        return False
+    if not bridge_1m_candles or not asset.candles:
+        return False
+    # ── (b) الدمج — الكود الحرفي من v10 (fetch_loop خطوة c) ────────────────
+    # v8.13: cap the bridge to the NEWEST M1_BRIDGE_REPLACE_COUNT candles
+    # (default 6). The max gap between live stream and historical is 5
+    # candles, so 6 bridge candles guarantee full coverage.
+    bridge_for_merge = bridge_1m_candles[-M1_BRIDGE_REPLACE_COUNT:]
+    bridge_by_time = {c['time']: c for c in bridge_for_merge}
+    merged_list = []
+    _replaced_count = 0
+    for c in asset.candles:
+        if c['time'] in bridge_by_time:
+            # REPLACE: bridge candle is more accurate (no gaps)
+            merged_list.append(bridge_by_time.pop(c['time']))
+            _replaced_count += 1
+        else:
+            merged_list.append(c)
+    # APPEND remaining bridge candles (newer than last historical)
+    _appended_count = len(bridge_by_time)
+    merged_list.extend(bridge_by_time.values())
+    # Sort + dedup by time
+    seen = set()
+    deduped = []
+    for c in sorted(merged_list, key=lambda x: x['time']):
+        if c['time'] not in seen:
+            seen.add(c['time'])
+            deduped.append(c)
+    asset.candles = deduped
+    # ── (c) write merged HST + update sync_state — v10 خطوة d حرفياً ──────
+    if asset.candles:
+        asset.price = asset.candles[-1]['close']
+    try:
+        asset.write(force=True)
+    except Exception:
+        pass
+    MT4_WRITER.sync_state[asset.symbol] = {
+        'period': PERIOD,
+        'candles': list(asset.candles),
+        'last_write': 0,
+        'last_price': float(asset.candles[-1]['close']) if asset.candles else 0.0,
+    }
+    try:
+        MT4_WRITER.write_to_file(asset.symbol, PERIOD, asset.candles)
+    except Exception:
+        pass
+    try:
+        MT4_WRITER.save_snapshot(asset.symbol, asset.candles)
+    except Exception:
+        pass
+    logmsg(
+        f"[1s_bridge:{asset.symbol}] merged: REPLACED {_replaced_count} historical "
+        f"+ APPENDED {_appended_count} new bridge (source: {_n_1s_fetched} 1s)"
+    )
+    return _appended_count > 0 or _replaced_count > 0
+
+
 async def subsecond_stream(asset: Asset):
     """Dedicated stream for subsecond timeframes (5s/10s/15s/30s).
 
@@ -4067,6 +4154,42 @@ class CandleStore:
         self._init_schema()
 
     def _init_schema(self):
+        # v14.3 (سبب حقيقي لـ«الة سد الثغرات لا تعمل»): قاعدة candles.db التالفة
+        # (database disk image is malformed) تجعل كل عمليات الآلة — علامات
+        # التجمد، اللقطات، القراءات — تفشل بصمت. هنا نكشف التلف وننعزل الملف
+        # باسم candles.db.corrupt-<وقت> ونعيد إنشاء قاعدة نظيفة تلقائياً.
+        try:
+            probe = _sqlite3.connect(self.db_path, timeout=10.0, isolation_level=None)
+            try:
+                rows = probe.execute("PRAGMA quick_check;").fetchall()
+            finally:
+                probe.close()
+            healthy = bool(rows) and len(rows) == 1 and str(rows[0][0]).strip().lower() == "ok"
+            if not healthy:
+                stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                for suffix in ("", "-wal", "-shm"):
+                    p = self.db_path + suffix
+                    if os.path.exists(p):
+                        try:
+                            os.rename(p, f"{p}.corrupt-{stamp}")
+                        except Exception:
+                            try:
+                                os.remove(p)
+                            except Exception:
+                                pass
+        except Exception:
+            # الاتصال نفسه فشل (تلف شديد) — عزل أيضاً
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            for suffix in ("", "-wal", "-shm"):
+                p = self.db_path + suffix
+                if os.path.exists(p):
+                    try:
+                        os.rename(p, f"{p}.corrupt-{stamp}")
+                    except Exception:
+                        try:
+                            os.remove(p)
+                        except Exception:
+                            pass
         try:
             conn = _sqlite3.connect(self.db_path, timeout=10.0, isolation_level=None)
             try:
@@ -4328,6 +4451,29 @@ def get_candle_store() -> CandleStore:
             db_path = os.path.join(base_dir, 'candles.db')
             _CANDLE_STORE = CandleStore(db_path)
         return _CANDLE_STORE
+
+
+def reset_gap_flags() -> int:
+    """v14.3 — تصفير علامات تجمّد سد الثغرات القديمة (جدول gap_state في candles.db).
+
+    لماذا؟ آلة سد الثغرات الأصلية (MT4Writer.fill_gap_once كما هي من v10)
+    تتجمّد لكل عملة بعد أول سد ناجح. الجلسات السابقة كانت تجمّد العملات على
+    شموع ما زالت فيها ثغرات، والعلامة القديمة المحفوظة في القاعدة تجعل
+    fill_gap_once يعود فوراً بلا أي لمس — فتبقى الثغرات في الشارت للأبد
+    («الالة لا تعمل»). تصفير العلامات يعيد للآلة الأصلية نفسها حق السد من
+    جديد عند هذا التشغيل، وتُتجمّد طبيعياً بعد أول سد ناجح (نفس سلوك v10
+    عند أول تشغيل نظيف). لا يعدّل خوارزمية السد بشيء — يصحّح حالة القاعدة فقط.
+    """
+    try:
+        store = get_candle_store()
+        conn = _sqlite3.connect(store.db_path, timeout=10.0, isolation_level=None)
+        try:
+            cur = conn.execute("DELETE FROM gap_state;")
+            return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        finally:
+            conn.close()
+    except Exception:
+        return 0
 
 
 # ==============================================================================
@@ -5364,6 +5510,15 @@ async def preload_one_asset(api_symbol: str, idx: int = 1, total: int = 1):
             logmsg(f"[preload {idx}/{total}] {api_symbol}: stream start failed: {e}")
     if asset not in ALL_STREAMING_ASSETS:
         ALL_STREAMING_ASSETS.append(asset)
+    # v14.3 (طلب المستخدم حرفياً: «سدها عن طريق جلب شموع 1 ثانية ثم تركيبهم»)
+    # خط آلة سد الثغرات من qx_server_v10.py كما هو — يُنفَّذ عند فتح العملة
+    # مباشرة بعد أول 300 شمعة وبداية البث الحي: جلب شموع 1 ثانية وتركيبها
+    # إلى 1m لسد الفجوة بين آخر شمعة تاريخية والشمعة الحية.
+    if PERIOD_SECONDS == 60:
+        try:
+            await apply_1s_bridge_to_asset(asset, idx, total)
+        except Exception as _bridge_e:
+            logmsg(f"[preload {idx}/{total}] {api_symbol}: 1s bridge skipped (non-fatal): {_bridge_e}")
     _PRELOADED_INFO[api_symbol] = {
         "candles": len(asset.candles) if asset.candles else 0,
         "at": datetime.now().strftime("%H:%M:%S"),
@@ -5521,16 +5676,10 @@ async def fetch_older_batch(api_symbol: str, before_time=None, count: int = PAGI
         older = [c for c in candles if c['time'] < before_time][-count:]
         if older:
             break
-        # لا شموع أقدم في هذا الرد — سجّل وأعد المحاولة مرة واحدة قبل الاستسلام
+        # لا شموع أقدم في هذا الرد — إعادة محاولة واحدة صامتة قبل الاستسلام
         if _attempt == 0:
-            got = len(candles)
-            logmsg(f"[older:{api_symbol}] attempt 1 got {got} candles but none older "
-                   f"than {time.strftime('%Y-%m-%d %H:%M', time.gmtime(before_time))} "
-                   f"— retrying once (stolen/broken response guard)")
             await asyncio.sleep(0.6)
     if not older:
-        logmsg(f"[older:{api_symbol}] server returned nothing older than "
-               f"{time.strftime('%Y-%m-%d %H:%M', time.gmtime(before_time))} (history end?)")
         return 0
     merged = list(older) + list(asset.candles or [])
     seen, unique = set(), []
@@ -5550,8 +5699,7 @@ async def fetch_older_batch(api_symbol: str, before_time=None, count: int = PAGI
         "closed": _prev_info.get("closed", False),
         "last_older_batch": len(older),
     }
-    logmsg(f"[older:{api_symbol}] +{len(older)} candles (batch {count}) — oldest now "
-           f"{time.strftime('%Y-%m-%d %H:%M', time.gmtime(unique[0]['time']))}")
+    logmsg(f"[older:{api_symbol}] +{len(older)} candles (batch {count})")
     return len(older)
 
 
@@ -9712,6 +9860,12 @@ if __name__ == "__main__":
         os.makedirs(MT4_HISTORY_PATH, exist_ok=True)
     except Exception:
         pass
+    # v14.3 (طلب المستخدم: «طريقة سد الثغرات لماذا لا تعمل») — تصفير علامات
+    # التجمّد القديمة قبل تشغيل الآلة: الجلسات السابقة تجمّدت العملات على
+    # شموع فيها ثغرات فتوقفت الآلة للأبد. الخوارزمية نفسها كما هي.
+    _reset_n = reset_gap_flags()
+    if _reset_n:
+        logmsg(f"[gapfill] reset {_reset_n} stale gap flags — filler active again")
     asyncio.run_coroutine_threadsafe(health_monitor(), ASYNC_LOOP)
     asyncio.run_coroutine_threadsafe(auto_reconnect(), ASYNC_LOOP)
     asyncio.run_coroutine_threadsafe(keepalive_loop(), ASYNC_LOOP)
