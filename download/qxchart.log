@@ -1,0 +1,36 @@
+[01:13:01] FATAL in main thread (top level): module 'qx_server_v12' has no attribute 'WebSocketClient'
+Traceback (most recent call last):
+  File "/home/z/my-project/scripts/test_v12_instruments.py", line 130, in <module>
+    asyncio.run(main())
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/z/my-project/scripts/test_v12_instruments.py", line 56, in main
+    ws = object.__new__(m.WebSocketClient)
+                        ^^^^^^^^^^^^^^^^^
+AttributeError: module 'qx_server_v12' has no attribute 'WebSocketClient'. Did you mean: 'WebsocketClient'?
+
+[01:13:10] FATAL in main thread (top level): FAIL 2b: inline event wrong
+Traceback (most recent call last):
+  File "/home/z/my-project/scripts/test_v12_instruments.py", line 130, in <module>
+    asyncio.run(main())
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/z/my-project/scripts/test_v12_instruments.py", line 84, in main
+    assert isinstance(ev, list) and len(ev) == 3, "FAIL 2b: inline event wrong"
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: FAIL 2b: inline event wrong
+
