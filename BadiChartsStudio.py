@@ -408,6 +408,8 @@ svg{vertical-align:middle;flex-shrink:0}
       </div>
       <!-- ═══ شريط معلومات بسيط تحت الشارت: متصل · المنطقة الزمنية · الوقت · FPS (بدون اسم العملة — طلب المستخدم) ═══ -->
       <div id="statusBar">
+        <span id="stBrand" class="mono">BADI STUDIO v2.13.0</span>
+        <span class="st-sep">·</span>
         <span id="stDot" class="st-dot"></span><span id="stConn">Connected</span>
         <span class="grow"></span>
         <span id="stTz" class="mono" dir="ltr">UTC—</span>
@@ -4222,12 +4224,186 @@ BADI_TOOL_DIR = os.path.join(BADI_DIR, "Tools")
 BADI_THUMB_DIR = os.path.join(BADI_DIR, "Thumbs")
 
 
+# ═══════════ ملف الدليل: شرح البرمجة والرسم على الشارت (طلب المستخدم) ═══════════
+# يُكتب مرة واحدة في BadiCharts/Indicators عند الإقلاع — مؤشر حقيقي يعمل،
+# والشرح الكامل داخل تعليقاته: بنية المؤشر، الحساب والدوال الجاهزة، API السوق
+# (نسبة الدفع + مفتوح/مغلق)، الإشارات وتلجرام والنطاق، الرسم الحر على الشارت،
+# وأدوات الرسم التفاعلية. إذا حذفه المستخدم يُعاد عند الإقلاع التالي.
+GUIDE_FILE_NAME = "دليل البرمجة والرسم على الشارت.js"
+
+GUIDE_JS = """/* ═══════════════════════════════════════════════════════════════════════════
+   دليل البرمجة والرسم على الشارت — BadiCharts Studio  (ملف الشرح الكامل)
+   ═══════════════════════════════════════════════════════════════════════════
+
+   هذا الملف مؤشر حقيقي يعمل على الشارت — والشرح الكامل في التعليقات أدناه.
+   شغّله بزر ▶ وسترى: نطاق بولينجر مرسوم + تعبئة شفافة + دائرة + نص حر.
+
+   ── 1) بنية أي مؤشر ────────────────────────────────────────────────────────
+   الكود ينتهي دائمًا بـ return { ... } ويحوي:
+
+     label    : اسم المؤشر كما يظهر على الشارت
+     type     : 'overlay' فوق الشموع   |   'pane' نافذة أسفل الشارت
+     color    : لون المؤشر الافتراضي
+     settings : الإعدادات — أي مفتاح يظهر تلقائيًا في بطاقة الإعدادات ⚙
+                (period / mult / fast / slow / signal / bins / color)
+
+   ── 2) calculate(candles, s) — الحساب ──────────────────────────────────────
+     candles : مصفوفة الشموع [{time, open, high, low, close, volume}, ...]
+     s       : الإعدادات أعلاه
+     يعيد    : مصفوفة أرقام  أو  كائن {الاسم: [قيم...], ...}
+
+     دوال جاهزة:
+       Indicators.sma(v, p)          المتوسط المتحرك البسيط
+       Indicators.ema(v, p)          المتوسط المتحرك الأسي
+       Indicators.bollinger(v, p, m) → {mid, upper, lower}
+       Indicators.rsi(v, p)          مؤشر القوة النسبية
+       Indicators.macd(v, f, sl, sg) الماكد
+       Indicators.stoch(candles, p, sm) الاستوكاستك
+       Indicators.atr(candles, p)    متوسط المدى الحقيقي
+
+   ── 3) معلومات الزوج: نسبة الدفع + السوق مفتوح أم مغلق (API السوق) ────────
+     Indicators.market.info()             ← الزوج الحالي: {name, payout, open, otc}
+     Indicators.market.info('EUR/USD')    ← زوج محدد بالاسم
+     Indicators.market.assets()           ← كل العملات [{name, payout, open, otc}]
+     Indicators.market.added()            ← العملات المضافة إلى شريط العملات فقط
+     Indicators.market.current()          ← عملة الشارت النشط الآن
+     الحالة: OTC والعملات الرقمية مفتوحة دائمًا — والفوركس من الأحد 22:00 إلى الجمعة 22:00 UTC
+
+   ── 4) الإشارات + بوت تلجرام ───────────────────────────────────────────────
+     signal(candles, values, s) تُفحص كل ثانية، وعندما تعيد:
+
+       {dir: 'up' | 'down', price: السعر, chats: '@قناتك أو -100...'}   ← إشارة
+       null                                                             ← لا شيء
+
+       chats = معرف محادثة/قناة تلجرام لهذا المؤشر — الإشارة ونتيجتها (WIN/LOSS)
+               تُرسلان تلقائيًا إلى تلك المحادثة مع لقطة الشارت.
+     لإرسال إشارات لأكثر من عملة أضف مفاتيح في settings:
+       scope:     'added' → العملات المضافة للشريط فقط
+                  'high'  → العملات ذات نسبة الدفع الأعلى (ليس شرطًا تكون مضافة)
+                  'all'   → كل العملات
+       minPayout: 85            ← الحد الأدنى مع scope: 'high'
+
+   ── 5) الرسم الحر — الشارت يقبل رسم أي شيء (Canvas 2D كامل) ───────────────
+     render(ctx, values, h, s) اختيارية — بدونها تُرسم النتائج خطوطًا تلقائيًا.
+       ctx    : سياق Canvas 2D — خطوط، مستطيلات، دوائر، نصوص، تدرجات، ظلال...
+       values : ناتج calculate
+       h      : أدوات الإحداثيات:
+                  h.indexToX(i)     فهرس الشمعة → بكسل X
+                  h.priceToY(p)     السعر → بكسل Y        (نوع overlay)
+                  h.paneToY(v)      قيمة → بكسل Y         (نوع pane)
+                  h.firstIdx / h.lastIdx / h.candles / h.THEME / h.barSpacing
+                  h.chartLeft / h.chartRight / h.priceTop / h.priceBottom
+                  h.drawGradientArea(...)  تعبئة متدرجة جاهزة
+
+   ── 6) أدوات الرسم التفاعلية — اسحب وارسم على الشارت مباشرة ───────────────
+     أداة رسم تُبرمج بأربع دوال (راجع مثال Signal Arrow في المحرر):
+
+       onStart(ctx)         بدء السحب  → يعيد كائن الرسم {i1, p1, ...}
+       onUpdate(d, ctx)     أثناء السحب → عدّل بيانات الرسم d
+       onDraw(ctx, d, h)    الرسم في كل إطار
+       onHitTest(d, x, y, h) هل النقطة فوق الرسم؟ (للتحديد/الحذف/الخصائص)
+
+     نصيحة: خزّن الإحداثيات كـ (فهرس شمعة + سعر) — تبقى الرسوم ملتصقة
+            بالشموع عند التكبير والتحريك.
+
+   ── 7) إضافات ──────────────────────────────────────────────────────────────
+     getRange(values, s) → {min, max}   تحديد نطاق النافذة السفلية (pane)
+     log('نص')                          طباعة في كونسول المحرر
+     النتيجة تُحسب تلقائيًا: عند انتهاء مدة الفريم تُقارن الدخول بالخروج (WIN/LOSS)
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+return {
+  label: 'دليل البرمجة والرسم',
+  type: 'overlay',
+  color: '#22E08A',
+  settings: { period: 20, mult: 2 },
+
+  calculate(candles, s) {
+    const closes = candles.map(c => c.close);
+    return Indicators.bollinger(closes, s.period, s.mult);   // {mid, upper, lower}
+  },
+
+  render(ctx, v, h, s) {
+    if (!v) return;
+
+    // (أ) تعبئة شفافة بين الحدين — الأشكال المملوءة ممكنة أيضًا
+    ctx.fillStyle = 'rgba(34, 224, 138, 0.08)';
+    ctx.beginPath();
+    let started = false;
+    for (let i = h.firstIdx; i <= h.lastIdx; i++) {
+      if (v.upper[i] == null) continue;
+      const x = h.indexToX(i), y = h.priceToY(v.upper[i]);
+      if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+    }
+    for (let i = h.lastIdx; i >= h.firstIdx; i--) {
+      if (v.lower[i] == null) continue;
+      ctx.lineTo(h.indexToX(i), h.priceToY(v.lower[i]));
+    }
+    ctx.closePath();
+    ctx.fill();
+
+    // (ب) خطوط بعرض ولون ونمط مخصص
+    const line = (arr, color, width, dash) => {
+      ctx.strokeStyle = color; ctx.lineWidth = width;
+      ctx.setLineDash(dash || []);
+      ctx.beginPath();
+      let st = false;
+      for (let i = h.firstIdx; i <= h.lastIdx; i++) {
+        const val = arr[i];
+        if (val == null) { st = false; continue; }
+        const x = h.indexToX(i), y = h.priceToY(val);
+        if (!st) { ctx.moveTo(x, y); st = true; } else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+    };
+    line(v.upper, '#FF4D5E', 1.4);          // الحد الأعلى — أحمر
+    line(v.lower, '#22E08A', 1.4);          // الحد الأدنى — أخضر
+    line(v.mid, '#38bdf8', 1.6, [5, 4]);    // الوسط — أزرق متقطع
+
+    // (ج) دائرة على آخر شمعة + نص حر — رسم أي شيء فوق الشارت
+    const last = h.lastIdx, mid = v.mid[last];
+    if (mid != null) {
+      ctx.fillStyle = '#38bdf8';
+      ctx.beginPath();
+      ctx.arc(h.indexToX(last), h.priceToY(mid), 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.fillStyle = '#8b93a7';
+    ctx.font = '11px sans-serif';
+    ctx.fillText('هذا نص حر — يمكنك رسم أي شيء على الشارت (Canvas 2D كامل)',
+                 h.chartLeft + 10, h.priceTop + 16);
+  },
+
+  signal(candles, v, s) {
+    // مثال شكل إشارة — محايد افتراضيًا (يعيد null حتى لا يزعجك أثناء التجربة):
+    // const info = Indicators.market.info();            // {name, payout, open, otc}
+    // if (!info.open) return null;                      // السوق مغلق؟ لا إشارات
+    // return { dir: 'up', price: candles[candles.length - 1].close,
+    //          chats: '@mychannel' };                   // معرف تلجرام لهذا المؤشر
+    return null;
+  }
+};"""
+
+
+def _seed_guide_file():
+    """كتابة ملف دليل البرمجة والرسم في مجلد Indicators (مرة واحدة)."""
+    try:
+        p = os.path.join(BADI_IND_DIR, GUIDE_FILE_NAME)
+        if not os.path.exists(p):
+            with open(p, "w", encoding="utf-8") as fh:
+                fh.write(GUIDE_JS + "\n")
+    except Exception:
+        pass
+
+
 def _ensure_badi_dirs():
     for d in (BADI_DIR, BADI_IND_DIR, BADI_TOOL_DIR, BADI_THUMB_DIR):
         try:
             os.makedirs(d, exist_ok=True)
         except Exception:
             pass
+    _seed_guide_file()
 
 
 def _safe_file_name(name):
@@ -7250,24 +7426,19 @@ ApplicationWindow {
                         onClicked: win.page = 0
                     }
                 }
-                Label {
-                    text: "BADI STUDIO v2.13.0"; font.pixelSize: 8; font.letterSpacing: 1.2
-                    font.bold: true; color: backend.c.sub
-                }
             }
             Item { Layout.fillWidth: true }
-            /* زر الوضع المضلم/النهاري بجانب زر تغيير اللغة مباشرة (طلب المستخدم) */
+            /* زرا الوضع الليلي/النهاري والإعدادات جنب بعض مباشرة (طلب المستخدم) */
             IBtn {
                 iconName: backend.dark ? "sun" : "moon"
                 onClicked: backend.dark = !backend.dark
             }
-            LangBox { }
-            /* زر الإعدادات بجانب زر تغيير اللغة مباشرة (طلب المستخدم) */
             IBtn {
                 visible: win.loggedIn
                 iconName: "sett"
                 onClicked: settingsPop.open()
             }
+            LangBox { }
             /* زر قناة تلجرام — ظاهر دائمًا حتى قبل الدخول (واجهة الدخول الجديدة) */
             Rectangle {
                 Layout.preferredHeight: 32
