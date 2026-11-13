@@ -1675,7 +1675,7 @@ function setupChart(ch, p) {
       ch.update = function (c) { wake(); return origUpdate(c); };
       wake();
       /* LIVE SERVER EDITION: عند التمرير إلى بداية الشارت يُطلب من خادم QX
-         دفعة أقدم صغيرة (170 شمعة) تُدمج في الشارت دون أي تأثير على العرض —
+         دفعة أقدم صغيرة (300 شمعة) تُدمج في الشارت دون أي تأثير على العرض —
          كلما زاد التمرير للخلف ظهرت شموع أخرى مثل المنصات الاحترافية */
       try {
         const origConstrain = ch.constrainRightOffset.bind(ch);
@@ -2242,7 +2242,8 @@ function renderAssetMenu() {
   box.innerHTML = rows.map((it) => {
     const on = addedNames().indexOf(it.name) >= 0;
     const open = (typeof badiMarketOpen === "function") ? badiMarketOpen(it.name) : true;
-    return '<button class="am-row" data-am="' + esc(it.name) + '" title="' + (on ? "Remove from the bar" : "Add to the bar") + '">'
+    return '<button class="am-row" data-am="' + esc(it.name) + '" title="' +
+      ((window.__BADI_LANG__ === "ar") ? "افتح شارت هذه العملة وأضفها إلى الشريط" : "Open this chart and add it to the strip") + '">'
       + (it.flag ? '<img class="aflag" src="' + it.flag + '" alt="">' : "")
       + "<b>" + esc(it.name) + "</b>"
       + '<i class="apay">' + Number(it.payout || 0) + "%</i>"
@@ -2516,7 +2517,13 @@ function bindEvents() {
   $("amSearch").addEventListener("input", renderAssetMenu);
   $("amList").addEventListener("click", function (e) {
     const r = e.target.closest("[data-am]");
-    if (r) toggleAsset(r.dataset.am);
+    if (!r) return;
+    /* v13.2 (طلب المستخدم): النقر على عملة في بطاقة العملات يفتح شارتها فوراً
+       وتُضاف إلى شريط العملات إذا لم تكن مضافة — وليس إضافة إلى الشريط فقط */
+    const nm = r.dataset.am;
+    if (addedNames().indexOf(nm) < 0) assetsSave(addedNames().concat([nm]));
+    openAssetChart(nm);
+    assetMenuClose();
   });
   document.addEventListener("click", function (e) {
     if (!$("assetMenu").hidden && !e.target.closest("#assetMenu") && !e.target.closest("#assetAdd")) assetMenuClose();
@@ -3234,7 +3241,7 @@ Splash + login (same BadiCharts logo & flow) → studio:
   • LIVE SERVER EDITION — Quotex REAL market & OTC assets streamed by our own
     QX server (qx_server_v13.py beside the app): real login, real candles
     (BRLUSD_otc 300 on login + others one by one), live prices for every asset,
-    scroll-back batches of 170 older candles — no fake candles, no fake login
+    scroll-back batches of 300 older candles — no fake candles, no fake login
   • Telegram alerts from your indicators, with chart screenshots
   • black dark theme ↔ light theme — the chart & editor follow the app colors live
   • English ↔ العربية
@@ -3269,7 +3276,7 @@ from PySide6.QtWebEngineQuick import QtWebEngineQuick
 #   • نفس تسجيل الدخول (connect_quotex) ونفس جلب الشموع الأصلي دون أي تغيير.
 #   • BRLUSD_otc: 300 شمعة فوراً بعد الدخول + الحالة ونسبة الدفع.
 #   • بقية العملات واحدة تلو الأخرى (300 شمعة لكل عملة) + بث حي لكل عملة.
-#   • دفعات التمرير للخلف (170 شمعة) عبر fetch_older_batch().
+#   • دفعات التمرير للخلف (300 شمعة) عبر fetch_older_batch().
 #   • التيكات في الذاكرة فقط وتُحذف بعد 5 دقائق (سياسة الخادم نفسها).
 _QX_MOD = None
 
@@ -3704,6 +3711,189 @@ def pair_flag_uri(name):
            f'<g transform="translate(0,2.1) scale(0.7)">{FLAGS[base]}{_RIM_GRAY}</g>'
            f'<g transform="translate(13,2.1) scale(0.7)">{FLAGS[quote]}{_RIM_WHITE}</g></svg>')
     return "data:image/svg+xml;utf8," + urllib.parse.quote(svg)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# v13.2 (طلب المستخدم): أعلام باقي العملات — كل العملات في جدول الخادم لها علم
+# (كانت بعض العملات بلا علم). أضيف أعلام العملات الناقصة + شارات للعملات
+# الرقمية والسلع والمؤشرات (بلا علم دولة).
+# ═════════════════════════════════════════════════════════════════════════════
+FLAGS["BDT"] = '<rect width="20" height="14" fill="#006a4e"/><circle cx="9" cy="7" r="3.2" fill="#f42a41"/>'
+FLAGS["EGP"] = '<rect width="20" height="14" fill="#ce1126"/><rect y="4.67" width="20" height="4.66" fill="#fff"/><rect y="9.33" width="20" height="4.67" fill="#000"/><path d="M10 6.2l1 1.6-1 1.6-1-1.6z" fill="#c09300"/>'
+FLAGS["NGN"] = '<rect width="20" height="14" fill="#fff"/><rect width="6.7" height="14" fill="#008751"/><rect x="13.3" width="6.7" height="14" fill="#008751"/>'
+FLAGS["IDR"] = '<rect width="20" height="14" fill="#fff"/><rect width="20" height="7" fill="#ce1126"/>'
+FLAGS["ARS"] = '<rect width="20" height="14" fill="#74acdf"/><rect y="4.67" width="20" height="4.66" fill="#fff"/><circle cx="10" cy="7" r="1.5" fill="#f6b40e"/>'
+FLAGS["COP"] = '<rect width="20" height="7" fill="#fcd116"/><rect y="7" width="20" height="3.5" fill="#003893"/><rect y="10.5" width="20" height="3.5" fill="#ce1126"/>'
+FLAGS["DZD"] = '<rect width="10" height="14" fill="#006233"/><rect x="10" width="10" height="14" fill="#fff"/><circle cx="10" cy="7" r="2.9" fill="none" stroke="#d21034" stroke-width="1.1"/><circle cx="11" cy="7" r="2.3" fill="#fff"/><circle cx="10.4" cy="7" r="2.1" fill="#d21034"/>'
+FLAGS["MXN"] = '<rect width="20" height="14" fill="#006847"/><rect x="6.7" width="6.6" height="14" fill="#fff"/><rect x="13.3" width="6.7" height="14" fill="#ce1126"/><circle cx="10" cy="7" r="1.6" fill="#8c6f2f"/>'
+FLAGS["PHP"] = '<rect width="20" height="7" fill="#0038a8"/><rect y="7" width="20" height="7" fill="#ce1126"/><path d="M0 0l8.5 7L0 14z" fill="#fff"/><circle cx="3" cy="7" r="1.7" fill="#fcd116"/>'
+FLAGS["ZAR"] = '<rect width="20" height="14" fill="#e03c31"/><rect width="20" height="7" fill="#001489"/><path d="M0 0l11 7L0 14z" fill="#007749"/><path d="M0 2.2l8 4.8-8 4.8z" fill="#fff"/><path d="M0 3.8l5.6 3.2L0 10.2z" fill="#ffb81c"/><path d="M0 0l11 7L0 14" stroke="#000" stroke-width="0.7" fill="none"/>'
+FLAGS["XAG"] = '<rect width="20" height="14" fill="#4b5563"/><path d="M3.4 10l1.5-2.8h2.9l1.5 2.8z" fill="#e5e7eb"/><path d="M10.7 10l1.5-2.8h2.9l1.5 2.8z" fill="#f3f4f6"/>'
+FLAGS["HKD"] = '<rect width="20" height="14" fill="#de2910"/><circle cx="10" cy="7" r="3" fill="#fff"/><circle cx="10" cy="7" r="1.1" fill="#de2910"/>'
+
+
+def _badge_uri(body, label, fg="#FFFFFF", dy=10.4, fs=8.6):
+    """شارة أصل SVG — للعملات الرقمية والسلع والمؤشرات (بلا علم دولة)."""
+    txt = (f'<text x="10" y="{dy}" font-size="{fs}" font-weight="bold" '
+           f'text-anchor="middle" fill="{fg}" font-family="Arial,sans-serif">{label}</text>')
+    return _flag_uri(body + txt)
+
+
+# شارات العملات الرقمية والسلع والمؤشرات — بمفتاح رمز الخادم نفسه (طلب المستخدم:
+# قائمة العملات التي يجلبها السكريبت كلها لها علم/شارة)
+SINGLE_BADGES = {
+    "AXSUSD_otc": _badge_uri('<rect width="20" height="14" fill="#0050d8"/>', "AXS"),
+    "USCrude_otc": _flag_uri('<rect width="20" height="14" fill="#1f2a33"/><path d="M10 2.4c2.7 3.5 4 5.6 4 7.3a4 4 0 0 1-8 0c0-1.7 1.3-3.8 4-7.3z" fill="#e8b923"/>'),
+    "UKBrent_otc": _flag_uri('<rect width="20" height="14" fill="#0b3d2c"/><path d="M10 2.4c2.7 3.5 4 5.6 4 7.3a4 4 0 0 1-8 0c0-1.7 1.3-3.8 4-7.3z" fill="#f6cf3f"/>'),
+    "ETCUSD_otc": _badge_uri('<rect width="20" height="14" fill="#328332"/>', "ETC"),
+    "ATOUSD_otc": _flag_uri('<rect width="20" height="14" fill="#2e2d50"/><circle cx="10" cy="7" r="2" fill="none" stroke="#fff" stroke-width="0.9"/><ellipse cx="10" cy="7" rx="4.4" ry="1.7" fill="none" stroke="#fff" stroke-width="0.8" transform="rotate(24 10 7)"/><ellipse cx="10" cy="7" rx="4.4" ry="1.7" fill="none" stroke="#fff" stroke-width="0.8" transform="rotate(-24 10 7)"/>'),
+    "AVAUSD_otc": _badge_uri('<rect width="20" height="14" fill="#e84142"/>', "AVAX"),
+    "BCHUSD_otc": _badge_uri('<rect width="20" height="14" fill="#8dc351"/>', "\u20bf", fs=9.6),
+    "BNBUSD_otc": _badge_uri('<rect width="20" height="14" fill="#f3ba2f"/>', "BNB"),
+    "BTCUSD_otc": _badge_uri('<rect width="20" height="14" fill="#f7931a"/>', "\u20bf", fs=9.6),
+    "ETHUSD_otc": _flag_uri('<rect width="20" height="14" fill="#454a75"/><path d="M10 1.8l4.2 5.4L10 9.8 5.8 7.2z" fill="#f4f4f4" fill-opacity="0.92"/><path d="M10 10.9l4.2-2.7L10 12.4l-4.2-4.2z" fill="#f4f4f4" fill-opacity="0.6"/>'),
+    "DASUSD_otc": _badge_uri('<rect width="20" height="14" fill="#008ce7"/>', "DASH"),
+    "DOTUSD_otc": _flag_uri('<rect width="20" height="14" fill="#e6007a"/><circle cx="10" cy="4" r="1.7" fill="#fff"/><circle cx="6.2" cy="10" r="1.7" fill="#fff"/><circle cx="13.8" cy="10" r="1.7" fill="#fff"/>'),
+    "LINUSD_otc": _flag_uri('<rect width="20" height="14" fill="#2a5ada"/><path d="M10 2.4l3 1.7v3.5l-3 1.7-3-1.7V4.1z" fill="#fff"/><path d="M10 7.4l3 1.7v3.5l-3 1.7-3-1.7V9.1z" fill="#fff" fill-opacity="0.75"/>'),
+    "LTCUSD_otc": _badge_uri('<rect width="20" height="14" fill="#345d9d"/>', "\u0141", fs=9.8),
+    "SOLUSD_otc": _flag_uri('<rect width="20" height="14" fill="#141414"/><path d="M5 4.6h9.2l-1.9 1.9H3.1z" fill="#14f195"/><path d="M5 7.1h9.2L12.3 9H3.1z" fill="#9945ff"/><path d="M5 9.6h9.2l-1.9 1.9H3.1z" fill="#14f195"/>'),
+    "TONUSD_otc": _badge_uri('<rect width="20" height="14" fill="#0098ea"/>', "TON"),
+    "TRUUSD_otc": _badge_uri('<rect width="20" height="14" fill="#1f2a5b"/>', "TRUMP", fs=7.2),
+    "XRPUSD_otc": _badge_uri('<rect width="20" height="14" fill="#23292f"/>', "XRP"),
+    "ZECUSD_otc": _badge_uri('<rect width="20" height="14" fill="#f4b728"/>', "Z"),
+    "XAGUSD_otc": _badge_uri('<rect width="20" height="14" fill="#4b5563"/>', "Ag"),
+    "XAUUSD_otc": _badge_uri('<rect width="20" height="14" fill="#3d3325"/>', "Au", fg="#f6cf3f"),
+    "XAGUSD": _badge_uri('<rect width="20" height="14" fill="#4b5563"/>', "Ag"),
+    "XAUUSD": _badge_uri('<rect width="20" height="14" fill="#3d3325"/>', "Au", fg="#f6cf3f"),
+    "F40EUR": _flag_uri('<rect width="6.7" height="14" fill="#0055a4"/><rect x="6.7" width="6.6" height="14" fill="#fff"/><rect x="13.3" width="6.7" height="14" fill="#ef4135"/>'),
+    "STXEUR": _flag_uri('<rect width="20" height="14" fill="#2b4bd7"/><circle cx="10" cy="7" r="3.1" fill="none" stroke="#f8d33e" stroke-width="1.2" stroke-dasharray="1.15 1.32"/><text x="10" y="9.2" font-size="6.4" font-weight="bold" text-anchor="middle" fill="#f8d33e" font-family="Arial,sans-serif">50</text>'),
+    "AXJAUD": _flag_uri('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 14"><rect width="20" height="14" fill="#012169"/><path d="M0 0l8 5.6M8 0L0 5.6" stroke="#fff" stroke-width="1.3"/><path d="M4 0v5.6M0 2.8h8" stroke="#fff" stroke-width="1.9"/><path d="M4 0v5.6M0 2.8h8" stroke="#c8102e" stroke-width="0.9"/><circle cx="14.5" cy="4.5" r="1" fill="#fff"/><circle cx="16" cy="8.5" r="1" fill="#fff"/><circle cx="13" cy="10.5" r="0.9" fill="#fff"/></svg>'),
+    "CHIA50": _flag_uri('<rect width="20" height="14" fill="#de2910"/><path d="M4.4 2.6l0.9 2.6h2.7l-2.2 1.7 0.9 2.6-2.3-1.6-2.3 1.6 0.9-2.6L0.8 5.2h2.7z" fill="#ffde00" transform="scale(0.85) translate(0.6,0.4)"/><circle cx="12.6" cy="3.4" r="0.8" fill="#ffde00"/><circle cx="14.6" cy="6" r="0.8" fill="#ffde00"/><circle cx="14.6" cy="9" r="0.8" fill="#ffde00"/><circle cx="12.6" cy="11.4" r="0.8" fill="#ffde00"/>'),
+    "FTSGBP": _flag_uri('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 14"><rect width="20" height="14" fill="#012169"/><path d="M0 0l20 14M20 0L0 14" stroke="#fff" stroke-width="2.6"/><path d="M0 0l20 14M20 0L0 14" stroke="#c8102e" stroke-width="1.1"/><path d="M10 0v14M0 7h20" stroke="#fff" stroke-width="4.2"/><path d="M10 0v14M0 7h20" stroke="#c8102e" stroke-width="2.2"/></svg>'),
+    "JPXJPY": _flag_uri('<rect width="20" height="14" fill="#f4f4f4"/><circle cx="10" cy="7" r="3.4" fill="#bc002d"/>'),
+    "HSIHKD": _flag_uri('<rect width="20" height="14" fill="#de2910"/><circle cx="10" cy="7" r="3" fill="#fff"/><circle cx="10" cy="7" r="1.1" fill="#de2910"/>'),
+    "IBXEUR": _flag_uri('<rect width="20" height="3.5" fill="#aa151b"/><rect y="3.5" width="20" height="7" fill="#f1bf00"/><rect y="10.5" width="20" height="3.5" fill="#aa151b"/>'),
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+# v13.2 (طلب المستخدم): قائمة كل العملات التي يجلبها السكريبت (جدول الترمينال
+# نفسه) مع الاسم الحقيقي كما يعرضه Quotex — الواجهة تعرض هذه الأسماء الحقيقية
+# وليس الأسماء النظامية المولّدة (BRLUSD_otc تُعرض «USD/BRL (OTC)» مثلاً).
+# ═════════════════════════════════════════════════════════════════════════════
+QX_ASSET_NAMES = {
+    "AXSUSD_otc": "Axie Infinity (OTC)",
+    "BRLUSD_otc": "USD/BRL (OTC)",
+    "EURNZD_otc": "EUR/NZD (OTC)",
+    "USCrude_otc": "USCrude (OTC)",
+    "USDBDT_otc": "USD/BDT (OTC)",
+    "USDEGP_otc": "USD/EGP (OTC)",
+    "USDNGN_otc": "USD/NGN (OTC)",
+    "CADCHF_otc": "CAD/CHF (OTC)",
+    "UKBrent_otc": "UKBrent (OTC)",
+    "USDJPY": "USD/JPY",
+    "USDIDR_otc": "USD/IDR (OTC)",
+    "NZDUSD_otc": "NZD/USD (OTC)",
+    "EURJPY": "EUR/JPY",
+    "AUDJPY": "AUD/JPY",
+    "EURUSD": "EUR/USD",
+    "GBPUSD": "GBP/USD",
+    "CADJPY": "CAD/JPY",
+    "EURCAD": "EUR/CAD",
+    "AUDUSD": "AUD/USD",
+    "EURGBP": "EUR/GBP",
+    "CHFJPY": "CHF/JPY",
+    "GBPJPY": "GBP/JPY",
+    "ETCUSD_otc": "Ethereum Classic (OTC)",
+    "AUDCAD": "AUD/CAD",
+    "EURAUD": "EUR/AUD",
+    "USDCAD": "USD/CAD",
+    "EURCHF": "EUR/CHF",
+    "F40EUR": "CAC 40",
+    "GBPAUD": "GBP/AUD",
+    "GBPCAD": "GBP/CAD",
+    "GBPCHF": "GBP/CHF",
+    "STXEUR": "EURO STOXX 50",
+    "USDCHF": "USD/CHF",
+    "AXJAUD": "S&P/ASX 200",
+    "CHIA50": "FTSE China A50 Index",
+    "FTSGBP": "FTSE 100",
+    "JPXJPY": "Nikkei 225",
+    "ATOUSD_otc": "Cosmos (OTC)",
+    "AUDCAD_otc": "AUD/CAD (OTC)",
+    "AUDCHF_otc": "AUD/CHF (OTC)",
+    "AUDJPY_otc": "AUD/JPY (OTC)",
+    "AUDUSD_otc": "AUD/USD (OTC)",
+    "AVAUSD_otc": "Avalanche (OTC)",
+    "BCHUSD_otc": "Bitcoin Cash (OTC)",
+    "BNBUSD_otc": "Binance Coin (OTC)",
+    "BTCUSD_otc": "Bitcoin (OTC)",
+    "CADJPY_otc": "CAD/JPY (OTC)",
+    "CHFJPY_otc": "CHF/JPY (OTC)",
+    "DASUSD_otc": "Dash (OTC)",
+    "DOTUSD_otc": "Polkadot (OTC)",
+    "ETHUSD_otc": "Ethereum (OTC)",
+    "EURAUD_otc": "EUR/AUD (OTC)",
+    "EURCAD_otc": "EUR/CAD (OTC)",
+    "EURCHF_otc": "EUR/CHF (OTC)",
+    "EURGBP_otc": "EUR/GBP (OTC)",
+    "EURJPY_otc": "EUR/JPY (OTC)",
+    "EURUSD_otc": "EUR/USD (OTC)",
+    "GBPAUD_otc": "GBP/AUD (OTC)",
+    "GBPCAD_otc": "GBP/CAD (OTC)",
+    "GBPCHF_otc": "GBP/CHF (OTC)",
+    "GBPJPY_otc": "GBP/JPY (OTC)",
+    "GBPNZD_otc": "GBP/NZD (OTC)",
+    "GBPUSD_otc": "GBP/USD (OTC)",
+    "LINUSD_otc": "Chainlink (OTC)",
+    "LTCUSD_otc": "Litecoin (OTC)",
+    "NZDCAD_otc": "NZD/CAD (OTC)",
+    "NZDCHF_otc": "NZD/CHF (OTC)",
+    "NZDJPY_otc": "NZD/JPY (OTC)",
+    "SOLUSD_otc": "Solana (OTC)",
+    "TONUSD_otc": "Toncoin (OTC)",
+    "TRUUSD_otc": "Trump (OTC)",
+    "USDARS_otc": "USD/ARS (OTC)",
+    "USDCAD_otc": "USD/CAD (OTC)",
+    "USDCHF_otc": "USD/CHF (OTC)",
+    "USDCOP_otc": "USD/COP (OTC)",
+    "USDDZD_otc": "USD/DZD (OTC)",
+    "USDINR_otc": "USD/INR (OTC)",
+    "USDJPY_otc": "USD/JPY (OTC)",
+    "USDMXN_otc": "USD/MXN (OTC)",
+    "USDPHP_otc": "USD/PHP (OTC)",
+    "USDPKR_otc": "USD/PKR (OTC)",
+    "USDZAR_otc": "USD/ZAR (OTC)",
+    "XAGUSD_otc": "Silver (OTC)",
+    "XAUUSD_otc": "Gold (OTC)",
+    "XRPUSD_otc": "Ripple (OTC)",
+    "ZECUSD_otc": "Zcash (OTC)",
+    "AUDNZD_otc": "AUD/NZD (OTC)",
+    "AUDCHF": "AUD/CHF",
+    "HSIHKD": "Hong Kong 50",
+    "IBXEUR": "IBEX 35",
+    "XAGUSD": "Silver",
+    "XAUUSD": "Gold",
+}
+# الاسم الحقيقي ← رمز الخادم (للتحويل العكسي السريع في الواجهة)
+QX_NAME_TO_SYMBOL = {v: k for k, v in QX_ASSET_NAMES.items()}
+# عملة فتح الشارت الافتراضية (طلب المستخدم): BRLUSD_otc باسمها الحقيقي
+QX_OPENER_SYMBOL = "BRLUSD_otc"
+QX_OPENER_NAME = QX_ASSET_NAMES[QX_OPENER_SYMBOL]
+
+
+def qx_asset_display(sym, server_name=""):
+    """الاسم الحقيقي للواجهة + العلم الكامل لأي عملة (طلب المستخدم):
+    1) اسم الخادم الحقيقي من instruments أولاً.
+    2) وإلا الاسم الحقيقي من جدول QX_ASSET_NAMES (جدول الخادم نفسه).
+    3) العلم: شارة خاصة للرقمية/السلعة/المؤشر، وعلمان مدموجان للأزواج."""
+    sym = str(sym or "").strip()
+    name = str(server_name or "").strip() or QX_ASSET_NAMES.get(sym, "")
+    if not name:
+        name = sym                      # آخر احتياط: رمز الخادم نفسه بلا تخمين
+    flag = SINGLE_BADGES.get(sym)
+    if flag is None:
+        flag = pair_flag_uri(name) if "/" in name else asset_flag(name)
+    return name, flag
 
 
 ASSET_PAYOUT = {
@@ -5304,10 +5494,9 @@ class Backend(QObject):
         self._dark = bool(cfg.get("dark", True))
         self._market = "real"        # قسم الحساب الحقيقي/التجريبي حُذف — يبقى وسم السوق للعملات OTC فقط
         # LIVE SERVER EDITION (طلب المستخدم): العملة الافتراضية ثابتة دائماً —
-        # الشارت يفتح على BRLUSD_otc مهما كانت الإعدادات القديمة المحفوظة
-        # (إعدادات نسخة الشموع الوهمية مثل ETH/USD لا تعود أبداً — طلب المستخدم
-        # «العملة الافتراضية لي نريدها يجلبها الكود مباشرة BRLUSD_otc»).
-        self._asset = "BRL/USD OTC"
+        # الشارت يفتح على BRLUSD_otc (باسمها الحقيقي USD/BRL (OTC) كما في الخادم —
+        # v13.2) مهما كانت الإعدادات القديمة المحفوظة
+        self._asset = QX_OPENER_NAME
         self._tf = cfg.get("tf", "1m")
         if not isinstance(self._tf, str) or self._tf not in dict(TFS):
             self._tf = "1m"
@@ -5316,7 +5505,10 @@ class Backend(QObject):
         # EUR/GBP…) لا تعود إلى الشريط أبداً؛ وأي عملة أخرى يدخلها المستخدم
         # بنفسه من قائمة + (العملات الحقيقية من الخادم) — طلب المستخدم
         # «العملات الوهمية التي في التطبيق انزعها».
-        self._added = ["BRL/USD OTC"]
+        self._added = [QX_OPENER_NAME]
+        # v13.2: خريطة الاسم الحقيقي → رمز الخادم تُبذر بعملة فتح الشارت
+        # حتى يعمل الجلب فور الدخول قبل وصول اللوحة الكاملة
+        self._qx_symbols = {QX_OPENER_NAME: QX_OPENER_SYMBOL}
         self._live = True        # البث الحي يعمل مباشرة دائمًا — الشموع متحركة بلا زر (طلب المستخدم)
         self._tick = 0
         # LIVE SERVER EDITION (طلب المستخدم): الشموع الوهمية انزعت — الشموع الحقيقية
@@ -5333,6 +5525,12 @@ class Backend(QObject):
         self._qx_tf_retry = 0.0        # خنق إعادة محاولة جلب فريم أعلى
         self._qx_ensure_at = {}        # v13.1: آخر جلب فوري لكل عملة (خنق 15 ثانية)
         self._qx_ensure_fail = {}      # v13.1: عدّاد فشل الجلب الفوري (خنق تصاعدي)
+        # v13.2 (طلب المستخدم): طابور جلب متسلسل — فتح عدة عملات بسرعة يجلبها
+        # واحدة تلو الأخرى مع فاصل بين عملة وأخرى، بلا تسرّع ولا طلبات متوازية
+        self._qx_loadq = []            # طابور العملات المطلوب جلبها
+        self._qx_load_pending = set()  # العملات المنتظرة في الطابور (منع التكرار)
+        self._qx_load_lock = threading.Lock()
+        self._qx_load_busy = False     # عامل الطابور يعمل الآن
         self._files = self._load_files()
         _ensure_badi_dirs()
         self.syncDiskFiles(emit=False)     # استيراد أي ملفات وضعها المستخدم في مجلد BadiCharts
@@ -5527,6 +5725,12 @@ class Backend(QObject):
     @Property(int, notify=candlesChanged)
     def candlesCount(self):
         return len(self._candles)
+
+    @Property(bool, notify=candlesChanged)
+    def chartLoading(self):
+        """v13.2 (طلب المستخدم): دائرة تحميل في الشارت — True عندما يكون الدخول
+        تم والعملة الحالية بلا شموع بعد (تُجلب الآن) — بدل شارت أسود فارغ."""
+        return bool(self._qx_logged and not self._candles)
 
     @Property(str, notify=filesChanged)
     def filesJson(self):
@@ -6106,7 +6310,7 @@ class Backend(QObject):
     #  LIVE SERVER EDITION — محرك خادم Quotex داخل التطبيق
     #  نفس الخادم الذي يعمل في الترمينال (qx_server_v13.py) لكن يُقاد من الواجهة:
     #  دخول حقيقي، BRLUSD_otc فوراً (300 شمعة)، بقية العملات واحدة تلو الأخرى،
-    #  بث حي لكل العملات، ودفعات 170 شمعة عند التمرير للوراء.
+    #  بث حي لكل عملة فُتح شارتها، ودفعات 300 شمعة عند التمرير للوراء.
     # ═════════════════════════════════════════════════════════════════════
     _QX_FEED_CAP = 3000          # حد الشموع في ذاكرة الواجهة (نفس سياسة الخادم)
     _QX_FEED_TRIM = 2600         # القص عند التجاوز (نفس سلوك الجسر في الصفحة)
@@ -6120,8 +6324,14 @@ class Backend(QObject):
 
     @staticmethod
     def _api_from_display(name):
-        """اسم العرض (BRL/USD OTC) -> رمز الخادم (BRLUSD_otc)."""
+        """اسم العرض الحقيقي → رمز الخادم.
+        v13.2: الجدول الثابت للأسماء الحقيقية أولاً (USD/BRL (OTC) → BRLUSD_otc)
+        ثم التحويل النظامي القديم كاحتياط أخير فقط."""
         s = str(name or "").strip()
+        # v13.2: lookup بالاسم الحقيقي من جدول الخادم نفسه — الأدق والأسرع
+        code = QX_NAME_TO_SYMBOL.get(s)
+        if code:
+            return code
         otc = s.upper().endswith(" OTC")
         base = s[:-4].strip() if otc else s
         base = base.replace("/", "").upper()
@@ -6177,13 +6387,16 @@ class Backend(QObject):
             return []
 
     def _qx_build_board(self, entries):
-        """لوحة العملات الحقيقية من لقطة instruments في الخادم."""
+        """لوحة العملات الحقيقية من لقطة instruments في الخادم.
+        v13.2 (طلب المستخدم): الاسم المعروض هو الاسم الحقيقي من الخادم
+        (USD/BRL (OTC)، Axie Infinity (OTC)، CAC 40…) وليس الاسم النظامي
+        المولّد، وكل العملة لها علم/شارة من جدول الخادم نفسه."""
         board, symbols = [], {}
         for e in entries or []:
             sym = str((e or {}).get("asset") or "").strip()
             if not sym:
                 continue
-            disp = self._display_from_api(sym)
+            disp, flg = qx_asset_display(sym, (e or {}).get("name") or "")
             if not disp or disp in symbols:
                 continue
             payout = e.get("payout")
@@ -6195,7 +6408,7 @@ class Backend(QObject):
             board.append({"name": disp, "symbol": sym, "payout": payout,
                           "open": bool(opn) if opn is not None else True,
                           "otc": sym.lower().endswith("_otc"),
-                          "flag": pair_flag_uri(disp)})
+                          "flag": flg})
             symbols[disp] = sym
         return board, symbols
 
@@ -6207,31 +6420,60 @@ class Backend(QObject):
             return ""
 
     def _qx_boot_board(self):
-        """لوحة الإقلاع: عملة فتح الشارت قبل وصول اللوحة الحقيقية من الخادم."""
+        """لوحة الإقلاع: عملة فتح الشارت قبل وصول اللوحة الحقيقية من الخادم —
+        v13.2: بالاسم الحقيقي نفسه الذي يعرضه الخادم (بلا وميض عند وصول اللوحة)
+        ومع علمها من جدول العملات."""
         if self._qx_board:
             return self._qx_board
-        return [{"name": "BRL/USD OTC", "symbol": "BRLUSD_otc", "payout": 0,
-                 "open": True, "otc": True, "flag": pair_flag_uri("BRL/USD OTC")}]
+        _nm, _fl = qx_asset_display(QX_OPENER_SYMBOL)
+        return [{"name": _nm, "symbol": QX_OPENER_SYMBOL, "payout": 0,
+                 "open": True, "otc": True, "flag": _fl}]
 
     def _qx_ensure_asset(self, api):
-        """v13.1 (طلب المستخدم): عملة فُتح شارتها ووجد بلا شموع تُجلب فوراً —
-        جلب أمامي عبر الخادم (ensure_asset_loaded → نفس المسار الرسمي عبر بوابة
-        الجلب) بدل انتظار دور التحميل المسبق الخلفي الذي يمر على كل العملات
-        واحدة تلو الأخرى (لهذا كانت بعض العملات تُفتح بشارت فارغ تماماً).
-        مضمومة لكل عملة مرة كل 15 ثانية حتى لا تُغرق الخادم."""
+        """v13.2 (طلب المستخدم): عملة فُتح شارتها تُجلب فوراً — 300 شمعة —
+        والعملات التي لم يُفتح شارتها لا تجلب أبداً.
+        v13.2 (طلب المستخدم): إذا فتح المستخدم عدة عملات بسرعة يجلب
+        **واحدة تلو الأخرى** — طابور متسلسل بفاصل بين عملة وأخرى، بلا تسرّع."""
         qx = _qx_module()
         if not qx or getattr(qx, "CLIENT", None) is None or not self._qx_logged or not api:
             return
         now = time.time()
-        # v13.1: خنق تصاعدي — 15 ثانية لأول محاولة، وكل فشل يضاعف المهلة حتى 60 ثانية
+        # خنق تصاعدي — 15 ثانية لأول محاولة، وكل فشل يضاعف المهلة حتى 60 ثانية
         # (حتى لا نغرق الخادم بطلبات متكررة لعملة بلا تاريخ فعلاً)
         fails = self._qx_ensure_fail.get(api, 0)
         if now - self._qx_ensure_at.get(api, 0.0) < min(60.0, 15.0 * (1 + fails)):
             return
         self._qx_ensure_at[api] = now
-        self._log("info", f"chart opened with no candles — loading {api} now (foreground)")
+        with self._qx_load_lock:
+            if api in self._qx_load_pending:
+                return                      # في الطابور بالفعل — لا تكرار
+            self._qx_load_pending.add(api)
+            self._qx_loadq.append(api)
+        self._log("info", f"chart opened with no candles — loading {api} now (queued)")
+        self._qx_start_load_worker()
 
-        def _worker():
+    def _qx_start_load_worker(self):
+        """تشغيل عامل الطابور المتسلسل (خيط واحد فقط يعالج الطلبات واحداً تلو الآخر)."""
+        if self._qx_load_busy:
+            return
+        self._qx_load_busy = True
+        threading.Thread(target=self._qx_load_worker, daemon=True,
+                         name="qxLoadQueue").start()
+
+    def _qx_load_worker(self):
+        """عامل طابور الجلب: يجلب عملاً واحداً في كل مرة مع فاصل ثابت بين
+        عملة وأخرى (طلب المستخدم: واحدة تلو الأخرى وليس بسرعة)."""
+        qx = _qx_module()
+        while True:
+            api = None
+            with self._qx_load_lock:
+                if self._qx_loadq:
+                    api = self._qx_loadq.pop(0)
+                else:
+                    self._qx_load_busy = False
+                    return
+            if not qx:
+                continue
             try:
                 fut = asyncio.run_coroutine_threadsafe(
                     qx.ensure_asset_loaded(api), qx.ASYNC_LOOP)
@@ -6245,8 +6487,11 @@ class Backend(QObject):
             except Exception as e:
                 self._qx_ensure_fail[api] = self._qx_ensure_fail.get(api, 0) + 1
                 self._log("err", f"ensure {api}: {str(e)[:100]}")
-
-        threading.Thread(target=_worker, daemon=True, name="qxEnsure").start()
+            finally:
+                with self._qx_load_lock:
+                    self._qx_load_pending.discard(api)
+            # v13.2: فاصل بين عملة وأخرى — الجلب واحداً تلو الآخر بلا تسرّع
+            time.sleep(1.0)
 
     def _qx_load_feed(self, force=False):
         """تحميل غذاء الشارت الحقيقي للعملة/الفريم الحاليين من الخادم."""
@@ -6472,12 +6717,28 @@ class Backend(QObject):
                 board, symbols = self._qx_build_board(entries)
                 if board and (symbols != self._qx_symbols
                               or self._board_sig(board) != self._board_sig(self._qx_board)):
+                    old_symbols = self._qx_symbols
                     self._qx_board = board
                     self._qx_symbols = symbols
                     real = set(symbols.keys())
+                    # v13.2: الأسماء الحقيقية — إذا كان الاسم المعروض الحالي/المضاف
+                    # قديماً (قبل وصول اللوحة) انقله إلى الاسم الحقيقي لنفس الرمز
+                    rev = {sy: nm for nm, sy in symbols.items()}
+                    if self._asset not in real:
+                        _cur_sym = old_symbols.get(self._asset) or QX_OPENER_SYMBOL
+                        self._asset = rev.get(_cur_sym, self._asset)
+                    old_to_new = {old_nm: rev.get(old_sy, old_nm)
+                                  for old_nm, old_sy in old_symbols.items()}
+                    self._added = [old_to_new.get(n, n) for n in self._added]
                     self._added = [n for n in self._added if n in real]
                     if not self._added:
-                        opener = self._display_from_api(qx.PRELOAD_FIRST_SYMBOL)
+                        opener = None
+                        for b in board:
+                            if b["symbol"] == qx.PRELOAD_FIRST_SYMBOL:
+                                opener = b["name"]
+                                break
+                        if not opener:
+                            opener, _fl_unused = qx_asset_display(qx.PRELOAD_FIRST_SYMBOL)
                         self._added = [opener if opener in real else board[0]["name"]]
                     self._emit_qx({"type": "board", "board": board})
                     self.addedChanged.emit()
@@ -6650,7 +6911,7 @@ class Backend(QObject):
         finally:
             self._qx_login_busy = False
 
-    # ---------- دفعة التمرير للخلف (170 شمعة) ----------
+    # ---------- دفعة التمرير للخلف (300 شمعة) ----------
     @Slot(str)
     def fetchOlder(self, arg):
         """طلب دفعة شموع أقدم من الخادم عند التمرير إلى بداية الشارت."""
@@ -6676,19 +6937,21 @@ class Backend(QObject):
             tf_sec = dict(TFS).get(tf, 60)
             if qx and api and before > 0 and getattr(qx, "CLIENT", None) is not None and tf_sec >= 60:
                 if tf_sec == 60:
-                    # دفعة الخادم الرسمية: fetch_older_batch تجلب 170 شمعة أقدم وتدمجها
-                    # (v13.1: داخل الخادم تمر بأولوية أمامية عبر بوابة الجلب الواحدة)
+                    # دفعة الخادم الرسمية: fetch_older_batch تجلب 300 شمعة أقدم وتدمجها
+                    # (v13.2: 300 وليس 170 — طلب المستخدم؛ وأولوية أمامية عبر بوابة الجلب)
                     fut = asyncio.run_coroutine_threadsafe(
                         qx.fetch_older_batch(api, before, qx.PAGINATION_BATCH), qx.ASYNC_LOOP)
-                    fut.result(timeout=60)
+                    fut.result(timeout=90)
                     batch = [c for c in self._qx_engine_candles(api) if c["t"] < before][-qx.PAGINATION_BATCH:]
                 else:
-                    # v13.1: نفس CLIENT.get_candles الأصلي لكن عبر البوابة الأمامية
+                    # v13.2: نفس CLIENT.get_candles الأصلي لكن عبر البوابة الأمامية —
+                    # دفعة 300 شمعة وليس 170 (طلب المستخدم)
+                    _nb = int(getattr(qx, "PAGINATION_BATCH", 300))
                     fut = asyncio.run_coroutine_threadsafe(
-                        qx.qx_fetch_window_raw(api, before, 170 * tf_sec, tf_sec,
+                        qx.qx_fetch_window_raw(api, before, _nb * tf_sec, tf_sec,
                                                foreground=True, timeout=45.0), qx.ASYNC_LOOP)
                     res = fut.result(timeout=60)
-                    batch = [c for c in self._qx_fmt_raw(res, tf_sec) if c["t"] < before][-170:]
+                    batch = [c for c in self._qx_fmt_raw(res, tf_sec) if c["t"] < before][-_nb:]
                 # مزامنة غذاء بايثون فوراً حتى لا يعيد المضخة إرسال إعادة ضبط للشارت
                 if tf == self._tf and asset == self._asset and batch:
                     if tf_sec == 60:
@@ -7660,10 +7923,45 @@ function send(cmd, obj) {
 /* صفحة الاستوديو (سكربت الصفحة الرئيسي) تُبلّغ سطح المكتب عبر هذه البوابة:
    حذف عملة من الشريط (×) وتبديل العملة بالنقر على الشريحة */
 window.__badiSend = send;
-/* ═══ LIVE SERVER EDITION: دفعة التمرير للخلف (170 شمعة) ═══
+/* ═══ LIVE SERVER EDITION: دفعة التمرير للخلف (300 شمعة) ═══
    عندما يقترب التمرير من بداية البيانات يُطلب من الخادم دفعة أقدم؛ وصولها
    يُدمج في الشارت مع تثبيت العرض الحالي تماماً (لا قفزة ولا إعادة ضبط). */
 var OLDER = { loading: false, at: 0, asset: "", tf: "" };
+/* ═══ v13.2 (طلب المستخدم): دائرة تحميل داخل الشارت ═══
+   عندما تُفتح عملة لم تُجلب بعد تظهر دائرة تحميل وسط الشارت مع نص
+   «جارٍ جلب الشموع من الخادم» — وتختفي فور وصول أول شموع — بدل شارت أسود فارغ */
+var CHLOAD = { on: false, el: null };
+function chartLoadEl(pr) {
+  try {
+    if (!CHLOAD.el) {
+      var st = document.createElement("style");
+      st.textContent = ".badi-load{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;z-index:6;pointer-events:none}"
+        + ".badi-load .bl-ring{width:46px;height:46px;border-radius:50%;border:3px solid rgba(128,140,170,.22);border-top-color:#3B8BFF;animation:badispin .9s linear infinite}"
+        + ".badi-load .bl-txt{font:600 12px/1 system-ui,-apple-system,Segoe UI,sans-serif;letter-spacing:.3px;opacity:.7}"
+        + ".badi-load .bl-sub{font:10px/1 system-ui,sans-serif;opacity:.45;margin-top:-6px}"
+        + "@keyframes badispin{to{transform:rotate(360deg)}}";
+      document.head.appendChild(st);
+      CHLOAD.el = document.createElement("div");
+      CHLOAD.el.className = "badi-load";
+      CHLOAD.el.hidden = true;
+    }
+    var ar = window.__BADI_LANG__ === "ar";
+    CHLOAD.el.innerHTML = '<div class="bl-ring"></div><div class="bl-txt">'
+      + (ar ? "جارٍ جلب الشموع من الخادم…" : "Loading candles from server…")
+      + '</div><div class="bl-sub">300 candles</div>';
+    var host = pr && pr.el ? pr.el.querySelector(".pane-cv") : null;
+    if (host && CHLOAD.el.parentNode !== host) host.appendChild(CHLOAD.el);
+    return CHLOAD.el;
+  } catch (e) { return null; }
+}
+function renderChartLoading() {
+  try {
+    var pr = window.__badiPrimary ? window.__badiPrimary() : null;
+    var empty = !pr || !pr.dataArr || pr.dataArr.length === 0;
+    var el = chartLoadEl(pr);
+    if (el) el.hidden = !(CHLOAD.on && empty);
+  } catch (e) {}
+}
 window.__badiMaybeLoadOlder = function (p) {
   try {
     if (!window.__BADI_EMBEDDED || !p || !window.__badiPrimary || p !== window.__badiPrimary()) return;
@@ -8283,6 +8581,7 @@ function defineBadiApp() {
         pr.chart.setData(pr.dataArr);
         syncCdColor(pr);
         runSignals();
+        try { renderChartLoading(); } catch (e) {}   /* v13.2: إخفاء دائرة التحميل عند وصول الشموع */
       } catch (e) { console.log("BADI::dbg setCandles ERR " + e); }
     },
     setBoard: function (list) {
@@ -8363,6 +8662,7 @@ function defineBadiApp() {
         pr.chart.update(k);
         syncCdColor(pr);
         runSignals();
+        try { renderChartLoading(); } catch (e) {}   /* v13.2: إخفاء دائرة التحميل عند وصول الشموع */
       } catch (e) {}
     },
     pushTail: function (arr) {
@@ -8414,11 +8714,20 @@ function defineBadiApp() {
         } catch (e) {}
         syncCdColor(pr);
         runSignals();
+        try { renderChartLoading(); } catch (e) {}   /* v13.2: إخفاء دائرة التحميل عند وصول الشموع */
       } catch (e) {}
     },
     setLive: function (on) {
       /* البث الحي يعمل دائمًا الآن (طلب المستخدم) — يبقى مفعّلاً مهما وصل */
       live = true;
+    },
+    setChartLoading: function (on) {
+      /* v13.2 (طلب المستخدم): دائرة تحميل داخل الشارت — تظهر عندما تكون شموع
+         العملة الحالية تُجلب من الخادم وتختفي فور وصولها — لا شارت أسود فارغ */
+      try {
+        CHLOAD.on = !!on;
+        renderChartLoading();
+      } catch (e) {}
     },
     log: function (kind, text) { log(kind, text); },
     setSigHidden: function (off) { try { setSigHidden(!!off); } catch (e) {} },
@@ -9091,6 +9400,7 @@ ApplicationWindow {
     property string lastAsset: ""
     property string lastTf: ""
     property int lastLen: -1
+    property bool lastLoading: false      // v13.2: حالة دائرة التحميل في الشارت
     property var filesAcc: ({})
     property var pendingExport: null      // مؤشر معلّق ينتظر إدخال معرّف المشتري (ترخيص)
 
@@ -9125,7 +9435,10 @@ ApplicationWindow {
         webCall("__badiApp.setMarket(" + JSON.stringify({ label: backend.assetLabel, tf: backend.tfLabel,
                  tfMs: backend.tfSec * 1000, dec: backend.dec }) + ");" +
                 "__badiApp.setCandles(" + backend.candlesJson + ");" +
-                "__badiApp.setLive(" + (backend.live ? "true" : "false") + ")")
+                "__badiApp.setLive(" + (backend.live ? "true" : "false") + ");" +
+                /* v13.2 (طلب المستخدم): دائرة تحميل في الشارت حتى تصل شموع العملة */
+                "__badiApp.setChartLoading(" + (backend.chartLoading ? "true" : "false") + ")")
+        win.lastLoading = backend.chartLoading
     }
     function doLogout() {
         win.loggedIn = false
@@ -9135,7 +9448,13 @@ ApplicationWindow {
     }
     function onCandlesWeb() {
         if (!win.webReady) return
-        /* دفعة التمرير للخلف (170 شمعة) دُمجت في الصفحة فعلاً عبر prependCandles
+        /* v13.2 (طلب المستخدم): دائرة تحميل داخل الشارت بدل شارت أسود — تظهر
+           عندما تكون شموع العملة الحالية تُجلب من الخادم وتختفي عند وصولها */
+        if (backend.chartLoading !== win.lastLoading) {
+            win.lastLoading = backend.chartLoading
+            webCall("__badiApp.setChartLoading(" + (backend.chartLoading ? "true" : "false") + ")")
+        }
+        /* دفعة التمرير للخلف (300 شمعة) دُمجت في الصفحة فعلاً عبر prependCandles
            دون أي تأثير على العرض — لا تُعاد تهيئة الشارت هنا (كانت هذه إعادة
            الضبط تُظهر "قفزة" في الشموع عند كل دفعة — أُصلحت بطلب المستخدم) */
         if ((Date.now() - (win.prependAt || 0)) < 5000

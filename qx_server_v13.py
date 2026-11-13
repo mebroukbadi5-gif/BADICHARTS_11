@@ -53,7 +53,7 @@ except ImportError:
 #   2) Then every other OPEN asset is loaded one-by-one with 300 candles each,
 #      and a live price stream keeps running per asset so any chart opened
 #      later is instantly ready.
-#   3) fetch_older_batch(): fetches a 170-candle older batch (scroll-back
+#   3) fetch_older_batch(): fetches a 300-candle older batch (scroll-back
 #      pagination, like professional platforms). Server-side is ready NOW;
 #      wiring it to the app comes LATER (user said: not now).
 #   4) Ticks live in MEMORY ONLY and are auto-deleted after 5 minutes, so the
@@ -1892,8 +1892,8 @@ WRITE_INTERVAL = 0.5
 # ===== v13: ثوابت التحميل المسبق والبث المتعدد والقرص =====
 # BRLUSD_otc = عملة فتح الشارت (طلب المستخدم) — تُحمّل فوراً بعد الدخول.
 PRELOAD_FIRST_SYMBOL = "BRLUSD_otc"
-PRELOAD_CANDLES = 300          # 300 شمعة لكل عملة عند التحميل الأولي
-PAGINATION_BATCH = 170         # دفعة التمرير للخلف (scroll-back)
+PRELOAD_CANDLES = 300          # 300 شمعة لكل عملة عند فتح شارتها (طلب المستخدم)
+PAGINATION_BATCH = 300         # v13.2: دفعة التمرير للخلف 300 شمعة وليس 170 (طلب المستخدم)
 PRELOAD_MIN_CANDLES = 30       # أقل عدد مقبول من الشموع لعملة واحدة
 PRELOAD_ASSET_DELAY = 1.0      # ثانية واحدة بين عملة وأخرى (واحدة تلو الأخرى)
 PRELOAD_TIMEOUT = 25.0         # مهلة طلب الشموع لكل عملة
@@ -4793,7 +4793,7 @@ async def mt4_gap_filler():
 
 
 # ==============================================================================
-# SECTION 10 (v13.0): PRELOAD 300 + PAGINATION 170 + TICK RETENTION 5 MIN
+# SECTION 10 (v13.2): CHART-DRIVEN 300 + PAGINATION 300 + TICK RETENTION 5 MIN
 # ==============================================================================
 # محرك التحميل المسبق (بطلب المستخدم حرفياً):
 #   1) بعد الدخول مباشرة: 300 شمعة لـ BRLUSD_otc (هي العملة التي تفتح الشارت)
@@ -4802,7 +4802,7 @@ async def mt4_gap_filler():
 #   3) البث الحي يبقى يعمل لكل عملة محمّلة — لذلك عندما يُفتح أي شارت لاحقاً
 #      يكون جاهزاً فوراً (الأسعار تتدفق داخله باستمرار).
 #   4) fetch_older_batch(): عند التمرير للخلف في الشارت يجلب دفعة صغيرة من
-#      170 شمعة أقدم، وكلما زاد التمرير للخلف تظهر شموع أخرى مثل المنصات
+#      300 شمعة أقدم، وكلما زاد التمرير للخلف تظهر شموع أخرى مثل المنصات
 #      الاحترافية. الدالة جاهزة الآن على الخادم؛ ربطها بالتطبيق يُضاف لاحقاً
 #      (طلب المستخدم: ليس الآن).
 #   5) التيكات تُحفظ في الذاكرة فقط ولا تُكتب على القرص أبداً، وتُحذف تلقائياً
@@ -5253,11 +5253,14 @@ async def ensure_asset_loaded(api_symbol: str) -> int:
 
 
 async def preload_all_assets():
-    """v13: محرك التحميل المسبق الكامل —
-    1) BRLUSD_otc فوراً بعد الدخول (لا تنتظر القائمة).
-    2) ثم بقية الأصول المفتوحة 300 شمعة لكل عملة، واحدة تلو الأخرى.
-    3) إيقاف بث الأصول التي أُغلقت، وتحميل الأصول التي فتحت حديثاً
-       كل PRELOAD_REFRESH_INTERVAL ثانية."""
+    """v13.2 (طلب المستخدم حرفياً): لا تحميل مسبق شامل بعد الآن —
+    «العملة اللي نفتح الشارت تبعها يتم جلب 300 شمعة منها، واللي لم نفتح
+    شارتها لا تجلب»:
+      1) BRLUSD_otc (عملة فتح الشارت) تُجلب فوراً بعد الدخول — 300 شمعة + بث حي.
+      2) أي عملة أخرى تُجلب فقط عند فتح التطبيق شارتها عبر ensure_asset_loaded()
+         (متصلة ببوابة الجلب الأمامية، واحدة تلو الأخرى بلا تسرّع).
+      3) هذه الحلقة لا تجلب أي شموع — فقط تراقب الأصول التي أُغلقت لإيقاف
+         بثها، وتعيد تشغيل بث الأصول المفتوحة التي كان التطبيق يعرضها."""
     global _OPENER_STATUS_SHOWN
     logmsg(f"[preload] fetching {PRELOAD_FIRST_SYMBOL} immediately (chart opener)...")
     t0 = time.time()
@@ -5295,48 +5298,13 @@ async def preload_all_assets():
                     _pv_str = f"{_pv}%" if isinstance(_pv, (int, float)) else "-"
                     logmsg(f"[preload] {PRELOAD_FIRST_SYMBOL} status: "
                            f"{'OPEN' if _e.get('open') else 'CLOSED'} | payout {_pv_str}")
-                open_assets = [a for a, e in by_asset.items() if e.get("open") is True]
-
-                def _pay(a):
-                    p = by_asset[a].get("payout")
-                    return p if isinstance(p, (int, float)) else -1
-
-                open_assets.sort(key=_pay, reverse=True)
-                ordered = []
-                if PRELOAD_FIRST_SYMBOL in by_asset:
-                    ordered.append(PRELOAD_FIRST_SYMBOL)
-                    if PRELOAD_FIRST_SYMBOL in open_assets:
-                        open_assets.remove(PRELOAD_FIRST_SYMBOL)
-                ordered.extend(open_assets)
             else:
                 by_asset = {}
-                ordered = [PRELOAD_FIRST_SYMBOL]
-            total = len(ordered)
-            for idx, sym in enumerate(ordered, 1):
-                if CLIENT is None or not CONNECTION_ALIVE:
-                    logmsg("[preload] connection lost — cycle aborted (will retry)")
-                    break
-                # v13.1: أولوية المستخدم — طلبات التمرير للخلف / فتح عملة فارغة /
-                # جلب فريم أعلى تتقدم دائماً؛ التحميل المسبق الخلفي يتوقف مؤقتاً
-                # حتى تنتهيها (لا اختلاط بين عمليات الجلب بعد الآن — طلب المستخدم)
-                if _FETCH_GATE_FG > 0:
-                    logmsg("[preload] foreground request pending — preload yields ...")
-                    await _fetch_gate_wait_foreground(45.0)
-                if sym in _PRELOADED_INFO:
-                    continue
-                try:
-                    _t = time.time()
-                    n = await preload_one_asset(sym, idx, total)
-                    if n:
-                        if sym == PRELOAD_FIRST_SYMBOL:
-                            _print_opener_banner(sym, by_asset.get(sym), n, time.time() - _t)
-                        else:
-                            logmsg(f"[preload {idx}/{total}] {sym}: {n} candles + "
-                                   f"live stream ON ({time.time() - _t:.1f}s)")
-                    await asyncio.sleep(PRELOAD_ASSET_DELAY)
-                except Exception as e:
-                    logmsg(f"[preload {idx}/{total}] {sym}: failed ({e})")
-                    await asyncio.sleep(PRELOAD_ASSET_DELAY)
+            # v13.2: لا جلب شامل — الشموع تجلب عند فتح الشارت فقط (طلب المستخدم).
+            # الحفاظ فقط على بث الأصول التي يعرضها التطبيق فعلاً (ولا نلمس بث فاتح الشارت).
+            n_stream = len(ALL_STREAMING_ASSETS)
+            logmsg(f"[preload] chart-driven mode: {n_stream} asset(s) streaming — "
+                   f"candles load on chart open (one by one), no mass preload")
             # إيقاف بث الأصول التي أُغلقت (الشموع تبقى محفوظة في DB وHST،
             # وإذا أعيد فتحها لاحقاً يعود بثها تلقائياً في الدورة التالية).
             if by_asset:
@@ -5367,12 +5335,10 @@ async def preload_all_assets():
 
 
 async def fetch_older_batch(api_symbol: str, before_time=None, count: int = PAGINATION_BATCH):
-    """v13: دفعة التمرير للخلف (scroll-back) — يجلب COUNT شمعة أقدم من
-    before_time عبر نفس طريقة الجلب الأصلية، ويدمجها مع الشموع الموجودة
-    في الذاكرة وHST وcandles.db. مثل المنصات الاحترافية: كلما مررت للخلف
-    تظهر دفعة جديدة.
-    الدالة جاهزة الآن على الخادم — التطبيق سيستدعيها لاحقاً عند ربطه
-    (عبر PAGINATION_API أدناه). تعيد عدد الشموع المضافة فعلياً."""
+    """v13.2: دفعة التمرير للخلف (scroll-back) — تجلب 300 شمعة أقدم (وليس 170،
+    طلب المستخدم) من before_time عبر نفس طريقة الجلب الأصلية، ويدمجها مع
+    الشموع الموجودة في الذاكرة وHST وcandles.db مع سد أي فجوة بين الدفعة
+    والرأس الحالي. مثل المنصات الاحترافية: كلما مررت للخلف تظهر دفعة جديدة."""
     if CLIENT is None or CLIENT.api is None or not CONNECTION_ALIVE:
         logmsg(f"[older:{api_symbol}] no connection — batch skipped")
         return 0
@@ -5418,7 +5384,7 @@ async def fetch_older_batch(api_symbol: str, before_time=None, count: int = PAGI
 
 
 # نقطة ربط مستقبلية للتطبيق (عند ربطه لاحقاً كما طلب المستخدم):
-#   PAGINATION_API["fetch_older_batch"]("BRLUSD_otc")  -> +170 شمعة أقدم
+#   PAGINATION_API["fetch_older_batch"]("BRLUSD_otc")  -> +300 شمعة أقدم
 #   PAGINATION_API["get_recent_ticks"]("BRLUSD_otc")   -> تيكات آخر 5 دقائق
 #   PAGINATION_API["preload_status"]()                 -> حالة التحميل المسبق
 PAGINATION_API = {
@@ -5442,7 +5408,7 @@ if __name__ == "__main__":
     #   - جديد: بعد الدخول مباشرة يجلب 300 شمعة لـ BRLUSD_otc (عملة فتح الشارت)
     #     مع حالتها ونسبة دفعها، ثم يجلب 300 شمعة لبقية الأصول المفتوحة واحدة
     #     تلو الأخرى، ويشغّل البث الحي لكل عملة حتى يكون أي شارت جاهزاً فوراً.
-    #   - جديد: fetch_older_batch() تجلب دفعة 170 شمعة أقدم للتمرير للخلف —
+    #   - جديد: fetch_older_batch() تجلب دفعة 300 شمعة أقدم للتمرير للخلف —
     #     جاهزة على الخادم، وربطها بالتطبيق يُضاف لاحقاً (ليس الآن).
     #   - جديد: التيكات في الذاكرة فقط وتُحذف تلقائياً بعد 5 دقائق + تدوير
     #     السجل + ترميم candles.db — حتى لا يمتلئ القرص أبداً.
@@ -5450,9 +5416,10 @@ if __name__ == "__main__":
     # ════════════════════════════════════════════════════════════════════
     print()
     print(f"{Colors.CYAN}{'═' * 64}{Colors.RESET}")
-    print(f"{Colors.BOLD}  QX SERVER v13.0 — Preload + Live Streams{Colors.RESET}")
+    print(f"{Colors.BOLD}  QX SERVER v13.2 — Chart-Driven Loading{Colors.RESET}")
     print(f"  {Colors.DIM}BRLUSD_otc: 300 شمعة فوراً بعد الدخول + الحالة ونسبة الدفع{Colors.RESET}")
-    print(f"  {Colors.DIM}ثم بقية الأصول المفتوحة: 300 شمعة لكل عملة، واحدة تلو الأخرى{Colors.RESET}")
+    print(f"  {Colors.DIM}أي عملة أخرى: 300 شمعة تُجلب فقط عند فتح شارتها — واحدة تلو الأخرى{Colors.RESET}")
+    print(f"  {Colors.DIM}التمرير للخلف: دفعة 300 شمعة أقدم في كل تمرير{Colors.RESET}")
     print(f"{Colors.CYAN}{'═' * 64}{Colors.RESET}")
 
     # v12/v13: لا يوجد جدول حي — اطبع رسائل السجل مباشرة
@@ -5510,12 +5477,12 @@ if __name__ == "__main__":
 
     print()
     print(f"{Colors.GREEN}{'═' * 64}{Colors.RESET}")
-    print(f"{Colors.BOLD}  Connected! Chart opener + preload engine running ...{Colors.RESET}")
+    print(f"{Colors.BOLD}  Connected! Chart opener ready + chart-driven loading ...{Colors.RESET}")
     print(f"  {Colors.DIM}1) BRLUSD_otc: 300 شمعة فوراً + الحالة ونسبة الدفع + بث حي{Colors.RESET}")
-    print(f"  {Colors.DIM}2) بقية الأصول المفتوحة: 300 شمعة لكل عملة، واحدة تلو الأخرى{Colors.RESET}")
-    print(f"  {Colors.DIM}3) البث الحي يعمل لكل الأصول — أي شارت يُفتح يكون جاهزاً{Colors.RESET}")
+    print(f"  {Colors.DIM}2) أي عملة أخرى: تُجلب 300 شمعة فقط عند فتح شارتها (واحدة تلو الأخرى){Colors.RESET}")
+    print(f"  {Colors.DIM}3) التمرير للخلف: دفعة 300 شمعة أقدم في كل تمرير{Colors.RESET}")
     print(f"  {Colors.DIM}4) الجدول الكامل (الدفع + مفتوح/مغلق) يُطبع ويُحدّث تلقائياً{Colors.RESET}")
-    print(f"  {Colors.DIM}5) التمرير للخلف: دفعات 170 شمعة جاهزة على الخادم (للتطبيق لاحقاً){Colors.RESET}")
+    print(f"  {Colors.DIM}5) سد الثغرات يعمل: أي فجوة تُملأ بشموع مسطحة — لا فراغات{Colors.RESET}")
     print(f"  {Colors.DIM}6) التيكات في الذاكرة فقط وتُحذف بعد 5 دقائق — القرص لا يمتلئ{Colors.RESET}")
     print(f"  {Colors.DIM}للخروج: Ctrl+C{Colors.RESET}")
     print(f"{Colors.GREEN}{'═' * 64}{Colors.RESET}")
