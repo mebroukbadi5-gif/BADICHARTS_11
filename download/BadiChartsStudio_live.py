@@ -1105,6 +1105,41 @@ function assetCfg(name) {
   return { label: name, base: 0.6 + (h % 1800) / 1000, vol: 0.0011, decimals: name.indexOf("JPY") >= 0 ? 3 : 5 };
 }
 
+/* ── LIVE SERVER EDITION: دقة السعر الحقيقية لكل عملة ──
+   مكتبة الشارت تُنسّق الأسعار عبر priceScale (10^عدد الأرقام العشرية):
+   100 = رقمين عشريين فقط — وهذا ما جعل أسعار العملات الرخيصة مثل
+   BRLUSD_otc (~0.83) تبدو مسطّحة خاطئة على المحور وفي بطاقة OHLC.
+   نستنتج الأرقام من شموع الخادم الحقيقية نفسها (أكثر عدد كسور في
+   آخر 60 شمعة) مع احتياطات ذكية حسب نوع العملة. */
+function inferDecimalsFromCandles(arr) {
+  if (!Array.isArray(arr) || !arr.length) return 0;
+  let best = 0;
+  const from = Math.max(0, arr.length - 60);
+  for (let i = arr.length - 1; i >= from; i--) {
+    const c = arr[i]; if (!c) continue;
+    const vals = [c.close, c.high, c.low, c.open];
+    for (const v of vals) {
+      if (typeof v !== "number" || !Number.isFinite(v)) continue;
+      const s = String(v);
+      const dot = s.indexOf(".");
+      if (dot < 0) continue;
+      const frac = s.length - dot - 1;
+      if (frac > best) best = frac;
+    }
+    if (best >= 8) break;
+  }
+  return Math.min(best, 8);
+}
+function badiDecimals(name, dataArr) {
+  const n = Number(inferDecimalsFromCandles(dataArr || []));
+  if (n > 0) return n;
+  const s = String(name || "");
+  if (s.indexOf("BTC") >= 0 || s.indexOf("ETH") >= 0 || s.indexOf("XAU") >= 0) return 2;
+  if (s.indexOf("JPY") >= 0) return 3;
+  return 5;
+}
+function badiPriceScale(name, dataArr) { return Math.pow(10, badiDecimals(name, dataArr)); }
+
 /* ───────────── Console ───────────── */
 function log(kind, text) {
   msgSeq++;
@@ -1721,8 +1756,11 @@ function addPane() {
   $("gridHost").appendChild(el);
   const cv = el.querySelector("canvas");
   const cfg = assetCfg(name);
+  const bootDec = Number(((window.__BADI_BOOT_FILES || {}).market || {}).dec);
+  const dec0 = (Number.isFinite(bootDec) && bootDec > 0 && bootDec <= 8)
+    ? bootDec : badiDecimals(name, null);
   const chart = new window.BadiCharts(cv, {
-    symbol: { label: cfg.label, priceScale: 100, decimals: cfg.decimals },
+    symbol: { label: cfg.label, priceScale: Math.pow(10, dec0), decimals: dec0 },
     timeframe: { label: "1m", ms: tfMs("1m") },
     theme: window.__BADI_CHART_THEME__ || { drawing: "#38bdf8", drawingActive: "#7dd3fc" },
     /* العدّ التنازلي الأصلي للمكتبة بجانب الشمعة الحية (طلب المستخدم): رقمان فقط
@@ -1767,7 +1805,10 @@ function setPaneAsset(i, name, tfKey) {
   if (tfKey) p.tf = tfKey;
   const cfg = assetCfg(name);
   try {
-    p.chart.setSymbol({ label: cfg.label, priceScale: 100, decimals: cfg.decimals });
+    /* دقة السعر باسم العملة (احتياط) — وتُصحّح تلقائياً من أرقام الخادم
+       الحقيقية فور وصول الشموع عبر setMarket (m.dec من بايثون) */
+    const decN = badiDecimals(name, null);
+    p.chart.setSymbol({ label: cfg.label, priceScale: Math.pow(10, decN), decimals: decN });
     p.chart.setTimeframe({ label: p.tf, ms: tfMs(p.tf) });
   } catch (e) {}
   if (!window.__BADI_EMBEDDED) {
@@ -1820,7 +1861,12 @@ window.__badiSetMarket = function (m) {
     if (p) {
       p.tf = String(m.tf || p.tf);
       try {
-        p.chart.setSymbol({ label: CUR_ASSET, priceScale: 100, decimals: Number(m.dec || assetCfg(CUR_ASSET).decimals) });
+        /* دقة السعر الحقيقية من أرقام خادم Quotex (backend.dec) —
+           priceScale = 10^decimals حتى تظهر الأسعار الرخيصة (BRLUSD_otc…)
+           بكل أرقامها على المحور وبطاقة OHLC لا مثل 0.83 المسطّحة */
+        let dec = Number(m.dec);
+        if (!(dec > 0 && dec <= 8)) dec = badiDecimals(CUR_ASSET, p.dataArr);
+        p.chart.setSymbol({ label: CUR_ASSET, priceScale: Math.pow(10, dec), decimals: dec });
         p.chart.setTimeframe({ label: p.tf, ms: Number(m.tfMs || tfMs(p.tf)) });
       } catch (e) {}
       renderPaneHead(i);
@@ -5257,17 +5303,20 @@ class Backend(QObject):
         self._lang = cfg.get("lang", "en")
         self._dark = bool(cfg.get("dark", True))
         self._market = "real"        # قسم الحساب الحقيقي/التجريبي حُذف — يبقى وسم السوق للعملات OTC فقط
-        # LIVE SERVER EDITION (طلب المستخدم): العملة الافتراضية التي يفتح بها الشارت
-        # هي BRLUSD_otc — يجلبها الكود مباشرة فور تسجيل الدخول (300 شمعة + الحالة + الدفع)
-        self._asset = cfg.get("asset") or "BRL/USD OTC"
+        # LIVE SERVER EDITION (طلب المستخدم): العملة الافتراضية ثابتة دائماً —
+        # الشارت يفتح على BRLUSD_otc مهما كانت الإعدادات القديمة المحفوظة
+        # (إعدادات نسخة الشموع الوهمية مثل ETH/USD لا تعود أبداً — طلب المستخدم
+        # «العملة الافتراضية لي نريدها يجلبها الكود مباشرة BRLUSD_otc»).
+        self._asset = "BRL/USD OTC"
         self._tf = cfg.get("tf", "1m")
-        if not isinstance(self._asset, str) or not self._asset.strip():
-            self._asset = "BRL/USD OTC"
-        # LIVE SERVER EDITION: شريط العملات يبدأ بعملة فتح الشارت — وعند وصول لوحة
-        # العملات الحقيقية من الخادم تُصفّى القوائم عليها تلقائياً
-        self._added = [n for n in (cfg.get("added") or []) if isinstance(n, str) and n.strip()]
-        if not self._added:
-            self._added = ["BRL/USD OTC"]
+        if not isinstance(self._tf, str) or self._tf not in dict(TFS):
+            self._tf = "1m"
+        # LIVE SERVER EDITION: شريط العملات يبدأ نظيفاً بعملة فتح الشارت فقط —
+        # قوائم العملات القديمة المحفوظة من نسخة الشموع الوهمية (AUD/CAD،
+        # EUR/GBP…) لا تعود إلى الشريط أبداً؛ وأي عملة أخرى يدخلها المستخدم
+        # بنفسه من قائمة + (العملات الحقيقية من الخادم) — طلب المستخدم
+        # «العملات الوهمية التي في التطبيق انزعها».
+        self._added = ["BRL/USD OTC"]
         self._live = True        # البث الحي يعمل مباشرة دائمًا — الشموع متحركة بلا زر (طلب المستخدم)
         self._tick = 0
         # LIVE SERVER EDITION (طلب المستخدم): الشموع الوهمية انزعت — الشموع الحقيقية
@@ -5281,6 +5330,9 @@ class Backend(QObject):
         self._qx_last_sig = None       # بصمة آخر شمعة مُرسلة للشارت (t, c)
         self._qx_older_busy = False    # دفعة تمرير للخلف جارية
         self._qx_pre_log = 0.0         # خنق سجلات حالة التحميل المسبق
+        self._qx_tf_retry = 0.0        # خنق إعادة محاولة جلب فريم أعلى
+        self._qx_ensure_at = {}        # v13.1: آخر جلب فوري لكل عملة (خنق 15 ثانية)
+        self._qx_ensure_fail = {}      # v13.1: عدّاد فشل الجلب الفوري (خنق تصاعدي)
         self._files = self._load_files()
         _ensure_badi_dirs()
         self.syncDiskFiles(emit=False)     # استيراد أي ملفات وضعها المستخدم في مجلد BadiCharts
@@ -5390,10 +5442,20 @@ class Backend(QObject):
         """العملات المعروضة على شريط العملات (المضافة فقط)."""
         return self._added
 
+    def _valid_board_names(self):
+        """أسماء العملات الصالحة للشريط: لوحة الخادم الحقيقية عند توفرها —
+        والقائمة الوهمية القديمة احتياطاً قبل وصول اللوحة فقط (طلب المستخدم:
+        العملات الوهمية انزعها — يُقبل على الشريط الحقيقي من خادم Quotex)."""
+        real = [b.get("name") for b in self._qx_board
+                if isinstance(b, dict) and b.get("name")]
+        if real:
+            return real
+        return [b["name"] for b in BOARD]
+
     @Slot(str)
     def toggleAdded(self, name):
         """إضافة/إزالة عملة من الشريط — مع إبقاء عملة واحدة على الأقل دائمًا."""
-        if not isinstance(name, str) or name not in [b["name"] for b in BOARD]:
+        if not isinstance(name, str) or name not in self._valid_board_names():
             return
         if name in self._added:
             if len(self._added) <= 1:      # يجب أن تبقى عملة واحدة على الأقل في الشريط
@@ -5413,7 +5475,7 @@ class Backend(QObject):
             return
         if not isinstance(arr, list):
             return
-        board_names = [b["name"] for b in BOARD]
+        board_names = self._valid_board_names()   # العملات الحقيقية من الخادم فقط
         clean = list(dict.fromkeys(n for n in arr if isinstance(n, str) and n in board_names))
         if not clean:                       # لا يُحذف كل شيء — عملة واحدة على الأقل
             return
@@ -5444,6 +5506,24 @@ class Backend(QObject):
         """آخر شمعة فقط — تُدفع كل ثانية بدون إعادة تسلسل المصفوفة كاملة (أداء)."""
         return json.dumps(self._candles[-1], separators=(",", ":")) if self._candles else "{}"
 
+    @Property(str, notify=candlesChanged)
+    def tailJson(self):
+        """آخر 3 شموع — تُدفع كل دفعة: الشمعة الحية + الإغلاق النهائي للشمعة
+        المغلقة قبلهما، حتى لا تبقى شمعة مغلقة خاطئة في الشارت ثم "تقفز" فجأة
+        إلى قيمتها الصحيحة عند أول مزامنة كاملة (أُصلحت بطلب المستخدم)."""
+        return json.dumps(self._candles[-3:], separators=(",", ":")) if self._candles else "[]"
+
+    @Slot(int, result=str)
+    def tailJsonN(self, n):
+        """v13.1: آخر n شمعة فقط — دفعة ذيل خفيفة تُدفع للشارت عند تراكم أكثر
+        من شمعة بين نبضتين، بدل إعادة إرسال المصفوفة كاملة (بلا قفزات ولا
+        إعادة ضبط للعرض — طلب المستخدم). تُدمج عبر pushTail نفسها."""
+        try:
+            n = max(1, int(n))
+            return json.dumps(self._candles[-n:], separators=(",", ":"))
+        except Exception:
+            return "[]"
+
     @Property(int, notify=candlesChanged)
     def candlesCount(self):
         return len(self._candles)
@@ -5470,7 +5550,23 @@ class Backend(QObject):
 
     @Property(int, notify=candlesChanged)
     def dec(self):
-        # LIVE SERVER EDITION: دقة السعر من آخر شمعة حقيقية (مطابقة لمنصة Quotex)
+        return self._price_decimals()
+
+    def _price_decimals(self):
+        """دقة السعر المطابقة لمنصة Quotex: أولاً أرقام الخادم الرسمية
+        (mt4_digits — BRLUSD_otc مثلاً لها أرقامها الخاصة)، وإلا تقدير من
+        آخر سعر حقيقي. تُستعمل للسعر على المحور وبطاقة OHLC
+        (priceScale = 10^decimals في مكتبة الشارت)."""
+        try:
+            qx = _qx_module()
+            if qx is not None:
+                api = self._qx_symbols.get(self._asset) or self._api_from_display(self._asset)
+                if api:
+                    d = int(qx._get_or_create_asset(api).digits())
+                    if 0 < d <= 10:
+                        return d
+        except Exception:
+            pass
         try:
             p = float(self._candles[-1]["c"])
             if p >= 1000:
@@ -5967,11 +6063,19 @@ class Backend(QObject):
         # (لوحة العملات قد لا تكون وصلت بعد في ثوانٍ الدخول الأولى).
         if self._qx_symbols and asset not in self._qx_symbols:
             return
+        changed = (asset != self._asset or tf != self._tf)
         self._asset = asset
         self._tf = tf if tf in dict(TFS) else self._tf
         self._market = "otc" if "OTC" in self._asset.upper() else "real"
         self._tick = 0
         self._qx_last_sig = None
+        if changed:
+            # إفراغ الشموع فوراً حتى لا تبقى شموع العملة السابقة معروضة تحت
+            # اسم العملة الجديدة أثناء تحميل بياناتها من الخادم — الشارت
+            # يبدأ فارغاً وينتظر بيانات الخادم الحقيقية فقط (لا شموع وهمية).
+            self._candles = []
+            self._qx_feed_key = ("", "")
+            self._qx_load_feed(force=True)
         self._save_cfg()
         # إعادة حساب كل مؤشرات بايثون المفعّلة على الشموع الجديدة فورًا
         # (بدل انتظار أول تيك — وإلا اختفى الخط لأن القيم القديمة خارج نطاق السعر الجديد)
@@ -6109,6 +6213,41 @@ class Backend(QObject):
         return [{"name": "BRL/USD OTC", "symbol": "BRLUSD_otc", "payout": 0,
                  "open": True, "otc": True, "flag": pair_flag_uri("BRL/USD OTC")}]
 
+    def _qx_ensure_asset(self, api):
+        """v13.1 (طلب المستخدم): عملة فُتح شارتها ووجد بلا شموع تُجلب فوراً —
+        جلب أمامي عبر الخادم (ensure_asset_loaded → نفس المسار الرسمي عبر بوابة
+        الجلب) بدل انتظار دور التحميل المسبق الخلفي الذي يمر على كل العملات
+        واحدة تلو الأخرى (لهذا كانت بعض العملات تُفتح بشارت فارغ تماماً).
+        مضمومة لكل عملة مرة كل 15 ثانية حتى لا تُغرق الخادم."""
+        qx = _qx_module()
+        if not qx or getattr(qx, "CLIENT", None) is None or not self._qx_logged or not api:
+            return
+        now = time.time()
+        # v13.1: خنق تصاعدي — 15 ثانية لأول محاولة، وكل فشل يضاعف المهلة حتى 60 ثانية
+        # (حتى لا نغرق الخادم بطلبات متكررة لعملة بلا تاريخ فعلاً)
+        fails = self._qx_ensure_fail.get(api, 0)
+        if now - self._qx_ensure_at.get(api, 0.0) < min(60.0, 15.0 * (1 + fails)):
+            return
+        self._qx_ensure_at[api] = now
+        self._log("info", f"chart opened with no candles — loading {api} now (foreground)")
+
+        def _worker():
+            try:
+                fut = asyncio.run_coroutine_threadsafe(
+                    qx.ensure_asset_loaded(api), qx.ASYNC_LOOP)
+                n = fut.result(timeout=120)
+                if n:
+                    self._log("ok", f"{api}: {n} candles loaded + live stream ON")
+                    self._qx_ensure_fail[api] = 0
+                    self._qx_last_sig = None   # المضخة تدفع الغذاء الجديد فوراً
+                else:
+                    self._qx_ensure_fail[api] = self._qx_ensure_fail.get(api, 0) + 1
+            except Exception as e:
+                self._qx_ensure_fail[api] = self._qx_ensure_fail.get(api, 0) + 1
+                self._log("err", f"ensure {api}: {str(e)[:100]}")
+
+        threading.Thread(target=_worker, daemon=True, name="qxEnsure").start()
+
     def _qx_load_feed(self, force=False):
         """تحميل غذاء الشارت الحقيقي للعملة/الفريم الحاليين من الخادم."""
         api = self._qx_symbols.get(self._asset) or self._api_from_display(self._asset)
@@ -6125,6 +6264,9 @@ class Backend(QObject):
             if candles and (force or not self._candles or self._qx_feed_key != key):
                 self._candles = candles[-self._QX_FEED_CAP:]
                 self._qx_feed_key = key
+            elif not candles:
+                # v13.1: لا شموع بعد (لم يصل دور التحميل المسبق) — جلب فوري أمامي
+                self._qx_ensure_asset(api)
         elif tf_sec < 60:
             # فريمات الثواني: تُبنى من تيكات الخادم الحية (نافذة 5 دقائق — سياسة الخادم)
             ticks = []
@@ -6138,14 +6280,21 @@ class Backend(QObject):
             if feed and (force or not self._candles or self._qx_feed_key != key):
                 self._candles = feed
                 self._qx_feed_key = key
+            elif not feed:
+                # v13.1: لا تيكات بعد (البث لم يبدأ لهذه العملة) — جلب فوري أمامي
+                # يشغّل البث الحي نفسه فيتدفق التيك مباشرة
+                self._qx_ensure_asset(api)
         else:
-            # فريمات أعلى من الدقيقة: جلب مباشر 300 شمعة بنفس طريقة الخادم الأصلية
+            # فريمات أعلى من الدقيقة: جلب مباشر 300 شمعة بنفس طريقة الخادم الأصلية.
+            # ملاحظة: feed_key يُضبط داخل العامل عند وصول الشموع فعلاً — حتى لا يبدأ
+            # مدّ الذيل (_qx_extend_tail) قبل جلب البيانات ويصنع شموعاً مسطحة وهمية.
             if force or not self._candles or self._qx_feed_key != key:
                 self._qx_fetch_tf_async(api, tf_sec, 300)
-                self._qx_feed_key = key
 
     def _qx_fetch_tf_async(self, api, tf_sec, count):
-        """جلب شموع فريم أعلى داخل حلقة الخادم (نفس CLIENT.get_candles الأصلي)."""
+        """جلب شموع فريم أعلى داخل حلقة الخادم — نفس CLIENT.get_candles الأصلي
+        لكن عبر بوابة الجلب الواحدة (v13.1): طلب واحد في كل لحظة + أولوية أمامية
+        (طلب المستخدم المعروض يتقدم على التحميل المسبق ولا يختلط معه)."""
         qx = _qx_module()
         if not qx or getattr(qx, "CLIENT", None) is None:
             return
@@ -6155,8 +6304,9 @@ class Backend(QObject):
             try:
                 end = int(time.time())
                 fut = asyncio.run_coroutine_threadsafe(
-                    qx.CLIENT.get_candles(api, end, count * tf_sec, tf_sec), qx.ASYNC_LOOP)
-                res = fut.result(timeout=45)
+                    qx.qx_fetch_window_raw(api, end, count * tf_sec, tf_sec,
+                                           foreground=True, timeout=45.0), qx.ASYNC_LOOP)
+                res = fut.result(timeout=60)
                 candles = self._qx_fmt_raw(res, tf_sec)[-count:]
                 if candles and asset_name == self._asset and tf_key == self._tf:
                     self._candles = candles
@@ -6218,9 +6368,14 @@ class Backend(QObject):
                 d["v"] += 1
         return [buckets[k] for k in sorted(buckets)]
 
-    def _qx_merge_tail_full(self, new_feed):
+    def _qx_merge_tail_full(self, new_feed, tf_sec=None):
         """دمج غذاء الخادم مع غذاء الواجهة من الذيل فقط — رأس البيانات يبقى ثابتاً
-        حتى لا يُعاد ضبط الشارت أثناء التمرير للخلف. يعيد True إن تغيّر شيء."""
+        حتى لا يُعاد ضبط الشارت أثناء التمرير للخلف. يعيد True إن تغيّر شيء.
+
+        v13.1 (طلب المستخدم): سد الثغرات داخل غذاء الواجهة نفسه — أي فجوة
+        زمنية بين آخر شمعة موجودة وأول شمعة جديدة تُملأ بشموع مسطحة
+        (فتح/إغلاق = إغلاق الشمعة السابقة) بسقف أمان كبير (720 فريم) —
+        الفارغ في الشموع لن يحدث أبداً."""
         old = self._candles
         if not new_feed:
             return False
@@ -6230,6 +6385,23 @@ class Backend(QObject):
         added = [c for c in new_feed if c["t"] > old[-1]["t"]]
         changed = False
         if added:
+            # v13.1: سد الثغرات الزمنية بين الذيل القديم والجديد (شموع مسطحة)
+            if tf_sec and tf_sec > 0:
+                filled = []
+                last_t = old[-1]["t"]
+                last_c = old[-1]["c"]
+                for c in added:
+                    gap = int((c["t"] - last_t) // tf_sec) if c["t"] > last_t else 0
+                    if gap > 1 and gap <= 720:
+                        slot = last_t + tf_sec
+                        while slot < c["t"]:
+                            filled.append({"t": slot, "o": last_c, "h": last_c,
+                                           "l": last_c, "c": last_c, "v": 0})
+                            slot += tf_sec
+                    filled.append(c)
+                    last_t = c["t"]
+                    last_c = c["c"]
+                added = filled
             self._candles = old + added
             changed = True
         # تحديث الشموع المطابقة زمنياً (آخر 3 شموع): إغلاق الشمعة السابقة النهائي
@@ -6268,6 +6440,16 @@ class Backend(QObject):
                 return True
             return False
         if bucket > last["t"]:
+            # v13.1 (طلب المستخدم): سد الثغرات في مدّ الذيل — إذا قفز الزمن أكثر
+            # من فريم واحد (سبت النظام مثلاً) تُملأ الفواصل الزمنية الوسيطة
+            # بشموع مسطحة (إغلاق الشمعة السابقة) — لا فراغات في الفريمات العليا
+            _gap = int((bucket - last["t"]) // tf_sec) if tf_sec > 0 else 1
+            if 1 < _gap <= 720:
+                _slot = last["t"] + tf_sec
+                while _slot < bucket:
+                    self._candles.append({"t": _slot, "o": last["c"], "h": last["c"],
+                                          "l": last["c"], "c": last["c"], "v": 0})
+                    _slot += tf_sec
             self._candles.append({"t": bucket, "o": last["c"],
                                   "h": max(last["c"], px), "l": min(last["c"], px),
                                   "c": px, "v": 0})
@@ -6337,7 +6519,15 @@ class Backend(QObject):
                     self._candles = candles[-self._QX_FEED_CAP:]
                     self._qx_feed_key = key
                 else:
-                    self._qx_merge_tail_full(candles)
+                    self._qx_merge_tail_full(candles, tf_sec)
+            elif self._qx_feed_key != key:
+                # بيانات العملة لم تُحمّل بعد (التحميل المسبق يتدرج عملة تلو
+                # أخرى) — الشارت يبقى فارغاً بدل إظهار شموع العملة السابقة
+                self._candles = []
+                self._qx_feed_key = key
+            else:
+                # v13.1: لا شموع في الخادم لهذه العملة — جلب فوري أمامي
+                self._qx_ensure_asset(api)
         elif tf_sec < 60:
             ticks = []
             try:
@@ -6352,7 +6542,13 @@ class Backend(QObject):
                     self._candles = feed
                     self._qx_feed_key = key
                 else:
-                    self._qx_merge_tail_full(feed)
+                    self._qx_merge_tail_full(feed, tf_sec)
+            elif self._qx_feed_key != key:
+                self._candles = []
+                self._qx_feed_key = key
+            else:
+                # v13.1: لا تيكات — جلب فوري أمامي يشغّل البث الحي أيضاً
+                self._qx_ensure_asset(api)
         else:
             px = 0.0
             try:
@@ -6364,11 +6560,23 @@ class Backend(QObject):
                 m1 = self._qx_engine_candles(api)
                 if m1:
                     px = m1[-1]["c"]
-            self._qx_extend_tail(px, tf_sec)
-        # دفع التغيير للشارت فقط عند تغير آخر شمعة فعلاً (أداء)
+            # مدّ الذيل الحي فقط بعد وصول الشموع المجلوبة فعلاً (feed_key == key) —
+            # قبلها لا شموع مسطحة وهمية؛ وإذا فشل الجلب يعاد المحاولة كل 10 ثوانٍ
+            if self._qx_feed_key == key:
+                self._qx_extend_tail(px, tf_sec)
+            elif not self._candles:
+                now = time.time()
+                if now - self._qx_tf_retry >= 10.0:
+                    self._qx_tf_retry = now
+                    self._qx_load_feed(force=True)
+        # دفع التغيير للشارت فقط عند تغير آخر 3 شموع فعلاً (أداء) — الشمعة
+        # الحية + الإغلاق النهائي لشمعتين مغلقتين (بدل بقائهما خاطئتين ثم
+        # "قفزة" عند أول مزامنة كاملة — طلب المستخدم: إصلاح الشموع التي تقفز)
         if self._candles:
-            last = self._candles[-1]
-            sig = (last["t"], round(float(last["c"]), 10), len(self._candles))
+            tail = self._candles[-3:]
+            sig = (len(self._candles),) + tuple(
+                (c["t"], round(float(c["o"]), 10), round(float(c["h"]), 10),
+                 round(float(c["l"]), 10), round(float(c["c"]), 10)) for c in tail)
             if sig != self._qx_last_sig:
                 self._qx_last_sig = sig
                 if self._py_mods:
@@ -6426,6 +6634,9 @@ class Backend(QObject):
             asyncio.run_coroutine_threadsafe(qx.asset_payout_monitor(), loop)
             # BRLUSD_otc فوراً (300 شمعة + الحالة + الدفع) ثم بقية العملات واحدة تلو الأخرى
             asyncio.run_coroutine_threadsafe(qx.preload_all_assets(), loop)
+            # v13.1 (طلب المستخدم): آلية سد الثغرات تعمل الآن مع التطبيق أيضاً —
+            # نفس mt4_gap_filler الخادم بلا أي تغيير (كانت معرّفة بلا تشغيل)
+            asyncio.run_coroutine_threadsafe(qx.mt4_gap_filler(), loop)
             # تيكات في الذاكرة فقط + حذف الأقدم من 5 دقائق (حماية القرص)
             asyncio.run_coroutine_threadsafe(qx.tick_cache_collector(), loop)
             asyncio.run_coroutine_threadsafe(qx.tick_retention_loop(), loop)
@@ -6466,14 +6677,17 @@ class Backend(QObject):
             if qx and api and before > 0 and getattr(qx, "CLIENT", None) is not None and tf_sec >= 60:
                 if tf_sec == 60:
                     # دفعة الخادم الرسمية: fetch_older_batch تجلب 170 شمعة أقدم وتدمجها
+                    # (v13.1: داخل الخادم تمر بأولوية أمامية عبر بوابة الجلب الواحدة)
                     fut = asyncio.run_coroutine_threadsafe(
                         qx.fetch_older_batch(api, before, qx.PAGINATION_BATCH), qx.ASYNC_LOOP)
                     fut.result(timeout=60)
                     batch = [c for c in self._qx_engine_candles(api) if c["t"] < before][-qx.PAGINATION_BATCH:]
                 else:
+                    # v13.1: نفس CLIENT.get_candles الأصلي لكن عبر البوابة الأمامية
                     fut = asyncio.run_coroutine_threadsafe(
-                        qx.CLIENT.get_candles(api, before, 170 * tf_sec, tf_sec), qx.ASYNC_LOOP)
-                    res = fut.result(timeout=45)
+                        qx.qx_fetch_window_raw(api, before, 170 * tf_sec, tf_sec,
+                                               foreground=True, timeout=45.0), qx.ASYNC_LOOP)
+                    res = fut.result(timeout=60)
                     batch = [c for c in self._qx_fmt_raw(res, tf_sec) if c["t"] < before][-170:]
                 # مزامنة غذاء بايثون فوراً حتى لا يعيد المضخة إرسال إعادة ضبط للشارت
                 if tf == self._tf and asset == self._asset and batch:
@@ -6485,7 +6699,13 @@ class Backend(QObject):
                         self._candles = batch + self._candles
                         if len(self._candles) > self._QX_FEED_CAP:
                             self._candles = self._candles[-self._QX_FEED_TRIM:]
-                    self._qx_last_sig = None
+                    # v13.1 (طلب المستخدم: بلا قفزات): لا إعادة ضبط بعد الدفعة —
+                    # تحديث بصمة الذيل (آخر 3 شموع) فقط؛ الدفعة تُدمج في الصفحة
+                    # بلا أي قفزة والمضخة تُبقي الشمعة الحية عبر pushTail العادي
+                    _tail = self._candles[-3:]
+                    self._qx_last_sig = ((len(self._candles),) + tuple(
+                        (c["t"], round(float(c["o"]), 10), round(float(c["h"]), 10),
+                         round(float(c["l"]), 10), round(float(c["c"]), 10)) for c in _tail)) if _tail else None
                 if batch:
                     self._log("info", f"older batch: +{len(batch)} candles — {asset} {tf}")
                 else:
@@ -6595,7 +6815,8 @@ class Backend(QObject):
                                       "board": self._qx_boot_board(),
                                       "added": self._added,
                                       "tfs": [k for k, _ in TFS],
-                                      "asset": self._asset, "tf": self._tf, "live": self._live}})
+                                      "asset": self._asset, "tf": self._tf, "live": self._live,
+                                      "dec": self._price_decimals()}})
 
     @Slot(str, result=str)
     def compilePy(self, files_json):
@@ -7446,6 +7667,10 @@ var OLDER = { loading: false, at: 0, asset: "", tf: "" };
 window.__badiMaybeLoadOlder = function (p) {
   try {
     if (!window.__BADI_EMBEDDED || !p || !window.__badiPrimary || p !== window.__badiPrimary()) return;
+    /* v13.1: فريمات الثواني (5s/10s/15s/30s) تاريخها يُبنى من تيكات الخادم
+       الحية (نافذة 5 دقائق — سياسة الخادم نفسها) — لا يوجد تاريخ أقدم يُجلب،
+       فلا تُرسل طلبات older تكرارية بلا فائدة */
+    if (p.tf && /^[0-9]+s$/.test(String(p.tf))) return;
     var dd = p.dataArr;
     if (!dd || dd.length < 30 || !p.chart) return;
     if (OLDER.loading) {
@@ -8136,6 +8361,57 @@ function defineBadiApp() {
           } else pr.dataArr[pr.dataArr.length - 1] = k;
         }
         pr.chart.update(k);
+        syncCdColor(pr);
+        runSignals();
+      } catch (e) {}
+    },
+    pushTail: function (arr) {
+      /* LIVE SERVER EDITION: آخر 3 شموع من الخادم (الشمعة الحية + الإغلاق
+         النهائي لشمعتين مغلقتين). المكتبة تتجاهل أي شمعة زمنها أقدم من
+         الأخيرة داخل sim.update — لذلك الشمعة المغلقة المصحّحة تُستبدل
+         مباشرة داخل sim.candles، والعرض يتحدث دون أي إعادة ضبط أو قفزة. */
+      try {
+        var pr = window.__badiPrimary ? window.__badiPrimary() : null;
+        if (!pr) return;
+        var list = normArr(Array.isArray(arr) ? arr.map(function (x) { return Object.assign({}, x); }) : [arr]);
+        if (!list.length) return;
+        var ch = pr.chart;
+        for (var i = 0; i < list.length; i++) {
+          var k = list[i];
+          if (!pr.dataArr.length) { pr.dataArr = [k]; continue; }
+          var last = pr.dataArr[pr.dataArr.length - 1];
+          if (k.time > last.time) {
+            pr.dataArr.push(k);
+            /* أثناء التمرير للخلف: ولادة شمعة جديدة لا تُزيح العرض */
+            try { if (ch && ch.rightOffset < 0) ch.rightOffset -= 1; } catch (e) {}
+            if (pr.dataArr.length > 3000) {
+              var excess = pr.dataArr.length - 2600;
+              pr.dataArr.splice(0, excess);
+              try { if (ch && ch.sim && ch.sim.candles) ch.sim.candles.splice(0, excess); } catch (e) {}
+            }
+          } else {
+            /* شمعة موجودة (الشمعة الحية أو شمعة مغلقة بتوقيت مطابق) — استبدال دقيق */
+            for (var j = pr.dataArr.length - 1; j >= 0 && j >= pr.dataArr.length - 5; j--) {
+              if (pr.dataArr[j].time === k.time) { pr.dataArr[j] = k; break; }
+              if (pr.dataArr[j].time < k.time) break;
+            }
+          }
+          try { ch.update(k); } catch (e) {}
+        }
+        /* استبدال الشموع المصحّحة داخل sim مباشرة (مكتبة الشارت تتجاهلها في update) */
+        try {
+          var sim = ch && ch.sim;
+          if (sim && sim.candles && sim.candles.length) {
+            for (var a = 0; a < list.length; a++) {
+              var nc = sim._norm ? sim._norm(Object.assign({}, list[a])) : list[a];
+              if (!nc) continue;
+              for (var b = sim.candles.length - 1; b >= 0 && b >= sim.candles.length - 5; b--) {
+                if (sim.candles[b].time === nc.time) { sim.candles[b] = nc; break; }
+                if (sim.candles[b].time < nc.time) break;
+              }
+            }
+          }
+        } catch (e) {}
         syncCdColor(pr);
         runSignals();
       } catch (e) {}
@@ -8859,14 +9135,33 @@ ApplicationWindow {
     }
     function onCandlesWeb() {
         if (!win.webReady) return
-        if (backend.assetLabel !== win.lastAsset || backend.tfLabel !== win.lastTf
-                || backend.candlesCount < win.lastLen || backend.candlesCount > win.lastLen + 1) {
+        /* دفعة التمرير للخلف (170 شمعة) دُمجت في الصفحة فعلاً عبر prependCandles
+           دون أي تأثير على العرض — لا تُعاد تهيئة الشارت هنا (كانت هذه إعادة
+           الضبط تُظهر "قفزة" في الشموع عند كل دفعة — أُصلحت بطلب المستخدم) */
+        if ((Date.now() - (win.prependAt || 0)) < 5000
+                && backend.assetLabel === win.lastAsset && backend.tfLabel === win.lastTf
+                && backend.candlesCount >= win.lastLen) {
+            win.lastLen = backend.candlesCount
+            return
+        }
+        if (backend.assetLabel !== win.lastAsset || backend.tfLabel !== win.lastTf) {
             win.syncFull()
             return
         }
-        if (backend.candlesCount !== win.lastLen) win.lastLen = backend.candlesCount
-        /* شمعة جديدة واحدة أو تحديث الشمعة الأخيرة — دفعة خفيفة بدون إعادة ضبط العرض */
-        webCall("__badiApp.pushTick(" + backend.lastTickJson + ")")
+        /* v13.1 (طلب المستخدم: بلا قفزات): عند تراكم أكثر من شمعة بين نبضتين
+           تُدفع دفعة الذيل الأخيرة فقط عبر pushTail نفسها — لا إعادة إرسال
+           المصفوفة كاملة (syncFull كانت تعيد ضبط العرض فتظهر الشموع وكأنها تقفز) */
+        var diff = backend.candlesCount - win.lastLen
+        if (diff < 0 || diff > 60) { win.syncFull(); return }
+        if (diff > 1) {
+            win.lastLen = backend.candlesCount
+            webCall("__badiApp.pushTail(" + backend.tailJsonN(diff) + ")")
+            return
+        }
+        if (diff !== 0) win.lastLen = backend.candlesCount
+        /* آخر 3 شموع (الشمعة الحية + إغلاق شمعتين مغلقتين) — دفعة خفيفة بدون
+           إعادة ضبط العرض، وتُصلح الشمعة المغلقة داخل المكتبة مباشرة */
+        webCall("__badiApp.pushTail(" + backend.tailJson + ")")
     }
     function filesAccPart(cmd, arg) {
         var meta = cmd.substring(6)
@@ -9075,9 +9370,15 @@ ApplicationWindow {
                 win.webCall("__badiApp.prependCandles(" + JSON.stringify(e.candles) + ")",
                             function (res) {
                                 /* مزامنة عدّاد الشموع حتى لا تُعاد تهيئة الشارت
-                                   بعد دمج الدفعة — العرض يبقى ثابتاً تماماً */
+                                   بعد دمج الدفعة — العرض يبقى ثابتاً تماماً.
+                                   prependAt يحمي من دفعة candlesChanged القادمة من
+                                   بايثون (العداد تضاءل بـ170) حتى لا تستدعي syncFull
+                                   وتعيد ضبط الشارت أثناء التمرير للخلف */
                                 var n = parseInt(res || "0", 10) || 0
-                                if (n > 0) win.lastLen = backend.candlesCount
+                                if (n > 0) {
+                                    win.prependAt = Date.now()
+                                    win.lastLen = backend.candlesCount
+                                }
                             })
                 return
             }
