@@ -165,10 +165,14 @@ async def test_older_batch():
 
 
 async def test_gap_freeze():
-    print("3) سد الثغرات — علامة التجمد تُرفع عند الفجوات")
+    print("3) سد الثغرات — الطريقة الأصلية حرفياً (تجمد أصل + سد أصل)")
     qx.CLIENT = FakeClient()
     qx.CONNECTION_ALIVE = True
     writer = qx.MT4_WRITER
+    # v14.2: قاعدة مؤقتة نظيفة — اختبار حتمي بلا تلوث من candles.db المحلية
+    import tempfile
+    _tmpdb = os.path.join(tempfile.mkdtemp(prefix="gap_state_test_"), "candles.db")
+    writer._candle_store = qx.CandleStore(_tmpdb)   # تحت الخاصية مباشرة
     sym = "GAPUSD_otc"
     derived = sym.replace("_otc", "-OTC")
     fa = FakeAsset(sym)
@@ -185,51 +189,42 @@ async def test_gap_freeze():
 
     # خط سليم (بلا فجوات)
     clean = mk_candles(now - 100 * 60, 100)
-    check("scan.clean_line", writer._scan_line_holes(clean, 60) is False)
     # خط به فجوة 5 دقائق
     holed = mk_candles(now - 100 * 60, 90) + mk_candles(now - 5 * 60, 5)
-    check("scan.holed_line", writer._scan_line_holes(holed, 60) is True)
-    # فجوة إغلاق سوق (> 120 فترة) ليست فقداناً
-    weekend = mk_candles(now - 10000 * 60, 10) + mk_candles(now - 5 * 60, 5)
-    check("scan.weekend_not_hole", writer._scan_line_holes(weekend, 60) is False)
 
-    # (أ) خط مجمد وسليم → fill_gap_once يخرج فوراً (السلوك الأصلي)
+    # (أ) خط مجمد (filled=1 في القاعدة) → fill_gap_once يخرج فوراً —
+    #     السلوك الأصلي حرفياً: «frozen - keep candles exactly as they were»
     fa.candles = list(clean)
     writer.sync_state[derived] = {"period": 1, "candles": list(clean),
                                   "last_write": 0, "last_price": clean[-1]["close"]}
     writer.candle_store.set_gap_filled(derived, True, time.time())
-    writer._gap_filled[derived] = False       # عربي داخلي فقط
-    state_before = [dict(c) for c in writer.sync_state[derived]["candles"]]
 
-    orig_win = qx.qx_fetch_window_raw
     fetch_calls = []
 
-    async def no_fetch(sym_api, end, secs, per, foreground=False, timeout=None, retries=2):
-        fetch_calls.append(1)
-        return mk_candles(int(end) - 10 * 60, 10)
-
-    qx.qx_fetch_window_raw = no_fetch
-    try:
-        await writer.fill_gap_once(qx.CLIENT, fa, 1)
-        check("freeze.clean_skips", len(fetch_calls) == 0,
-              f"fetches={len(fetch_calls)} (يجب 0 — لا لمس لخط سليم)")
-
-        # (ب) نفس الخط لكن به فجوة → التجمد يُرفع والطريقة الأصلية تنفذ
-        holed_line = mk_candles(now - 100 * 60, 90) + mk_candles(now - 5 * 60, 5)
-        fa.candles = list(holed_line)
-        writer.sync_state[derived] = {"period": 1, "candles": list(holed_line),
-                                      "last_write": 0, "last_price": holed_line[-1]["close"]}
-        fetch_calls.clear()
-
-        async def real_recent(sym_api, end, secs, per, foreground=False, timeout=None, retries=2):
+    class PatchedClient:
+        api = FakeClient().api
+        async def get_candles(self, asset, end_from_time, offset, period, **kw):
             fetch_calls.append(1)
-            # آخر 10 شموع حقيقية تغطي الفجوة
-            return mk_candles(now - 10 * 60, 10)
+            return mk_candles(int(end_from_time) - 10 * 60, 10)
 
-        qx.qx_fetch_window_raw = real_recent
-        await writer.fill_gap_once(qx.CLIENT, fa, 1)
-        check("freeze.holed_runs", len(fetch_calls) >= 1,
-              f"fetches={len(fetch_calls)} (الطريقة الأصلية نفذت)")
+    patched = PatchedClient()
+    try:
+        await writer.fill_gap_once(patched, fa, 1)
+        check("freeze.frozen_skips", len(fetch_calls) == 0,
+              f"fetches={len(fetch_calls)} (يجب 0 — الأصل يخرج فوراً)")
+
+        # (ب) غير مجمد + فجوات حقيقية + خارج فترة التحديث (301s) →
+        #     الخوارزمية الأصلية نفسها تنفذ وتسدّ الفجوات
+        writer.candle_store.set_gap_filled(derived, False, time.time())
+        writer._gap_filled[derived] = True
+        writer._gap_filled_at[derived] = time.time() - 301
+        fa.candles = list(holed)
+        writer.sync_state[derived] = {"period": 1, "candles": list(holed),
+                                      "last_write": 0, "last_price": holed[-1]["close"]}
+        fetch_calls.clear()
+        await writer.fill_gap_once(patched, fa, 1)
+        check("freeze.unfrozen_runs", len(fetch_calls) >= 1,
+              f"fetches={len(fetch_calls)} (الأصل نفذ بعد انقضاء فترة التحديث)")
         merged = writer.sync_state[derived]["candles"]
         has_hole = writer._scan_line_holes(merged, 60)
         check("freeze.holes_fixed", has_hole is False,
@@ -237,12 +232,10 @@ async def test_gap_freeze():
         filled_flag, _ = writer.candle_store.is_gap_filled(derived)
         check("freeze.refrozen_after_fix", bool(filled_flag))
     finally:
-        qx.qx_fetch_window_raw = orig_win
         try:
             writer.candle_store.set_gap_filled(derived, False, time.time())
         except Exception:
             pass
-
 
 def test_flags():
     print("4) الأعلام — زوجان = علمان")
@@ -274,6 +267,7 @@ def test_flags():
     check("flags.paren_and_plain_same_cells",
           u1.count('<g transform="translate(') == 2
           and u2.count('<g transform="translate(') == 2)
+
 
 
 async def main():

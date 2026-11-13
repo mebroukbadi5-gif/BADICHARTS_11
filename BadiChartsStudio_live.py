@@ -6969,9 +6969,15 @@ class Backend(QObject):
     # ---------- دفعة التمرير للخلف (300 شمعة) ----------
     @Slot(str)
     def fetchOlder(self, arg):
-        """طلب دفعة شموع أقدم من الخادم عند التمرير إلى بداية الشارت."""
+        """طلب دفعة شموع أقدم من الخادم عند التمرير إلى بداية الشارت.
+
+        v14.2: عندما يكون الطلب السابق لا يزال جارياً (_qx_older_busy) لا
+        نرد برسالة فارغة — الرد الفارغ كان يصل إلى prependCandles فيضع
+        OLDER.exhausted = المرساة الحالية، فيُحجب كل طلب لاحق لنفس النقطة
+        («الرجوع للخلف لا يجلب شموعاً» بعد أول سحبين سريعين). الطلب الجاري
+        سيصل بنتيجته ويُدمج، والعتبة الزمنية في __badiMaybeLoadOlder (8s)
+        تمنع التكرار المفرط أثناءه."""
         if not self._qx_logged or self._qx_older_busy:
-            self._emit_qx({"type": "older", "candles": []})
             return
         self._qx_older_busy = True
         threading.Thread(target=self._qx_older_worker, args=(str(arg or "{}"),),
@@ -6980,6 +6986,7 @@ class Backend(QObject):
     def _qx_older_worker(self, arg):
         batch = []
         b_asset, b_tf = "", ""
+        transient_error = False   # v14.2: خطأ عابر ≠ نهاية التاريخ
         try:
             try:
                 req = json.loads(arg or "{}")
@@ -7033,9 +7040,17 @@ class Backend(QObject):
             elif tf_sec < 60:
                 self._log("info", "sub-second history builds from live ticks (5-min server window)")
         except Exception as e:
+            transient_error = True
             self._log("err", "older batch: " + str(e)[:120])
         finally:
             self._qx_older_busy = False
+        # v14.2: عند خطأ عابر (انقطاع، مهلة…) لا نرسل رداً فارغاً — الرد
+        # الفارغ كان يضع OLDER.exhausted في الصفحة فيُحجب إعادة الطلب لنفس
+        # المرساة للأبد. الذاكرة في الصفحة تُفرغ تلقائياً بعد 8 ثوانٍ فلا
+        # يمنع المستخدم من المحاولة مجدداً. أما الرد الفارغ الحقيقي
+        # (لا شموع أقدم أصلاً) فيصل كما هو — نهاية التاريخ فلا تكرار.
+        if transient_error:
+            return
         # v14.1: الدفعة موسومة بالعملة والفريم — الصفحة ترفض أي دفعة لا تطابق
         # الشارت الحالي (حماية من اختلاط الدفعات عند تبديل العملة أثناء الجلب)
         self._emit_qx({"type": "older", "candles": batch, "asset": b_asset, "tf": b_tf})
