@@ -142,8 +142,9 @@ svg{vertical-align:middle;flex-shrink:0}
 .pane-pay{font-size:9.5px;font-weight:800;color:var(--ok);flex-shrink:0}
 .pane-cv{position:relative;flex:1;min-height:0}
 .pane-cv canvas{position:absolute;inset:0;display:block;width:100%;height:100%}
-/* المؤقت التنازلي بجانب الشمعة الحية — رقمان فقط بلا إطار أو خلفية (طلب المستخدم) */
-.cdigit{position:absolute;left:0;top:0;font:800 13px/1 -apple-system,"Segoe UI",Roboto,sans-serif;font-variant-numeric:tabular-nums;direction:ltr;pointer-events:none;white-space:nowrap;text-shadow:0 1px 3px rgba(0,0,0,.4);transform:translateY(-50%);z-index:3}
+/* المؤقت التنازلي بجانب الشمعة الحية — أصبح ميزة countdown الأصلية في مكتبة
+   BADI-CHARTS v2.13.0: يُرسم داخل الشارت بإحداثياته نفسها، فيحافظ على مسافته عن
+   الشمعة مهما كان الزوم، بلا عنصر HTML وبلا حلقة requestAnimationFrame خاصة */
 #libLoading{position:absolute;inset:0;display:grid;place-items:center;background:var(--bg);z-index:5}
 .loadbox{display:flex;flex-direction:column;align-items:center;gap:12px}
 .spin{height:32px;width:32px;border-radius:9999px;border:2px solid var(--border2);border-top-color:var(--accent-h);animation:spin 1s linear infinite}
@@ -169,13 +170,13 @@ svg{vertical-align:middle;flex-shrink:0}
 
 /* ═══ Signals — side panel on the RIGHT (history of fired signals, black cards) ═══ */
 #sigPane{width:272px;flex-shrink:0;display:flex;flex-direction:column;background:var(--panel);border-right:1px solid var(--border)}
-#sigHead{display:flex;height:30px;flex-shrink:0;align-items:center;gap:6px;padding:0 10px;font-size:10px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--t-dim);border-bottom:1px solid var(--border)}
+#sigHead{display:flex;height:30px;flex-shrink:0;align-items:center;gap:6px;padding:0 10px;font-size:10px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--t-dim);border-bottom:1px solid var(--border);overflow:hidden}
 /* زر الإخفاء داخل رأس البطاقة — بحد واضح بلون الزر حتى يكون ظاهرًا بوضوح */
 #sigHead .ibtn{width:22px;height:22px;border-radius:6px;color:var(--accent-h);border-color:var(--acc-bd);background:var(--acc-soft)}
 #sigHead .ibtn:hover{background:var(--acc-bd)}
 #sigHead .chip{height:15px;padding:0 6px;font-size:9px}
 /* تبويبا لوحة الإشارات: الإشارات (الجارية الآن) + السجل (المنتهية بنتيجتها) — طلب المستخدم */
-.sig-tab{display:inline-flex;height:20px;align-items:center;gap:4px;flex-shrink:0;padding:0 10px;border-radius:999px;border:1px solid transparent;background:transparent;color:var(--t-dim);font-size:9.5px;font-weight:800;letter-spacing:.04em;cursor:pointer;transition:.15s;text-transform:uppercase}
+.sig-tab{display:inline-flex;height:20px;align-items:center;gap:4px;flex-shrink:1;min-width:0;max-width:122px;padding:0 8px;border-radius:999px;border:1px solid transparent;background:transparent;color:var(--t-dim);font-size:9.5px;font-weight:800;letter-spacing:.04em;cursor:pointer;transition:.15s;text-transform:uppercase;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 .sig-tab b{font-size:9px;opacity:.65;font-weight:800}
 .sig-tab:hover{color:var(--t-mid);background:var(--panel3)}
 .sig-tab.on{color:var(--accent-h);background:var(--acc-soft);border-color:var(--acc-bd)}
@@ -405,7 +406,6 @@ svg{vertical-align:middle;flex-shrink:0}
           <div id="sigHead">
             <button id="sigTabSig" class="sig-tab on" type="button"></button>
             <button id="sigTabHist" class="sig-tab" type="button"></button>
-            <span id="sigCount" class="chip" hidden></span>
             <span class="grow"></span>
             <button id="sigSound" class="ibtn ghost" title="Mute or unmute the signal sounds" aria-label="Toggle signal sounds"></button>
             <button id="sigClear" class="ibtn ghost" title="Clear the signals list" aria-label="Clear signals"></button>
@@ -1662,16 +1662,19 @@ function addPane() {
   el.className = "pane";
   el.dataset.pane = i;
   el.title = "Open this chart — click to select it";
-  el.innerHTML = '<div class="pane-head"></div><div class="pane-cv"><canvas></canvas><div class="cdigit" dir="ltr" hidden></div></div>';
+  el.innerHTML = '<div class="pane-head"></div><div class="pane-cv"><canvas></canvas></div>';
   $("gridHost").appendChild(el);
   const cv = el.querySelector("canvas");
   const cfg = assetCfg(name);
   const chart = new window.BadiCharts(cv, {
     symbol: { label: cfg.label, priceScale: 100, decimals: cfg.decimals },
     timeframe: { label: "1m", ms: tfMs("1m") },
-    theme: window.__BADI_CHART_THEME__ || { drawing: "#38bdf8", drawingActive: "#7dd3fc" }
+    theme: window.__BADI_CHART_THEME__ || { drawing: "#38bdf8", drawingActive: "#7dd3fc" },
+    /* العدّ التنازلي الأصلي للمكتبة بجانب الشمعة الحية (طلب المستخدم): رقمان فقط
+       بلا إطار أو خلفية، بإزاحة ثابتة (14px) عن حافة الشمعة مهما كان الزوم */
+    countdown: { enabled: true, format: "ss", fontSize: 13, offsetX: 14, offsetY: 0, color: "#22E08A" }
   });
-  const p = { el: el, head: el.querySelector(".pane-head"), cv: cv, chart: chart, asset: name, tf: "1m", dataArr: [], tick: 0, cd: el.querySelector(".cdigit") };
+  const p = { el: el, head: el.querySelector(".pane-head"), cv: cv, chart: chart, asset: name, tf: "1m", dataArr: [], tick: 0 };
   setupChart(chart, p);
   chart.start();
   p.dataArr = generateCandles(cfg, p.tf, 620);
@@ -1777,6 +1780,7 @@ function onRemoved(id) {
 /** Local simulation feed for the non-engine panes + countdowns refresh */
 function liveTick() {
   if (live) {
+    const nowSec = Math.floor(Date.now() / 1000);
     for (let i = 0; i < panes.length; i++) {
       if (window.__BADI_EMBEDDED && i === primaryPane) continue;   // Python drives that pane
       const p = panes[i];
@@ -1784,15 +1788,25 @@ function liveTick() {
       p.tick++;
       const last = p.dataArr[p.dataArr.length - 1];
       if (!last) continue;
-      if (p.tick % 45 === 0) {
-        const nc = newCandleFrom(last, tfMs(p.tf), cfg.vol);
-        p.dataArr.push(nc);
-        p.chart.update(nc);
+      /* شمعة جديدة فقط عند مرور حد الفريم بالتوقيت الحقيقي — كانت تُنشأ بعدد
+         تكات من الإقلاع فتنحرف أوقات الشموع عن حدود الدقيقة ويعلق العدّ على 00 */
+      const tf = Math.max(5, Math.floor(tfMs(p.tf) / 1000));
+      const lastT = Math.floor(last.time > 1e11 ? last.time / 1000 : last.time);
+      const boundary = nowSec - (nowSec % tf);
+      if (lastT < boundary) {
+        /* املأ الفجوة لو تأخرت التكة (نوم/تعليق) — بحد أقصى 500 شمعة */
+        const gap = Math.min(Math.floor((boundary - lastT) / tf), 500);
+        for (let k = 0; k < gap; k++) {
+          const nc = newCandleFrom(p.dataArr[p.dataArr.length - 1], tfMs(p.tf), cfg.vol);
+          p.dataArr.push(nc);
+          p.chart.update(nc);
+        }
       } else {
         const sc = stepCandle(last, cfg.vol);
         p.dataArr[p.dataArr.length - 1] = sc;
         p.chart.update(sc);
       }
+      syncCdColor(p);
     }
   }
   sigLocalResolve();
@@ -1812,53 +1826,88 @@ function sigExpireSweep() {
 }
 
 /* ═══ المؤقت التنازلي بجانب الشمعة الحية (طلب المستخدم) ═══
-   رقمان فقط — الثواني المتبقية لإغلاق الشمعة الحالية (أقصاه 99) —
-   بلا إطار ولا خلفية، بإزاحة صغيرة عن الشمعة (ليس ملتصقًا بها)،
-   وبلون اتجاه الشمعة نفسه، ويتبع الشمعة عند التحريك والتكبير. */
-function padCd(n) { n = Math.max(0, Math.min(99, Math.ceil(n))); return (n < 10 ? "0" : "") + n; }
-function cdFrame() {
-  const nowS = Date.now() / 1000;
-  const th = window.__BADI_CHART_THEME__ || {};
-  const bull = th.bull || "#22E08A", bear = th.bear || "#FF4D5E";
-  for (let i = 0; i < panes.length; i++) {
-    const p = panes[i];
-    const cd = p.cd;
-    if (!cd) continue;
-    try {
-      const ch = p.chart;
-      /* نقرأ الشموع المرسومة فعلاً على الشارت (sim) — لا dataArr — حتى يجاور
-         الرقم الشمعة الحية الحقيقية في كل الأوضاع (محرك / محاكاة) */
-      const sim = ch && ch.sim && ch.sim.candles ? ch.sim.candles : null;
-      const last = sim && sim.length ? sim[sim.length - 1] : null;
-      if (!last || !ch || typeof ch.indexToX !== "function" || typeof ch.priceToY !== "function") { if (!cd.hidden) cd.hidden = true; continue; }
-      const n = sim.length;
-      const tS = last.time > 1e11 ? last.time / 1000 : last.time;
-      let rem = tS + tfMs(p.tf) / 1000 - nowS;
-      if (rem < 0) rem = 0;
-      const gap = Math.max(9, Math.min(20, (ch.barSpacing || 8) * 0.8));
-      /* الكانفس قد يُعرض بعرض مختلف عن مخزنه لحظة تغيّر حجم اللوحة — نحول دائمًا
-         من إحداثيات المكتبة الداخلية إلى البكسل المعروض فعلاً */
-      const rect = p.cv.getBoundingClientRect();
-      const sx = (p.cv.width && rect.width) ? rect.width / p.cv.width : 1;
-      const sy = (p.cv.height && rect.height) ? rect.height / p.cv.height : 1;
-      let x = ch.indexToX(n - 1) * sx + gap;
-      const cr = (ch.chartRight || 0) * sx;
-      if (cr && x > cr - 24) x = cr - 24;   /* يبقى الرقم داخل مساحة الرسم بجانب محور السعر */
-      const y = ch.priceToY(last.close) * sy;
-      const ok = isFinite(x) && isFinite(y) && x > (ch.chartLeft || 0) * sx + 4 && y > 8 && y < (ch.chartBottom || 1e9) * sy - 8;
-      if (!ok) { if (!cd.hidden) cd.hidden = true; continue; }
-      const txt = padCd(rem), col = last.close >= last.open ? bull : bear;
-      if (cd.textContent !== txt) cd.textContent = txt;
-      const lx = Math.round(x) + "px", ly = Math.round(y) + "px";
-      if (cd.style.left !== lx) cd.style.left = lx;
-      if (cd.style.top !== ly) cd.style.top = ly;
-      if (cd.style.color !== col) cd.style.color = col;
-      if (cd.hidden) cd.hidden = false;
-    } catch (e) { if (!cd.hidden) cd.hidden = true; }
-  }
-  requestAnimationFrame(cdFrame);
+   نستخدم ميزة countdown الأصلية في المكتبة (v2.13.0): تُرسم داخل الشارت بإحداثياته
+   نفسه — رقمان فقط بلا إطار أو خلفية، بإزاحة ثابتة (14px) عن حافة الشمعة الحية
+   مهما كان الزوم. نعيد تعريف drawCountdown على نموذج المكتبة نفسه بثلاثة إصلاحات:
+   1) المكتبة تمرّر طابع requestAnimationFrame (performance.now) إلى drawCountdown
+      بينما أوقات الشموع بالثواني الحقيقية — فكان العدّ ينقطع ويعود في ثوانٍ خاطئة.
+      نحسب الوقت من Date.now() فيبقى العدّ محاذيًا لحدود الشمعة بالتوقيت الحقيقي.
+   2) المكتبة تخفي الرقم كليًا إذا لم يكن هناك مكان بين الشمعة ومحور السعر (زوم
+      مع الشمعة ملاصقة للمحور) — فكان يبدو وكأنه توقف. البديل: نرسمه فوق الشمعة
+      نفسها (وسطًا أعلى ذيلها) بمسافة واضحة — لا تصادم مع أي شمعة ولا مع المحور.
+   3) لون الرقم = لون اتجاه الشمعة الحية (أخضر/أحمر) — يتحدث مع كل تكة (syncCdColor). */
+(function () {
+  try {
+    if (window.BadiCharts && BadiCharts.prototype) {
+      BadiCharts.prototype.drawCountdown = function () {
+        try {
+          const cd = this._countdown;
+          if (!cd || !cd.enabled) return;
+          const candles = this.sim.candles, N = candles.length;
+          if (N === 0) return;
+          const last = candles[N - 1];
+          if (!last || !last.time) return;
+          const tfMs = this.timeframe.ms || 6e4;
+          const closeSec = last.time + Math.round(tfMs / 1e3);
+          /* وقت الحائط الحقيقي لا طابع الرسم — محاذاة كاملة لحدود الفريم */
+          const nowSec = Math.floor(Date.now() / 1000);
+          let rem = closeSec - nowSec;
+          if (rem < 0) rem = 0;
+          const value = Math.min(99, Math.max(0, rem % 60));   /* رقمان فقط دائمًا */
+          const text = (value < 10 ? "0" : "") + value;
+          const y = this.priceToY(last.close) + (cd.offsetY || 0);
+          if (!isFinite(y) || y < this.priceTop - 6 || y > this.priceBottom + 6) return;
+          const ctx = this.ctx;
+          ctx.save();
+          ctx.font = (cd.fontSize || 11) + "px -apple-system, Segoe UI, Roboto, sans-serif";
+          ctx.fillStyle = cd.color || this.theme.textDim;
+          ctx.textAlign = "left";
+          ctx.textBaseline = "middle";
+          const tw = ctx.measureText(text).width;
+          const off = (cd.offsetX != null) ? cd.offsetX : 6;
+          const slotEdge = this.indexToX(N - 1) + this.barSpacing / 2;
+          /* إزاحة مرنة: تبقى الرقم بجانب الشمعة في العرض الافتراضي (المساحة حتى
+             محور السعر ضيقة عند الزوم الصغير) — وتنتقل فوق الشمعة فقط عند الانحشار */
+          const avail = (this.chartRight - 4) - slotEdge;
+          let x = slotEdge + off;
+          if (!isFinite(x)) { ctx.restore(); return; }
+          if (x + tw > this.chartRight - 4) {
+            if (avail >= tw + 8) {
+              /* يكفي المكان لإزاحة أصغر — اضغطها بدل ترك الشمعة */
+              x = slotEdge + Math.max(6, avail - tw - 2);
+            }
+            if (x + tw > this.chartRight - 4) {
+              /* لا مكان إطلاقًا يمين الشمعة → فوق الشمعة وسطًا أعلى ذيلها */
+              const yTop = this.priceToY(last.high) - (cd.fontSize || 11);
+              if (isFinite(yTop) && yTop - (cd.fontSize || 11) / 2 > this.priceTop + 2) {
+                ctx.textAlign = "center";
+                ctx.fillText(text, Math.round(this.indexToX(N - 1)), Math.round(yTop));
+              }
+              ctx.restore();
+              return;
+            }
+          }
+          if (x < this.chartLeft + 4) { ctx.restore(); return; }
+          ctx.fillText(text, Math.floor(x), Math.floor(y));
+          ctx.restore();
+        } catch (e) {}
+      };
+    }
+  } catch (e) {}
+})();
+/* مزامنة لون العدّ التنازلي مع اتجاه الشمعة الأخيرة (يتحدث مع كل تكة/تغيير ثيم) */
+function syncCdColor(p) {
+  try {
+    const ch = p.chart;
+    if (!ch || !ch._countdown || typeof ch.setCountdown !== "function") return;
+    const arr = (ch.sim && ch.sim.candles && ch.sim.candles.length) ? ch.sim.candles : (p.dataArr || []);
+    const last = arr[arr.length - 1];
+    if (!last) return;
+    const th = window.__BADI_CHART_THEME__ || {};
+    const col = last.close >= last.open ? (th.bull || "#22E08A") : (th.bear || "#FF4D5E");
+    if (ch._countdown.color !== col) ch.setCountdown({ color: col });
+  } catch (e) {}
 }
-requestAnimationFrame(cdFrame);
 
 function showLibError(msg) {
   const box = $("libLoading");
@@ -2265,9 +2314,8 @@ function renderSignals() {
   const pend = SIGS.filter((g) => !g.result && !g.expired);
   const done = SIGS.filter((g) => !!g.result);
   const list = SIG_TAB === "sig" ? pend : done;
-  const cnt = $("sigCount");
-  cnt.hidden = !list.length;
-  cnt.textContent = list.length + (list.length === 1 ? " signal" : " signals");
+  /* حُذف شريط "N signals" من رأس اللوحة — كان نصه يفور خارج إطاره عند تكبر العدد
+     (ملاحظة المستخدم) — والعدد يظهر داخل تبويبي الإشارات/السجل نفسهما */
   const ar = window.__BADI_LANG__ === "ar";
   const emptyMsg = SIG_TAB === "sig"
     ? (ar ? "الإشارات الجارية من مؤشراتك تظهر هنا — شراء/بيع وعلم الزوج والمدة والمؤشر وتوقيت الدخول. النتيجة (WIN/LOSS) تظهر عند انتهاء المدة وتنتقل للسجل."
@@ -4841,14 +4889,23 @@ class Backend(QObject):
         # التغذية الحية تعمل فقط عند تفعيل اللايف، أما تسويات الإشارات والصفقات فتعمل دائمًا
         if self._live:
             cfg = self._asset_cfg()
-            self._tick += 1
-            n = max(5, self._tf_sec())
-            if self._tick % n == 0:
-                self._candles.append(new_candle(self._candles[-1], self._tf_sec(), cfg["vol"]))
+            tf = max(5, self._tf_sec())
+            # شمعة جديدة عند مرور حد الفريم بالتوقيت الحقيقي لا بعدد التكات من الإقلاع —
+            # الانحراف عن حدود الدقيقة الحقيقية كان يجعل العدّ التنازلي يعلق على 00
+            # بقية الدقيقة (يعمل في أول شمعة ثم يتوقف — ملاحظة المستخدم)
+            now = int(time.time())
+            boundary = now - (now % tf)
+            cur = self._candles[-1]
+            if cur["t"] < boundary:
+                # الفريم انتهى فعلاً — أغلق الشمعة وافتح شمعة الحد الحقيقي،
+                # واملأ أي فجوة لو تأخرت التكة (نوم/تعليق النظام) بحد أقصى 500 شمعة
+                gap = min(int((boundary - cur["t"]) // tf), 500)
+                for _ in range(gap):
+                    self._candles.append(new_candle(self._candles[-1], tf, cfg["vol"]))
                 if len(self._candles) > 1500:
                     self._candles = self._candles[-1200:]
             else:
-                self._candles[-1] = step_candle(self._candles[-1], cfg["vol"])
+                self._candles[-1] = step_candle(cur, cfg["vol"])
             # الترتيب مهم: احسب قيم المؤشرات أولًا ثم ادفع الشمعة —
             # الترتيب العكسي كان يرسم الشمعة الجديدة بدون قيمة المؤشر لشمعة كاملة
             self._compute_py()
@@ -6163,7 +6220,7 @@ function applyAppTheme(t) {
   /* لون الشارت = لون التطبيق: يُطبَّق فورًا على كل اللوحات المفتوحة (ولوحة جديدة ترثه عند إنشائها) */
   try {
     if (typeof panes !== "undefined" && panes && panes.forEach)
-      panes.forEach(function (p) { try { if (p.chart && typeof p.chart.setTheme === "function") p.chart.setTheme(ct); } catch (e) {} });
+      panes.forEach(function (p) { try { if (p.chart && typeof p.chart.setTheme === "function") p.chart.setTheme(ct); } catch (e) {} try { syncCdColor(p); } catch (e) {} });
   } catch (e) {}
   window.__BADI_MONACO_THEME__ = t.dark ? "badi-app-dark" : "badi-app-light";
   try {
@@ -6195,6 +6252,7 @@ function defineBadiApp() {
         if (!pr) return;
         pr.dataArr = normArr(arr || []);
         pr.chart.setData(pr.dataArr);
+        syncCdColor(pr);
         runSignals();
       } catch (e) { console.log("BADI::dbg setCandles ERR " + e); }
     },
@@ -6212,6 +6270,7 @@ function defineBadiApp() {
           } else pr.dataArr[pr.dataArr.length - 1] = k;
         }
         pr.chart.update(k);
+        syncCdColor(pr);
         runSignals();
       } catch (e) {}
     },
