@@ -1,0 +1,35 @@
+[00:02:58] FATAL in main thread (top level): 'FakeQuotex' object has no attribute 'get_payment'
+Traceback (most recent call last):
+  File "/home/z/my-project/scripts/test_fix_l.py", line 44, in <module>
+    assert mod.Quotex.get_payout(fq, "USDARS_otc") == 92
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/my-project/download/quotex_mt4_server_v10.py", line 1369, in get_payout
+    data = self.get_payment().get(asset_name)
+           ^^^^^^^^^^^^^^^^
+AttributeError: 'FakeQuotex' object has no attribute 'get_payment'
+
+[00:03:12] FATAL in main thread (top level): [[1, 'EURUSD', 'EUR/USD', 'forex', 4, 84, 60, 30, 3, 1, 0, 0, [], 1, True]]
+Traceback (most recent call last):
+  File "/home/z/my-project/scripts/test_fix_l.py", line 91, in <module>
+    asyncio.run(capture_pipeline())
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/z/my-project/scripts/test_fix_l.py", line 72, in capture_pipeline
+    assert got2 and got2[0][1] == "GBPUSD_otc", got2
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: [[1, 'EURUSD', 'EUR/USD', 'forex', 4, 84, 60, 30, 3, 1, 0, 0, [], 1, True]]
+
+[00:03:30] FATAL in main thread (top level): 
+Traceback (most recent call last):
+  File "/home/z/my-project/scripts/test_fix_l.py", line 111, in <module>
+    assert tf == [60,120,180,300,600,900,1800,3600,14400,86400,5,10,15,30]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError
+
