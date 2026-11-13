@@ -33,3 +33,24 @@ Traceback (most recent call last):
            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 AssertionError
 
+[02:07:58] [older:BRLUSD_otc] +170 candles (batch 170) — oldest now 2026-11-12 18:18
+[02:07:58] FATAL in main thread (top level): too many values to unpack (expected 2)
+Traceback (most recent call last):
+  File "/home/z/my-project/scripts/smoke_v13_e2e.py", line 106, in <module>
+    asyncio.run(main())
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/z/my-project/scripts/smoke_v13_e2e.py", line 103, in main
+    closed = {a for a, e in entries if e.get("open") is False}
+                    ^^^^
+ValueError: too many values to unpack (expected 2)
+
+[02:09:25] [older:BRLUSD_otc] +170 candles (batch 170) — oldest now 2026-11-12 18:20
+[02:09:59] [older:BRLUSD_otc] +170 candles (batch 170) — oldest now 2026-11-12 18:20
