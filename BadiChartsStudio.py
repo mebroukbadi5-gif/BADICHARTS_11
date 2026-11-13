@@ -75,11 +75,12 @@ svg{vertical-align:middle;flex-shrink:0}
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Courier New",monospace}
 .grow{flex:1}
 .op70{opacity:.7}
-::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar{width:6px;height:6px}
 ::-webkit-scrollbar-track{background:transparent}
-/* شريط تمرير ناعم رقيق بلون يتكيف مع الثيم: شبه أسود على الداكن وشبه أبيض على الفاتح (طلب المستخدم) */
-::-webkit-scrollbar-thumb{background:var(--sbar);border-radius:8px;border:2px solid transparent;background-clip:padding-box}
+/* شريط تمرير رقيق وناعم مثل شريط المحرر — بدون حدود سميكة (طلب المستخدم) */
+::-webkit-scrollbar-thumb{background:var(--sbar);border-radius:3px}
 ::-webkit-scrollbar-thumb:hover{background:var(--sbar-h)}
+::-webkit-scrollbar-corner{background:transparent}
 
 #app{display:flex;flex-direction:column;height:100vh}
 
@@ -169,8 +170,7 @@ svg{vertical-align:middle;flex-shrink:0}
 .sig-tab b{font-size:9px;opacity:.65;font-weight:800}
 .sig-tab:hover{color:var(--t-mid);background:var(--panel3)}
 .sig-tab.on{color:var(--accent-h);background:var(--acc-soft);border-color:var(--acc-bd)}
-#sigClear{display:flex}
-#sigList{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding:9px}
+#sigList{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;display:flex;flex-direction:column;gap:8px;padding:9px}
 /* بطاقة الإشارة — تصميم محسّن: سوداء دائمًا + شريط اتجاه على الحافة،
    الأخضر #22E08A / الأحمر #FF4D5E كلمسات فقط، حد وظل ملوّنان بلون الاتجاه */
 .sigcard{--sc:#22E08A;--scbg:rgba(34,224,138,.26);position:relative;flex-shrink:0;border-radius:12px;padding:10px 12px 8px 14px;color:#F2F5F3;cursor:pointer;overflow:hidden;
@@ -258,7 +258,7 @@ svg{vertical-align:middle;flex-shrink:0}
 #cClear:hover{color:var(--t-bright)}
 #cHide{color:var(--t-dim2);display:flex}
 #cHide:hover{color:var(--t-bright)}
-#consoleMsgs{flex:1;min-height:0;overflow-y:auto;padding:0 12px 6px}
+#consoleMsgs{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;padding:0 12px 6px}
 .cempty{font-size:10px;color:var(--t-dim3)}
 .msg{display:flex;gap:8px;padding:1px 0;font:10.5px/16px ui-monospace,Menlo,Consolas,monospace}
 .msg .t{flex-shrink:0;color:var(--t-dim3);direction:ltr}
@@ -325,19 +325,19 @@ svg{vertical-align:middle;flex-shrink:0}
 .cbtn:hover{color:var(--t-bright);background:var(--btn-bg)}
 .cbtn:disabled{opacity:.35;cursor:default;background:var(--panel3);color:var(--t-dim)}
 /* شريط التمرير المصغر: بعرض الشريط كاملاً تحت أسماء العملات — ممتد حتى أيقونة الحذف */
-.ascroll{position:relative;height:10px;flex-shrink:0;margin:0 8px 5px;cursor:pointer;touch-action:none}
-.ascroll::before{content:"";position:absolute;left:0;right:0;top:3px;height:4px;border-radius:2px;background:var(--border)}
-.ascroll:hover::before{background:var(--border2)}
-.ascroll.off{display:none}
-/* مقبض شريط التمرير المصغر: رمادي محايد — الأزرق لا يعجب المستخدم */
-#assetThumb{position:absolute;top:1.5px;height:7px;border-radius:4px;background:var(--sbar);min-width:24px;transition:background .15s}
-#assetScroll:hover #assetThumb{background:var(--sbar-h)}
 .achip{display:inline-flex;height:26px;flex-shrink:0;align-items:center;gap:6px;border-radius:7px;border:1px solid var(--border2);background:var(--panel3);padding:0 4px 0 7px;cursor:pointer;transition:.15s}
 .achip:hover{border-color:var(--acc-bd)}
 .achip.on{border-color:var(--acc-bd);background:var(--acc-soft)}
 .achip b{font-size:11px;letter-spacing:.02em;color:var(--t-bright);white-space:nowrap}
 .achip.on b{color:var(--accent-t)}
 .apay{font-style:normal;font-size:10px;font-weight:800;color:var(--ok);white-space:nowrap}
+/* شارة حالة السوق: مفتوح/مغلوق بجانب نسبة الدفع (طلب المستخدم) — أخضر/أحمر حسب الحالة */
+.amstate{font-style:normal;font-size:9px;font-weight:800;line-height:1;padding:3px 6px;border-radius:6px;flex-shrink:0;white-space:nowrap}
+.amstate.open{color:var(--ok);background:rgba(52,211,153,.14)}
+.amstate.closed{color:var(--err);background:rgba(248,113,113,.14)}
+.amdot{display:inline-block;width:6px;height:6px;border-radius:50%;flex-shrink:0}
+.amdot.open{background:var(--ok)}
+.amdot.closed{background:var(--err)}
 .aflag{display:block;width:16px;height:11px;border-radius:2px}
 .aempty{font-size:10.5px;color:var(--t-dim2);white-space:nowrap}
 
@@ -348,7 +348,7 @@ svg{vertical-align:middle;flex-shrink:0}
 .am-search{display:flex;align-items:center;gap:7px;padding:8px 10px;border-bottom:1px solid var(--border);color:var(--t-dim)}
 .am-search input{flex:1;min-width:0;border:0;background:transparent;color:var(--t-bright);font:600 12px/1 inherit;outline:none;font-family:inherit}
 .am-search input::placeholder{color:var(--t-dim2)}
-#amList{flex:1;min-height:0;overflow-y:auto;padding:5px}
+#amList{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;padding:5px}
 .am-row{display:flex;width:100%;align-items:center;gap:8px;border:0;background:transparent;border-radius:8px;padding:6px 8px;cursor:pointer;color:var(--t-bright);text-align:left}
 .am-row:hover{background:var(--btn-bg)}
 .am-row .aflag{width:24px;height:13px;flex-shrink:0}
@@ -389,8 +389,6 @@ svg{vertical-align:middle;flex-shrink:0}
           <div id="assetChips" class="achips"></div>
           <button id="fitBtn" class="ibtn ghost" title="Fit view to all data" aria-label="Fit view"></button>
         </div>
-        <!-- شريط تمرير مصغر متصل — بعرض الشريط كاملاً تحت أسماء العملات -->
-        <div id="assetScroll" class="ascroll" title="Drag to scroll the currencies"><span id="assetThumb"></span></div>
         <div id="assetMenu" hidden>
           <div class="am-search"><span id="amSearchIco"></span><input id="amSearch" type="text" placeholder="Search a currency…" autocomplete="off" spellcheck="false"></div>
           <div id="amList" class="custom-scroll"></div>
@@ -1063,6 +1061,16 @@ let saveTimer = 0;
 
 /* ── Multi-chart state: كل شارت يعمل بنفسه باسم عملته وفريمه ── */
 let panes = [];               // {el, head, cv, chart, dataArr, asset, tf, tick}
+/* حالة الواجهة العامة: شريط الحالة السفلي + العد التنازلي بجانب الشمعة الحية —
+   تُدار من لوحة إعدادات سطح المكتب وتُحفظ في localStorage (طلب المستخدم) */
+window.__BADI_UI__ = (function () {
+  var sb = true, cd = true;
+  try { sb = localStorage.getItem("badiStatusBar") !== "0"; } catch (e) {}
+  try { cd = localStorage.getItem("badiCd") !== "0"; } catch (e) {}
+  return { sb: sb, cd: cd };
+})();
+try { var _badiSb = document.getElementById("statusBar"); if (_badiSb) _badiSb.style.display = window.__BADI_UI__.sb ? "" : "none"; } catch (e) {}
+
 let activePane = 0;           // the selected pane (light border + editor target)
 let primaryPane = 0;          // the pane fed by the desktop engine (asset === CUR_ASSET)
 let CUR_ASSET = "";           // active currency label (embedded: synced from Python)
@@ -1672,7 +1680,7 @@ function addPane() {
     theme: window.__BADI_CHART_THEME__ || { drawing: "#38bdf8", drawingActive: "#7dd3fc" },
     /* العدّ التنازلي الأصلي للمكتبة بجانب الشمعة الحية (طلب المستخدم): رقمان فقط
        بلا إطار أو خلفية، بإزاحة ثابتة (14px) عن حافة الشمعة مهما كان الزوم */
-    countdown: { enabled: true, format: "ss", fontSize: 13, offsetX: 14, offsetY: 0, color: "#22E08A" }
+    countdown: { enabled: !!(window.__BADI_UI__ && window.__BADI_UI__.cd), format: "ss", fontSize: 13, offsetX: 14, offsetY: 0, color: "#22E08A" }
   });
   const p = { el: el, head: el.querySelector(".pane-head"), cv: cv, chart: chart, asset: name, tf: "1m", dataArr: [], tick: 0 };
   setupChart(chart, p);
@@ -2080,13 +2088,16 @@ function renderAssets() {
   box.innerHTML = addedNames().map((n) => {
     const it = BOARD.filter((x) => x.name === n)[0];
     if (!it) return "";
+    const ar = window.__BADI_LANG__ === "ar";
+    const open = (typeof badiMarketOpen === "function") ? badiMarketOpen(it.name) : true;
+    const stT = ar ? (open ? "السوق مفتوح" : "السوق مغلوق") : (open ? "Market open" : "Market closed");
     return '<span class="achip' + (it.name === cur ? " on" : "") + '" data-asset="' + esc(it.name) +
       '" title="' + esc(it.name) + ' — open this chart">'
       + (it.flag ? '<img class="aflag" src="' + it.flag + '" alt="">': "")
       + "<b>" + esc(it.name) + "</b>"
-      + '<i class="apay">' + Number(it.payout || 0) + "%</i></span>";
+      + '<i class="apay">' + Number(it.payout || 0) + "%</i>"
+      + '<i class="amdot ' + (open ? "open" : "closed") + '" title="' + stT + '"></i></span>';
   }).join("") || '<span class="aempty">No currencies — add them from the + menu</span>';
-  assetScrollUpdate();
 }
 window.__badiRenderAssets = renderAssets;   /* the desktop bridge refreshes it on setMarket */
 /** Open a currency's chart: select (or reuse) a pane, then switch the feed to it */
@@ -2112,34 +2123,20 @@ function renderAssetMenu() {
   if (!box) return;
   const q = (($("amSearch") && $("amSearch").value) || "").trim().toLowerCase();
   const rows = BOARD.filter((it) => !q || it.name.toLowerCase().indexOf(q) >= 0);
+  const ar = window.__BADI_LANG__ === "ar";
   box.innerHTML = rows.map((it) => {
     const on = addedNames().indexOf(it.name) >= 0;
+    const open = (typeof badiMarketOpen === "function") ? badiMarketOpen(it.name) : true;
     return '<button class="am-row" data-am="' + esc(it.name) + '" title="' + (on ? "Remove from the bar" : "Add to the bar") + '">'
       + (it.flag ? '<img class="aflag" src="' + it.flag + '" alt="">' : "")
       + "<b>" + esc(it.name) + "</b>"
       + '<i class="apay">' + Number(it.payout || 0) + "%</i>"
+      + '<i class="amstate ' + (open ? "open" : "closed") + '">' + (ar ? (open ? "مفتوح" : "مغلوق") : (open ? "Open" : "Closed")) + "</i>"
       + '<span class="am-tog' + (on ? " on" : "") + '">' + icon(on ? "check" : "plus", 11) + "</span></button>";
   }).join("") || '<p class="aempty" style="padding:8px">No currency matches the search</p>';
 }
 function assetMenuOpen() { $("assetMenu").hidden = false; renderAssetMenu(); try { $("amSearch").focus(); } catch (e) {} }
 function assetMenuClose() { $("assetMenu").hidden = true; }
-/* scroll arrows + mini scrollbar of the currency strip */
-function assetScrollUpdate() {
-  const c = $("assetChips"), t = $("assetThumb"), sc = $("assetScroll");
-  if (!c || !t || !sc) return;
-  const total = c.scrollWidth, vis = c.clientWidth;
-  const need = total > vis + 4;
-  sc.classList.toggle("off", !need);
-  if (!need) return;
-  const tw = Math.max(20, Math.round((vis / total) * sc.clientWidth));
-  const max = sc.clientWidth - tw;
-  const x = total - vis > 0 ? Math.round((c.scrollLeft / (total - vis)) * max) : 0;
-  t.style.width = tw + "px";
-  t.style.left = x + "px";
-  $("assetPrev").disabled = c.scrollLeft <= 1;
-  $("assetNext").disabled = c.scrollLeft >= total - vis - 1;
-}
-
 /* ═════ Sounds — signal chimes + win/loss tones (WebAudio, mute button in the panel) ═════ */
 let actx = null, amaster = null, soundOn = true;
 try { soundOn = localStorage.getItem("badiSound") !== "0"; } catch (e) {}
@@ -2399,27 +2396,10 @@ function bindEvents() {
   $("assetNext").addEventListener("click", function () {
     $("assetChips").scrollBy({ left: 220, behavior: "smooth" });
   });
-  $("assetChips").addEventListener("scroll", assetScrollUpdate, { passive: true });
-  window.addEventListener("resize", assetScrollUpdate);
-  (function () {
-    const sc = $("assetScroll");
-    if (!sc) return;
-    let drag = false;
-    const setFromEvent = function (e) {
-      const c = $("assetChips");
-      if (!c) return;
-      const total = c.scrollWidth, vis = c.clientWidth;
-      if (total <= vis) return;
-      const r = sc.getBoundingClientRect();
-      const ratio = Math.max(0, Math.min(1, (e.clientX - r.left) / Math.max(1, r.width)));
-      c.scrollLeft = Math.round(ratio * (total - vis));
-      assetScrollUpdate();
-    };
-    sc.addEventListener("pointerdown", function (e) { drag = true; try { sc.setPointerCapture(e.pointerId); } catch (err) {} setFromEvent(e); });
-    sc.addEventListener("pointermove", function (e) { if (drag) setFromEvent(e); });
-    sc.addEventListener("pointerup", function () { drag = false; });
-    sc.addEventListener("pointercancel", function () { drag = false; });
-  })();
+  /* عجلة الفأرة تمرر شريط العملات أفقيًا — بديل شريط التمرير المصغر المُزال (طلب المستخدم) */
+  $("assetChips").addEventListener("wheel", function (ev) {
+    if (Math.abs(ev.deltaY) > Math.abs(ev.deltaX)) { this.scrollLeft += ev.deltaY; ev.preventDefault(); }
+  }, { passive: false });
   /* multi-chart: click a pane selects it (light border) — signals cards open their chart */
   $("gridHost").addEventListener("click", function (e) {
     const pn = e.target.closest(".pane");
@@ -3137,7 +3117,7 @@ import random
 import threading
 import urllib.request
 import urllib.parse
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from math import ceil
 
 from PySide6.QtCore import QObject, Property, Signal, Slot, QTimer, QUrl, QFileSystemWatcher, QMimeData
@@ -3198,6 +3178,9 @@ T = {
         "demo": "Demo", "acct": "Account",
         "tgbot": "Telegram bot", "backchart": "Back to chart",
         "currs": "Currencies", "currsHint": "Tap a currency to add or remove it — the bar below the chart shows added currencies only",
+        "mktOpen": "Open", "mktClosed": "Closed",
+        "otherSett": "Other settings", "darkMode": "Dark mode", "langLbl": "Language", "sndLbl": "Signal sounds",
+        "sbLbl": "Status bar", "cdLbl": "Candle countdown",
         "badiSect": "Encrypted indicators (BADI)", "keyFp": "Key fingerprint:",
         "badiEnc": "Encrypt the indicator — export a .badi file", "badiImp": "Import an encrypted indicator (.badi)",
         "badiSaved": "Encrypted indicator saved", "badiEmpty": "There is no code to encrypt",
@@ -3217,7 +3200,7 @@ T = {
         "rescan": "Rescan",
         "badge": "Charting Engine", "h1": "Read the market,", "h2": "trade with confidence.",
         "lead": "Code your own indicators, get signals with chart snapshots, and trade smarter — all in one studio.",
-        "cardSub": "Sign in to continue to your studio", "remember": "Remember me",
+        "cardSub": "Enter your Quotex platform account credentials — not a Badi Studio account", "remember": "Remember me",
         "errEmpty": "Please enter your username and password.", "signing": "Signing in…", "signinok": "Signed in successfully",
         "tgsave1": "Saved bot token", "tgonly": "One bot only — saving a new token replaces the previous one.",
         "tgdel": "Delete the saved token", "tgcleared": "Saved token deleted",
@@ -3266,6 +3249,9 @@ T = {
         "demo": "تجريبي", "acct": "الحساب",
         "tgbot": "بوت تلجرام", "backchart": "عودة إلى الشارت",
         "currs": "العملات", "currsHint": "اضغط على العملة لإضافتها أو إزالتها — الشريط تحت الشارت يعرض العملات المضافة فقط",
+        "mktOpen": "مفتوح", "mktClosed": "مغلوق",
+        "otherSett": "إعدادات أخرى", "darkMode": "الوضع الليلي", "langLbl": "اللغة", "sndLbl": "أصوات الإشارات",
+        "sbLbl": "شريط الحالة", "cdLbl": "العد التنازلي على الشارت",
         "badiSect": "المؤشرات المشفرة (BADI)", "keyFp": "بصمة المفتاح:",
         "badiEnc": "تشفير المؤشر وتصديره إلى ملف .badi", "badiImp": "استيراد مؤشر مشفر (.badi)",
         "badiSaved": "تم حفظ المؤشر المشفر", "badiEmpty": "لا يوجد كود لتشفيره",
@@ -3285,7 +3271,7 @@ T = {
         "rescan": "إعادة فحص",
         "badge": "محرك الشارتات", "h1": "اقرأ السوق بذكاء،", "h2": "وتداول بثقة.",
         "lead": "برمج مؤشراتك، واستلم إشارات مع لقطات الشارت، وتداول بذكاء — كل ذلك في استوديو واحد.",
-        "cardSub": "سجّل دخولك لمتابعة العمل في الاستوديو", "remember": "تذكّرني",
+        "cardSub": "أدخل بيانات حساب منصة كوتكس (Quotex) — وليس حساب بادي استوديو", "remember": "تذكّرني",
         "errEmpty": "يرجى إدخال اسم المستخدم وكلمة المرور.", "signing": "جارٍ الدخول…", "signinok": "تم الدخول بنجاح",
         "tgsave1": "توكن البوت المحفوظ", "tgonly": "بوت واحد فقط — عند حفظ توكن جديد يستبدل التوكن السابق.",
         "tgdel": "حذف التوكن المحفوظ", "tgcleared": "تم حذف التوكن المحفوظ",
@@ -4849,6 +4835,20 @@ class Backend(QObject):
     def board(self):
         """كل العملات المتاحة (اسم + نسبة الدفع + علم الزوج مدموجاً) للوحة الإعدادات."""
         return BOARD
+
+    @Slot(str, result=bool)
+    def marketOpen(self, name):
+        """حالة السوق لبطاقات العملات (طلب المستخدم): OTC والرقمية مفتوحة دائمًا —
+        الفوركس مفتوح من الأحد 22:00 إلى الجمعة 22:00 بتوقيت UTC — نفس قاعدة الويب."""
+        n = str(name or "")
+        if "OTC" in n:
+            return True
+        if "BTC" in n or "ETH" in n:
+            return True
+        now = datetime.now(timezone.utc)
+        js_day = (now.weekday() + 1) % 7        # الأحد=0 … السبت=6 (مطابق لـ getUTCDay في الويب)
+        hour = now.hour + now.minute / 60.0
+        return not (js_day == 6 or (js_day == 5 and hour >= 22) or (js_day == 0 and hour < 22))
 
     @Property(list, notify=addedChanged)
     def added(self):
@@ -6754,6 +6754,38 @@ function defineBadiApp() {
         renderAssets();
       } catch (e) {}
     },
+    setSound: function (on) {
+      /* حالة أصوات الإشارات تُدار من لوحة إعدادات سطح المكتب أيضًا (طلب المستخدم) */
+      try {
+        soundOn = !!on;
+        try { localStorage.setItem("badiSound", soundOn ? "1" : "0"); } catch (e) {}
+        renderSigSound();
+      } catch (e) {}
+    },
+    getSound: function () { return !!soundOn; },
+    setStatusBar: function (on) {
+      /* إظهار/إخفاء شريط الحالة السفلي من لوحة الإعدادات (طلب المستخدم) */
+      try {
+        window.__BADI_UI__.sb = !!on;
+        try { localStorage.setItem("badiStatusBar", window.__BADI_UI__.sb ? "1" : "0"); } catch (e) {}
+        var b = document.getElementById("statusBar");
+        if (b) b.style.display = window.__BADI_UI__.sb ? "" : "none";
+      } catch (e) {}
+    },
+    getStatusBar: function () { return !!(window.__BADI_UI__ && window.__BADI_UI__.sb); },
+    setCd: function (on) {
+      /* إظهار/إخفاء العد التنازلي بجانب الشمعة الحية من لوحة الإعدادات (طلب المستخدم) */
+      try {
+        window.__BADI_UI__.cd = !!on;
+        try { localStorage.setItem("badiCd", window.__BADI_UI__.cd ? "1" : "0"); } catch (e) {}
+        (typeof panes !== "undefined" && panes.forEach ? panes : []).forEach(function (p) {
+          if (p && p.chart && typeof p.chart.setCountdown === "function") {
+            try { p.chart.setCountdown({ enabled: window.__BADI_UI__.cd }); } catch (e) {}
+          }
+        });
+      } catch (e) {}
+    },
+    getCd: function () { return !!(window.__BADI_UI__ && window.__BADI_UI__.cd); },
     setCandles: function (arr) {
       try {
         var pr = window.__badiPrimary ? window.__badiPrimary() : null;
@@ -7375,6 +7407,9 @@ ApplicationWindow {
     property string filter: "all"
     // جسر صفحة الويب المدمجة (BADI chart + Monaco)
     property bool webReady: false
+    property bool webSound: true          // حالة أصوات الإشارات (مرآة صفحة الويب)
+    property bool webSB: true             // شريط الحالة السفلي (مرآة صفحة الويب)
+    property bool webCd: true             // العد التنازلي على الشارت (مرآة صفحة الويب)
     property bool webThemeDark: backend.dark
     property string lastAsset: ""
     property string lastTf: ""
@@ -7743,13 +7778,37 @@ ApplicationWindow {
         padding: 0
         modal: true
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        /* عند الفتح: قراءة حالة أصوات الإشارات الحقيقية من صفحة الويب */
+        onOpened: {
+            win.webCall("__badiApp.getSound()", function (r) {
+                if (r !== undefined && r !== null) win.webSound = !!r
+            })
+            win.webCall("__badiApp.getStatusBar()", function (r) {
+                if (r !== undefined && r !== null) win.webSB = !!r
+            })
+            win.webCall("__badiApp.getCd()", function (r) {
+                if (r !== undefined && r !== null) win.webCd = !!r
+            })
+        }
         background: Rectangle {
             radius: 16; color: backend.c.card
             border.width: 1; border.color: backend.c.border
         }
-        ColumnLayout {
-            id: settingsCol
-            anchors.fill: parent; anchors.margins: 16; spacing: 8
+        /* كل محتوى الإعدادات في تمرير واحد بشريط SlimBar رقيق بروح شريط المحرر —
+           كانت قائمة العملات تُسحق إلى ارتفاع صفر بسبب الأقسام الثابتة تحتها
+           (طلب المستخدم: شريط رقيق مثل تبع المحرر أو انزعه) */
+        Flickable {
+            id: settScroll
+            anchors.fill: parent; clip: true
+            contentWidth: width
+            contentHeight: settingsCol.implicitHeight + 24
+            boundsBehavior: Flickable.StopAtBounds
+            ScrollBar.vertical: SlimBar { }
+            ColumnLayout {
+                id: settingsCol
+                x: 16; y: 12
+                width: settScroll.width - 32
+                spacing: 8
             RowLayout {
                 spacing: 9
                 Rectangle {
@@ -7759,27 +7818,24 @@ ApplicationWindow {
                 }
                 Label { text: backend.s.sett; font.pixelSize: 16; font.bold: true; color: backend.c.fg }
                 Item { Layout.fillWidth: true }
+                /* زر إغلاق لوحة الإعدادات بأيقونة X (طلب المستخدم) */
+                IBtn { iconName: "x"; onClicked: settingsPop.close() }
             }
             Label { text: backend.s.currs; font.pixelSize: 13; font.bold: true; color: backend.c.fg }
             Label {
                 text: backend.s.currsHint; font.pixelSize: 10; color: backend.c.sub
                 wrapMode: Text.WordWrap; Layout.fillWidth: true
             }
-            Flickable {
-                Layout.fillWidth: true; Layout.fillHeight: true
-                contentWidth: width
-                contentHeight: curCol.implicitHeight
-                clip: true
-                ScrollBar.vertical: ScrollBar { }
-                Column {
-                    id: curCol
-                    width: parent.width - 6
-                    spacing: 6
+            Column {
+                id: curCol
+                Layout.fillWidth: true
+                spacing: 6
                     Repeater {
                         model: backend.board
                         delegate: Rectangle {
                             id: curRow
                             property bool isAdded: backend.added.indexOf(modelData.name) >= 0
+                            property bool mOpen: backend.marketOpen(modelData.name)
                             width: curCol.width
                             height: 44; radius: 10
                             color: rm.containsMouse ? backend.c.hover : backend.c.bg
@@ -7800,6 +7856,18 @@ ApplicationWindow {
                                     text: modelData.payout + "%"; font.pixelSize: 11; font.bold: true
                                     color: backend.c.good
                                 }
+                                /* شارة حالة السوق بجانب نسبة الدفع — مفتوح أخضر / مغلوق أحمر (طلب المستخدم) */
+                                Rectangle {
+                                    width: mst.implicitWidth + 14; height: 20; radius: 7
+                                    color: curRow.mOpen ? Qt.rgba(0.13, 0.88, 0.54, 0.13)
+                                                        : Qt.rgba(0.97, 0.30, 0.37, 0.13)
+                                    Label {
+                                        id: mst; anchors.centerIn: parent
+                                        text: curRow.mOpen ? backend.s.mktOpen : backend.s.mktClosed
+                                        font.pixelSize: 9; font.bold: true
+                                        color: curRow.mOpen ? backend.c.good : backend.c.bad
+                                    }
+                                }
                                 Rectangle {
                                     width: 26; height: 26; radius: 8
                                     color: curRow.isAdded ? backend.c.accent : "transparent"
@@ -7818,6 +7886,61 @@ ApplicationWindow {
                                 onClicked: backend.toggleAdded(modelData.name)
                             }
                         }
+                    }
+                }
+            /* ───── إعدادات أخرى: الوضع الليلي + اللغة + أصوات الإشارات (طلب المستخدم) ───── */
+            Rectangle { Layout.fillWidth: true; height: 1; color: backend.c.border }
+            RowLayout {
+                spacing: 8
+                Icon { name: "sett"; sz: 14; tint: backend.c.accent }
+                Label { text: backend.s.otherSett; font.pixelSize: 13; font.bold: true; color: backend.c.fg }
+                Item { Layout.fillWidth: true }
+            }
+            RowLayout {
+                Layout.fillWidth: true; spacing: 8
+                Icon { name: backend.dark ? "sun" : "moon"; sz: 14; tint: backend.c.sub }
+                Label { text: backend.s.darkMode; font.pixelSize: 11; color: backend.c.fg; Layout.fillWidth: true }
+                MiniSwitch { on: backend.dark; onToggled: backend.dark = !backend.dark }
+            }
+            RowLayout {
+                Layout.fillWidth: true; spacing: 8
+                Icon { name: "globe"; sz: 14; tint: backend.c.sub }
+                Label { text: backend.s.langLbl; font.pixelSize: 11; color: backend.c.fg; Layout.fillWidth: true }
+                LangBox { }
+            }
+            RowLayout {
+                Layout.fillWidth: true; spacing: 8
+                Icon { name: "bell"; sz: 14; tint: backend.c.sub }
+                Label { text: backend.s.sndLbl; font.pixelSize: 11; color: backend.c.fg; Layout.fillWidth: true }
+                MiniSwitch {
+                    on: win.webSound
+                    onToggled: {
+                        win.webSound = !win.webSound
+                        win.webCall("__badiApp.setSound(" + win.webSound + ")")
+                    }
+                }
+            }
+            RowLayout {
+                Layout.fillWidth: true; spacing: 8
+                Icon { name: "eye"; sz: 14; tint: backend.c.sub }
+                Label { text: backend.s.sbLbl; font.pixelSize: 11; color: backend.c.fg; Layout.fillWidth: true }
+                MiniSwitch {
+                    on: win.webSB
+                    onToggled: {
+                        win.webSB = !win.webSB
+                        win.webCall("__badiApp.setStatusBar(" + win.webSB + ")")
+                    }
+                }
+            }
+            RowLayout {
+                Layout.fillWidth: true; spacing: 8
+                Icon { name: "clock"; sz: 14; tint: backend.c.sub }
+                Label { text: backend.s.cdLbl; font.pixelSize: 11; color: backend.c.fg; Layout.fillWidth: true }
+                MiniSwitch {
+                    on: win.webCd
+                    onToggled: {
+                        win.webCd = !win.webCd
+                        win.webCall("__badiApp.setCd(" + win.webCd + ")")
                     }
                 }
             }
@@ -7890,7 +8013,7 @@ ApplicationWindow {
                 Layout.fillWidth: true; spacing: 3
                 Label { text: backend.s.badiFolder + ":"; font.pixelSize: 11; color: backend.c.sub }
                 Label {
-                    text: backend.badiDirPath; font.pixelSize: 10; font.family: "monospace"
+                    text: backend.badiDirPath(); font.pixelSize: 10; font.family: "monospace"
                     color: backend.c.accent; Layout.fillWidth: true
                     wrapMode: Text.WrapAnywhere
                 }
@@ -7911,6 +8034,7 @@ ApplicationWindow {
             Label {
                 text: backend.s.badiHint; font.pixelSize: 10; color: backend.c.sub
                 wrapMode: Text.WordWrap; Layout.fillWidth: true
+            }
             }
         }
     }
@@ -8204,7 +8328,7 @@ ApplicationWindow {
 
                     // الشعار
                     Row {
-                        Layout.alignment: hero.al
+                        Layout.alignment: loginPage.al
                         spacing: 10
                         layoutDirection: backend.rtl ? Qt.RightToLeft : Qt.LeftToRight
                         opacity: loginPage.ease(0)
@@ -8223,7 +8347,7 @@ ApplicationWindow {
 
                     // شارة صغيرة نابضة
                     Rectangle {
-                        Layout.alignment: hero.al
+                        Layout.alignment: loginPage.al
                         implicitWidth: pillRow.implicitWidth + 28; implicitHeight: 30; radius: 15
                         color: backend.c.card
                         border.width: 1; border.color: backend.c.border
@@ -8253,7 +8377,7 @@ ApplicationWindow {
                         text: backend.s.h1 + "<br><font color='" + backend.c.accent + "'>" + backend.s.h2 + "</font>"
                         textFormat: Text.RichText
                         wrapMode: Text.WordWrap
-                        horizontalAlignment: hero.ha
+                        horizontalAlignment: loginPage.ha
                         font.pixelSize: 36; font.bold: true; lineHeight: 1.12
                         color: backend.c.fg
                         opacity: loginPage.ease(1)
@@ -8263,10 +8387,10 @@ ApplicationWindow {
                     // السطر التعريفي
                     Label {
                         Layout.fillWidth: true; Layout.maximumWidth: 520
-                        Layout.alignment: hero.al
+                        Layout.alignment: loginPage.al
                         text: backend.s.lead
                         wrapMode: Text.WordWrap
-                        horizontalAlignment: hero.ha
+                        horizontalAlignment: loginPage.ha
                         font.pixelSize: 15; lineHeight: 1.25
                         color: backend.c.sub
                         opacity: loginPage.ease(1.5)
@@ -8308,7 +8432,7 @@ ApplicationWindow {
                                         Layout.fillWidth: true
                                         text: backend.s[modelData.k]
                                         wrapMode: Text.WordWrap; maximumLineCount: 3; elide: Text.ElideRight
-                                        horizontalAlignment: hero.ha
+                                        horizontalAlignment: loginPage.ha
                                         font.pixelSize: 12; color: backend.c.fg
                                     }
                                 }
@@ -8366,7 +8490,7 @@ ApplicationWindow {
                         anchors.fill: parent; anchors.margins: 32; spacing: 12
 
                         Rectangle {
-                            Layout.alignment: hero.al
+                            Layout.alignment: loginPage.al
                             implicitWidth: 46; implicitHeight: 46; radius: 14
                             gradient: Gradient {
                                 orientation: Gradient.Horizontal
@@ -8378,14 +8502,14 @@ ApplicationWindow {
                         Label {
                             Layout.fillWidth: true; Layout.topMargin: 4
                             text: backend.s.welcome
-                            horizontalAlignment: hero.ha
+                            horizontalAlignment: loginPage.ha
                             font.pixelSize: 25; font.bold: true; color: backend.c.fg
                         }
                         Label {
                             Layout.fillWidth: true
                             text: backend.s.cardSub
                             wrapMode: Text.WordWrap
-                            horizontalAlignment: hero.ha
+                            horizontalAlignment: loginPage.ha
                             font.pixelSize: 12; color: backend.c.sub
                         }
                         Item { Layout.preferredHeight: 6 }
@@ -8409,7 +8533,7 @@ ApplicationWindow {
 
                         // تذكّرني
                         Item {
-                            Layout.alignment: hero.al
+                            Layout.alignment: loginPage.al
                             implicitWidth: remRow.implicitWidth; implicitHeight: 26
                             Row {
                                 id: remRow; spacing: 9; anchors.verticalCenter: parent.verticalCenter
@@ -8437,7 +8561,7 @@ ApplicationWindow {
                             text: loginPage.ok ? backend.s.signinok : loginPage.err
                             opacity: (loginPage.ok || loginPage.err !== "") ? 1 : 0
                             Behavior on opacity { NumberAnimation { duration: 150 } }
-                            horizontalAlignment: hero.ha
+                            horizontalAlignment: loginPage.ha
                             font.pixelSize: 12
                             color: loginPage.ok ? backend.c.good : backend.c.bad
                         }
@@ -8539,7 +8663,7 @@ QML += r'''
                             contentWidth: width
                             contentHeight: indCol.implicitHeight + 20
                             clip: true
-                            ScrollBar.vertical: ScrollBar { }
+                            ScrollBar.vertical: SlimBar { }
                             ColumnLayout {
                                 id: indCol
                                 width: parent.width - 10
@@ -8855,7 +8979,7 @@ QML += r'''
                                         Layout.fillWidth: true; Layout.fillHeight: true
                                         clip: true; spacing: 6
                                         model: win.histRows()
-                                        ScrollBar.vertical: ScrollBar { }
+                                        ScrollBar.vertical: SlimBar { }
                                         delegate: Rectangle {
                                             width: histList.width - 8; height: 46; radius: 12
                                             color: backend.c.bg; border.width: 1; border.color: backend.c.border
@@ -8905,6 +9029,41 @@ QML += r'''
 '''
 QML += r'''
     // ════════════════ المكونات ════════════════
+    /* شريط تمرير رقيق وناعم لقوائم واجهة سطح المكتب — بروح شريط المحرر الرقيق
+       في صفحة الويب (طلب المستخدم: شريط العملات كان خشنًا فصار رقيقًا هكذا) */
+    component SlimBar: ScrollBar {
+        id: slim
+        implicitWidth: 10
+        hoverEnabled: true
+        padding: 2
+        background: Item { }
+        contentItem: Rectangle {
+            implicitWidth: 6
+            radius: 3
+            /* رمادي واضح مثل مقبض شريط المحرر في الويب، ويتوهج بلون التمييز عند السحب */
+            color: slim.pressed ? backend.c.accent : backend.c.sub
+            opacity: (slim.active || slim.hovered) ? 1.0 : 0.5
+            Behavior on opacity { NumberAnimation { duration: 180 } }
+            Behavior on color { ColorAnimation { duration: 140 } }
+        }
+    }
+
+    /* مفتاح صغير لأقسام الإعدادات — بلون التمييز عند التشغيل ورمادي عند الإيقاف */
+    component MiniSwitch: Rectangle {
+        id: ms
+        property bool on: false
+        signal toggled()
+        implicitWidth: 40; implicitHeight: 22; radius: 11
+        color: ms.on ? backend.c.accent : backend.c.border
+        Rectangle {
+            width: 16; height: 16; radius: 8; color: "#FFFFFF"
+            x: ms.on ? ms.width - width - 3 : 3
+            anchors.verticalCenter: parent.verticalCenter
+            Behavior on x { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
+        }
+        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: ms.toggled() }
+    }
+
     component Icon: Image {
         property string name: ""
         property string tint: "#FFFFFF"
