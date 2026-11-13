@@ -1,0 +1,146 @@
+[19:30:07] [v14-endpoint] circuit selftest -> OPEN
+[19:30:07] [v14-endpoint] circuit selftest -> HALF_OPEN
+[19:30:07] [v14-endpoint] circuit selftest -> CLOSED
+[19:30:07] [v14-supervisor] loop 'selftest_dying' crashed (run 1, attempt 1): RuntimeError: simulated crash for selftest — restarting
+[19:30:08] [v14-supervisor] loop 'selftest_dying' crashed (run 2, attempt 2): RuntimeError: simulated crash for selftest — restarting
+[19:30:27] FATAL in main thread (top level): 
+Traceback (most recent call last):
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/tasks.py", line 520, in wait_for
+    return await fut
+           ^^^^^^^^^
+  File "/home/z/my-project/download/qx_server_v14.py", line 8009, in supervise
+    await _v14_asyncio.sleep(1.0)
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/tasks.py", line 665, in sleep
+    return await future
+           ^^^^^^^^^^^^
+asyncio.exceptions.CancelledError
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/z/my-project/scripts/smoke_v14.py", line 141, in <module>
+    sys.exit(asyncio.run(main()))
+             ^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/z/my-project/scripts/smoke_v14.py", line 27, in main
+    res = await qx.V14_API["selftest"]()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/my-project/download/qx_server_v14.py", line 9329, in v14_selftest
+    return await V14SelfTest().run_all()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/my-project/download/qx_server_v14.py", line 9308, in run_all
+    await self._test_supervisor_restart()
+  File "/home/z/my-project/download/qx_server_v14.py", line 9276, in _test_supervisor_restart
+    await _v14_asyncio.wait_for(
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/tasks.py", line 519, in wait_for
+    async with timeouts.timeout(timeout):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/timeouts.py", line 115, in __aexit__
+    raise TimeoutError from exc_val
+TimeoutError
+
+[19:30:35] [v14-endpoint] circuit selftest -> OPEN
+[19:30:35] [v14-endpoint] circuit selftest -> HALF_OPEN
+[19:30:35] [v14-endpoint] circuit selftest -> CLOSED
+[19:30:35] [v14-supervisor] loop 'selftest_dying' crashed (run 1, attempt 1): RuntimeError: simulated crash for selftest — restarting
+[19:30:36] [v14-supervisor] loop 'selftest_dying' crashed (run 2, attempt 2): RuntimeError: simulated crash for selftest — restarting
+[19:30:55] FATAL in main thread (top level): 
+Traceback (most recent call last):
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/tasks.py", line 520, in wait_for
+    return await fut
+           ^^^^^^^^^
+  File "/home/z/my-project/download/qx_server_v14.py", line 8009, in supervise
+    await _v14_asyncio.sleep(1.0)
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/tasks.py", line 665, in sleep
+    return await future
+           ^^^^^^^^^^^^
+asyncio.exceptions.CancelledError
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/z/my-project/scripts/smoke_v14.py", line 141, in <module>
+    sys.exit(asyncio.run(main()))
+             ^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/z/my-project/scripts/smoke_v14.py", line 27, in main
+    res = await qx.V14_API["selftest"]()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/my-project/download/qx_server_v14.py", line 9329, in v14_selftest
+    return await V14SelfTest().run_all()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/my-project/download/qx_server_v14.py", line 9308, in run_all
+    await self._test_supervisor_restart()
+  File "/home/z/my-project/download/qx_server_v14.py", line 9276, in _test_supervisor_restart
+    await _v14_asyncio.wait_for(
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/tasks.py", line 519, in wait_for
+    async with timeouts.timeout(timeout):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/timeouts.py", line 115, in __aexit__
+    raise TimeoutError from exc_val
+TimeoutError
+
+[19:31:42] [v14-endpoint] circuit selftest -> OPEN
+[19:31:42] [v14-endpoint] circuit selftest -> HALF_OPEN
+[19:31:42] [v14-endpoint] circuit selftest -> CLOSED
+[19:31:42] [v14-supervisor] loop 'selftest_dying' crashed (run 1, attempt 1): RuntimeError: simulated crash for selftest — restarting
+[19:31:43] [v14-supervisor] loop 'selftest_dying' crashed (run 2, attempt 2): RuntimeError: simulated crash for selftest — restarting
+[19:31:45] FATAL in main thread (top level): attribute name must be string, not 'bool'
+Traceback (most recent call last):
+  File "/home/z/my-project/scripts/smoke_v14.py", line 141, in <module>
+    sys.exit(asyncio.run(main()))
+             ^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/z/my-project/scripts/smoke_v14.py", line 59, in main
+    qx.install_v14_hooks()
+  File "/home/z/my-project/download/qx_server_v14.py", line 8866, in install_v14_hooks
+    _v14_wrap_cache_tick()
+  File "/home/z/my-project/download/qx_server_v14.py", line 8760, in _v14_wrap_cache_tick
+    if getattr(globals().get("_V14_CACHE_TICK_WRAPPED"), False):
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: attribute name must be string, not 'bool'
+
+[19:33:45] [v14-endpoint] circuit selftest -> OPEN
+[19:33:45] [v14-endpoint] circuit selftest -> HALF_OPEN
+[19:33:45] [v14-endpoint] circuit selftest -> CLOSED
+[19:33:50] [v14-supervisor] loop 'selftest_dying' crashed (run 1, attempt 1): RuntimeError: simulated crash for selftest — restarting
+[19:33:51] [v14-supervisor] loop 'selftest_dying' crashed (run 2, attempt 2): RuntimeError: simulated crash for selftest — restarting
+[19:34:06] [v14-endpoint] circuit selftest -> OPEN
+[19:34:06] [v14-endpoint] circuit selftest -> HALF_OPEN
+[19:34:06] [v14-endpoint] circuit selftest -> CLOSED
+[19:34:11] [v14-supervisor] loop 'selftest_dying' crashed (run 1, attempt 1): RuntimeError: simulated crash for selftest — restarting
+[19:34:12] [v14-supervisor] loop 'selftest_dying' crashed (run 2, attempt 2): RuntimeError: simulated crash for selftest — restarting
+[19:35:41] [v14-endpoint] circuit selftest -> OPEN
+[19:35:41] [v14-endpoint] circuit selftest -> HALF_OPEN
+[19:35:41] [v14-endpoint] circuit selftest -> CLOSED
+[19:35:44] [v14-supervisor] loop 'selftest_dying' crashed (run 1, attempt 1): RuntimeError: simulated crash for selftest — restarting
+[19:35:45] [v14-supervisor] loop 'selftest_dying' crashed (run 2, attempt 2): RuntimeError: simulated crash for selftest — restarting
+[19:35:56] [v14-endpoint] circuit selftest -> OPEN
+[19:35:56] [v14-endpoint] circuit selftest -> HALF_OPEN
+[19:35:56] [v14-endpoint] circuit selftest -> CLOSED
+[19:36:00] [v14-supervisor] loop 'selftest_dying' crashed (run 1, attempt 1): RuntimeError: simulated crash for selftest — restarting
+[19:36:01] [v14-supervisor] loop 'selftest_dying' crashed (run 2, attempt 2): RuntimeError: simulated crash for selftest — restarting

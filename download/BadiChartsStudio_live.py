@@ -3282,7 +3282,11 @@ _QX_MOD = None
 
 
 def _qx_module():
-    """تحميل محرك الخادم من بجانب التطبيق (يُحمَّل مرة واحدة)."""
+    """تحميل محرك الخادم من بجانب التطبيق (يُحمَّل مرة واحدة).
+
+    v14: يحمّل qx_server_v14 (الخادم المقوّى: تفرز الطلبات + سد الثغرات على
+    كل عملة مفتوحة + التكس لا ينام + دون انهيار الخوادم) — ولو لم يوجد
+    يرجع لـ qx_server_v13 كما كان تماماً (لا شيء محذوف من التطبيق)."""
     global _QX_MOD
     if _QX_MOD is not None:
         return _QX_MOD or None
@@ -3290,14 +3294,19 @@ def _qx_module():
         _app_dir = os.path.dirname(os.path.abspath(__file__))
         if _app_dir not in sys.path:
             sys.path.insert(0, _app_dir)
-        _QX_MOD = importlib.import_module("qx_server_v13")
+        try:
+            # v14 أولاً: الخادم المقوّى (نفس الدخول ونفس جلب الشموع حرفياً)
+            _QX_MOD = importlib.import_module("qx_server_v14")
+        except Exception:
+            # تراجع آمن للنسخة السابقة — نفس المسار القديم حرفياً
+            _QX_MOD = importlib.import_module("qx_server_v13")
         try:
             _QX_MOD.DEBUG_LOGS = False
         except Exception:
             pass
     except Exception as _e:
         try:
-            print("[QX] qx_server_v13.py load failed: " + str(_e))
+            print("[QX] qx_server_v14/v13 load failed: " + str(_e))
         except Exception:
             pass
         _QX_MOD = False
@@ -3387,7 +3396,7 @@ T = {
         "lead": "Code your own indicators, get signals with chart snapshots, and trade smarter — all in one studio.",
         "cardSub": "Enter your Quotex platform account credentials — not a Badi Studio account", "remember": "Remember me",
         "errEmpty": "Please enter your username and password.", "signing": "Signing in…", "signinok": "Signed in successfully",
-        "qxResolving": "Detecting your country & server domain…", "qxConnecting": "Connecting to the Quotex server", "qxAuth": "Signing in to your Quotex account…", "qxLoad": "Connected — loading BRLUSD_otc (300 candles)…", "qxFail": "Could not connect to Quotex — check your email/password", "qxEngine": "QX engine not found — keep qx_server_v13.py beside the app",
+        "qxResolving": "Detecting your country & server domain…", "qxConnecting": "Connecting to the Quotex server", "qxAuth": "Signing in to your Quotex account…", "qxLoad": "Connected — loading BRLUSD_otc (300 candles)…", "qxFail": "Could not connect to Quotex — check your email/password", "qxEngine": "QX engine not found — keep qx_server_v14.py beside the app",
         "tgsave1": "Saved bot token", "tgonly": "One bot only — saving a new token replaces the previous one.",
         "tgdel": "Delete the saved token", "tgcleared": "Saved token deleted",
     },
@@ -3466,7 +3475,7 @@ T = {
         "lead": "برمج مؤشراتك، واستلم إشارات مع لقطات الشارت، وتداول بذكاء — كل ذلك في استوديو واحد.",
         "cardSub": "أدخل بيانات حساب منصة كوتكس (Quotex) — وليس حساب بادي استوديو", "remember": "تذكّرني",
         "errEmpty": "يرجى إدخال اسم المستخدم وكلمة المرور.", "signing": "جارٍ الدخول…", "signinok": "تم الدخول بنجاح",
-        "qxResolving": "جارٍ التعرف على بلدك واختيار نطاق الخادم…", "qxConnecting": "جارٍ الاتصال بخادم كوتكس", "qxAuth": "جارٍ تسجيل الدخول إلى حساب كوتكس…", "qxLoad": "تم الاتصال — جارٍ تحميل BRLUSD_otc (300 شمعة)…", "qxFail": "تعذر الاتصال بكوتكس — تحقق من البريد وكلمة المرور", "qxEngine": "محرك الخادم غير موجود — أبقِ qx_server_v13.py بجانب التطبيق",
+        "qxResolving": "جارٍ التعرف على بلدك واختيار نطاق الخادم…", "qxConnecting": "جارٍ الاتصال بخادم كوتكس", "qxAuth": "جارٍ تسجيل الدخول إلى حساب كوتكس…", "qxLoad": "تم الاتصال — جارٍ تحميل BRLUSD_otc (300 شمعة)…", "qxFail": "تعذر الاتصال بكوتكس — تحقق من البريد وكلمة المرور", "qxEngine": "محرك الخادم غير موجود — أبقِ qx_server_v14.py بجانب التطبيق",
         "tgsave1": "توكن البوت المحفوظ", "tgonly": "بوت واحد فقط — عند حفظ توكن جديد يستبدل التوكن السابق.",
         "tgdel": "حذف التوكن المحفوظ", "tgcleared": "تم حذف التوكن المحفوظ",
     },
@@ -6902,6 +6911,23 @@ class Backend(QObject):
             asyncio.run_coroutine_threadsafe(qx.tick_cache_collector(), loop)
             asyncio.run_coroutine_threadsafe(qx.tick_retention_loop(), loop)
             asyncio.run_coroutine_threadsafe(qx.candlestore_trim_loop(), loop)
+            # v14.0: طبقة تقوية الخادم — كل الحلقات الجديدة تحت المشرف
+            # (دون انهيار الخوادم). الحلقات الأصلية أعلاه كما هي حرفياً،
+            # وv14 يضيف فوقها فقط: بوابة تفرز الطلبات + سد الثغرات على كل
+            # عملة مفتوحة + التكس لا ينام + تقوي النقاط + النبضة.
+            if hasattr(qx, "v14_build_background_loops"):
+                try:
+                    for _v14_name, _v14_factory in qx.v14_build_background_loops():
+                        asyncio.run_coroutine_threadsafe(
+                            qx.v14_supervise(_v14_name, _v14_factory), loop)
+                    if hasattr(qx, "v14_print_banner"):
+                        qx.v14_print_banner()
+                except Exception as _v14e:
+                    try:
+                        print("[QX] v14 strengthening layer issue "
+                              "(server continues unchanged): " + str(_v14e))
+                    except Exception:
+                        pass
             self._qx_logged = True
             self._qx_load_feed(force=True)
             self._log("ok", "QX server connected — " + host + " | opener: " + str(qx.PRELOAD_FIRST_SYMBOL))
