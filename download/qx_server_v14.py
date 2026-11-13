@@ -1364,7 +1364,7 @@ class Quotex:
                 parsed.append(c)
         return parsed
 
-    async def get_historical_candles(self, asset, amount_of_seconds, period, timeout=30, max_workers=5, progress_callback=None):
+    async def get_historical_candles(self, asset, amount_of_seconds, period, timeout=30, max_workers=5, progress_callback=None, batch_callback=None):
         # ===== FIX 7: (5 workers + chunk=200) =====
         # .
         # (keepalive + watchdog ).
@@ -1400,6 +1400,15 @@ class Quotex:
                     consecutive_failures_in_worker = 0
                     new_batch = self._parse_historical_candles(batch_data)
                     if not new_batch: oldest_t -= chunk_seconds; continue
+                    # v14.6 (طلب المستخدم: «اي دفعة جلبها يرفعها الى الشارت»):
+                    # مرصد قراءة فقط — يسلّم كل دفعة فور وصولها للمستدعي الذي
+                    # يرفعها إلى الشارت في الحال. طريقة الجلب نفسها وسم Requests
+                    # والمرساة المتحركة كما هي حرفياً في الكود المرجعي دون أي تغيير.
+                    if batch_callback:
+                        try:
+                            batch_callback(list(new_batch), worker_id)
+                        except Exception:
+                            pass
                     batch_times = []
                     for c in new_batch:
                         ts = c['time']
