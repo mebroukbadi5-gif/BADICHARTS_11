@@ -1,0 +1,8 @@
+[21:46:41] [1s_bridge:TESTUSD-OTC] merged: REPLACED 3 historical + APPENDED 3 new bridge (source: 750 1s)
+[21:46:41] [older:TESTUSD_otc] no connection — batch skipped
+[21:48:26] [1s_bridge:TESTUSD-OTC] merged: REPLACED 3 historical + APPENDED 3 new bridge (source: 750 1s)
+[21:48:26] [older:TESTUSD_otc] +290 candles (batch 300)
+[21:48:51] [1s_bridge:TESTUSD-OTC] merged: REPLACED 3 historical + APPENDED 3 new bridge (source: 750 1s)
+[21:48:51] [older:TESTUSD_otc] +290 candles (batch 300)
+[21:49:20] [1s_bridge:TESTUSD-OTC] merged: REPLACED 3 historical + APPENDED 3 new bridge (source: 750 1s)
+[21:49:20] [older:TESTUSD_otc] +290 candles (batch 300)
