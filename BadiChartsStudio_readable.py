@@ -2196,15 +2196,17 @@ function note(freq, at, dur, o) {
     osc.start(t); osc.stop(t + dur + 0.05);
   });
 }
-/* طلب المستخدم: صوت واحد في كل لحظة — لا تداخل أبدًا بين نغمتين (نجاح وخسارة معًا مثلاً).
-   المجدول يحجز مدة السماعة لكل نغمة: النغمة التالية تبدأ بعد انتهاء الحالية مباشرة (تسلسل بلا تصادم)،
-   ودفعة إشارات متقاربة (600 مللي ثانية) = نغمة واحدة فقط، والطابور الأبعد من 4 ثوانٍ يُهمَل بدل التكديس */
-let sndBusyUntil = 0, sndLastSigAt = 0;
+/* طلب المستخدم (بعد ما زال يسمع تعارضًا): صوت واحد فقط في كل لحظة + فاصل واضح بين أي صوتين.
+   أي صوت جديد (إشارة أخرى/نتيجة/خسارة) ينتظر انتهاء الصوت السابق كليًا ثم فاصل 350 مللي ثانية قبل أن يبدأ،
+   والجدولة على ساعة AudioContext نفسها بدقة العينات — يستحيل تقاطع صوتين حتى لو وصلا في نفس المللي ثانية،
+   والترتيب دائمًا: إشارة ← نتيجتها ← الإشارة التالية (طابور صارم بلا تجاوز) */
+let sndBusyUntil = 0;
+const SND_GAP = 0.35;                       /* الفاصل الإلزامي بين نهاية أي صوت وبداية الذي يليه */
 function sndSlot(dur) {
   const c = audioCtx(); if (!c) return -1;
   const now = c.currentTime;
-  const at = Math.max(0, sndBusyUntil - now);
-  if (at > 4) return -1;                    /* الطابور أطول من 4 ثوانٍ — أهمِل النغمة الجديدة بدل التصادم */
+  const at = sndBusyUntil ? Math.max(0, sndBusyUntil + SND_GAP - now) : 0;
+  if (at > 6) return -1;                    /* الطابور أطول من 6 ثوانٍ — أهمِل النغمة الجديدة بدل التكديس */
   sndBusyUntil = now + at + dur;
   return at;
 }
@@ -2213,10 +2215,8 @@ document.addEventListener("pointerdown", function () { try { audioCtx(); } catch
 /* New signal: BUY = rising two-note chime, SELL = falling two-note chime */
 function playSignal(type) {
   if (!soundOn) return;
-  const n = Date.now();
-  if (n - sndLastSigAt < 600) return;       /* دفعة إشارات دفعة واحدة = نغمة واحدة (طلب المستخدم) */
-  sndLastSigAt = n;
-  const at = sndSlot(0.85);
+  /* طلب المستخدم: كل إشارة صوتها يُسمع — لا حذف للصوت الثاني، الطابور يفصل الأصوات بفاصل واضح بدل التعارض */
+  const at = sndSlot(0.9);
   if (at < 0) return;
   if (type === "buy") { note(659.25, at, .35); note(987.77, at + .11, .6); }
   else { note(987.77, at, .35); note(659.25, at + .11, .6); }
@@ -2224,7 +2224,8 @@ function playSignal(type) {
 /* Result: WIN = bright rising arpeggio, LOSS = low soft falling tone */
 function playResult(r) {
   if (!soundOn) return;
-  const at = sndSlot(r === "win" ? 1.2 : 0.95);
+  /* الحزمة تشمل ذيل النغمات (osc.stop بعد نهاية المغلف بـ 50 مللي) حتى لا يبدأ الصوت التالي فوق الذيل */
+  const at = sndSlot(r === "win" ? 1.3 : 1.1);
   if (at < 0) return;
   if (r === "win") {
     [523.25, 659.25, 783.99].forEach((f, i) => note(f, at + i * .09, .35, { vol: .17 }));
