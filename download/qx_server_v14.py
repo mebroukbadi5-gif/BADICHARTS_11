@@ -2467,6 +2467,26 @@ def start_async_engine():
                 asyncio.run_coroutine_threadsafe(keepalive_loop(), ASYNC_LOOP)
                 # ===== FIX: stale watchdog loop =====
                 asyncio.run_coroutine_threadsafe(stale_message_watchdog(), ASYNC_LOOP)
+                # ===== v14.2 FIX: الحلقات التي كانت تموت مع الحلقة القديمة =====
+                # سد الثغرات (mt4_gap_filler) وحلقات طبقة التقوية (v14) كانت
+                # تُجدول مرة واحدة فقط عند الدخول — عند إعادة إنشاء الحلقة
+                # (إعادة الاتصال) تموت بصمت وتبقى ميتة للأبد: سد الثغرات
+                # ومراقب الفجوات وحارس الانقطاع كلهم يتوقفون. الآن تُعاد
+                # جدولتها على الحلقة الجديدة فوراً (نفس الدوال كما هي).
+                try:
+                    asyncio.run_coroutine_threadsafe(mt4_gap_filler(), ASYNC_LOOP)
+                except Exception as _e:
+                    logmsg(f"[AsyncEngine] gap filler reschedule failed: {_e}")
+                try:
+                    _v14_loops = globals().get("v14_build_background_loops")
+                    _supervise = globals().get("v14_supervise")
+                    if callable(_v14_loops) and callable(_supervise):
+                        for _v14_name, _v14_factory in _v14_loops():
+                            asyncio.run_coroutine_threadsafe(
+                                _supervise(_v14_name, _v14_factory), ASYNC_LOOP)
+                        logmsg(f"[AsyncEngine] v14 strengthening loops rescheduled (gen {gen})")
+                except Exception as _e:
+                    logmsg(f"[AsyncEngine] v14 loops reschedule failed: {_e}")
                 for asset in ALL_STREAMING_ASSETS:
                     asset.stream_task = None
                     asset.streaming = False
@@ -4075,6 +4095,17 @@ class CandleStore:
                         last_fill_at  REAL NOT NULL DEFAULT 0
                     )
                 """)
+                # ===== v14.2 MIGRATION (مرة واحدة عند كل بدء تشغيل) =====
+                # «طريقة سد الثغرات لا تعمل إطلاقاً»: علامات التجمد المكتوبة
+                # من جلسات سابقة (filled=1) كانت تُخرج الطريقة الأصلية فوراً
+                # دون أي عمل — فتبقى الفجوات القديمة بلا سد للأبد. عند بدء
+                # التشغيل تُصفَّر العلامات مرة واحدة: أول دورة سد تعمل
+                # (بخوارزمية الأصل نفسها) وتسد الفجوات الموجودة، ثم تُعاد
+                # كتابة العلامة ويستمر السلوك الأصلي كما هو حرفياً.
+                try:
+                    conn.execute("UPDATE gap_state SET filled=0, last_fill_at=0;")
+                except Exception:
+                    pass
             finally:
                 conn.close()
         except Exception as e:
@@ -4705,41 +4736,12 @@ class MT4Writer:
         # the original algorithm is preserved 1:1, we only skip it after the
         # first successful run.
         #
-        # ===== v14.1 FIX — «طريقة سد الثغرات صارت لا تعمل اطلاقاً» =====
-        # سبب التعطيل: علامة التجمد (gap_state.filled=1 في candles.db) تبقى
-        # مكتوبة للأبد بعد أول سد ناجح — حتى بعد إعادة تشغيل البرنامج — فكانت
-        # كل نداءات fill_gap_once لاحقاً (من الحلقة الشاملة mt4_gap_filler ومن
-        # مدقق الفقدان v14_gap_fill_for_asset) تخرج فوراً دون أي عمل، وأي فجوة
-        # جديدة (انقطاع بث، فجوة خادم، دفعة تمرير أقدم) تبقى بلا سد للأبد.
-        # الحل مع الحفاظ على الطريقة الأصلية حرفياً: عند وجود علامة تجمد نفحص
-        # خط الشموع الحالي — إن كانت سليمة بلا فجوات نخرج كما كان، وإن كانت
-        # فيها فجوات حقيقية نلغي التجمد وندع الخوارزمية الأصلية نفسها تنفذ
-        # (نفس الأصل: جلب GAP_FILL_CANDLES شمعة حديثة + دمج + _fill_missing_slots).
+        # v14.2: الفرع أعلاه عاد إلى الكود الأصلي حرفياً (نفس الكود الملصوق
+        # من المستخدم — دون أي إضافة فحص ثغرات فوقه).
         try:
             is_filled, _last_at = self.candle_store.is_gap_filled(derived_symbol)
             if is_filled:
-                _hole_line = None
-                if asset_obj is not None and getattr(asset_obj, "candles", None):
-                    _hole_line = list(asset_obj.candles)
-                elif isinstance(self.sync_state.get(derived_symbol), dict) \
-                        and self.sync_state[derived_symbol].get("candles"):
-                    _hole_line = list(self.sync_state[derived_symbol]["candles"])
-                _holes_found = self._scan_line_holes(_hole_line, PERIOD_SECONDS)
-                if not _holes_found:
-                    return    # frozen - keep candles exactly as they were (original behaviour)
-                # فجوات حقيقية موجودة — ألغِ التجمد ودع الطريقة الأصلية تسدّها
-                try:
-                    self.candle_store.set_gap_filled(derived_symbol, False, time.time())
-                except Exception:
-                    pass
-                self._gap_filled[derived_symbol] = False
-                self._gap_filled_at[derived_symbol] = 0.0
-                try:
-                    logmsg(f"[gap:{derived_symbol}] freeze lifted — "
-                           f"{len(_hole_line or [])} candles scanned, holes found → "
-                           f"original fill_gap_once runs again")
-                except Exception:
-                    pass
+                return    # frozen - keep candles exactly as they were
         except Exception:
             pass
 
@@ -4772,10 +4774,10 @@ class MT4Writer:
         try:
             # Fetch last GAP_FILL_CANDLES (10) recent candles to replace incomplete ones
             small_days = (GAP_FILL_CANDLES * PERIOD_SECONDS) / 86400.0
-            # v13.1: عبر بوابة الجلب الواحدة — لا يختلط جلب سد الثغرات مع أي جلب آخر
-            candles = await qx_fetch_window_raw(
-                api_symbol, time.time(), int(small_days * 86400), PERIOD_SECONDS,
-                foreground=False, timeout=BRIDGE_FETCH_TIMEOUT)
+            # v14.2 (طلب المستخدم حرفياً: «ضعها كما هي هنا») — النداء الأصلي
+            # عاد كما هو في الكود المرجعي: client.get_candles مباشرة
+            # (نفس طريقة الجلب الرسمية دون أي بوابة فوقها).
+            candles = await client.get_candles(api_symbol, time.time(), int(small_days * 86400), PERIOD_SECONDS)
             if not candles:
                 # Fill existing gaps even without new data
                 merged = sorted(state['candles'], key=lambda x: x['time'])[-INITIAL_CANDLES:]
@@ -4987,15 +4989,33 @@ def _get_or_create_asset(api_symbol: str) -> Asset:
 #   4) debounce: نفس النافذة (عملة/فريم/نهاية) خلال 3 ثوانٍ يعيد النتيجة
 #      المخزنة بدل إرسال طلب مكرر يختلط مع السابق.
 _FETCH_GATE_LOCK: Optional[asyncio.Lock] = None   # تُنشأ في أول استدعاء
+_FETCH_GATE_LOCK_LOOP: Optional[asyncio.AbstractEventLoop] = None  # v14.2: الحلقة المرتبة
 _FETCH_GATE_FG = 0                                # عدد الطلبات الأمامية المعلّقة
 _FETCH_GATE_CACHE: Dict[tuple, tuple] = {}        # (asset,period,end,seconds) -> (ts, raw_res)
 _FETCH_GATE_CACHE_TTL = 3.0                       # ثوانٍ
 
 
 def _fetch_gate_lock() -> asyncio.Lock:
-    global _FETCH_GATE_LOCK
-    if _FETCH_GATE_LOCK is None:
+    """قفل البوابة — v14.2: مرتبط بالحلقة الحالية.
+
+    السبب (الجذر الحقيقي لـ«الرجوع للخلف لا يجلب شموعاً» و«سد الثغرات
+    لا يعمل إطلاقاً»): كان القفل يُنشأ مرة واحدة على حلقة gen-1، وعند
+    إعادة إنشاء الحلقة (start_async_engine على إعادة الاتصال — gen 2+)
+    كان كل 'async with lock' يرفع RuntimeError («bound to a different
+    event loop") — فيموت جلب كل دفعة تمرير للخلف (دُفعة فارغة →
+    «لا يوجد أقدم» في الواجهة) وسد الثغرات (الاستثناء يُبتلع صامتاً)
+    بينما التيكات الحية تُبقى تعمل لأنها لا تمر بالبوابة.
+    الآن: إن تغيّرت الحلقة الجارية يُعاد إنشاء القفل تلقائياً."""
+    global _FETCH_GATE_LOCK, _FETCH_GATE_LOCK_LOOP
+    loop = None
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if (_FETCH_GATE_LOCK is None or loop is None
+            or _FETCH_GATE_LOCK_LOOP is not loop):
         _FETCH_GATE_LOCK = asyncio.Lock()
+        _FETCH_GATE_LOCK_LOOP = loop
     return _FETCH_GATE_LOCK
 
 
@@ -6575,6 +6595,7 @@ class V14RequestGate:
         self._heap: _v14_List[_v14_List] = []       # [eff_priority, seq, req]
         self._counter = _v14_itertools.count(1)
         self._wake = _v14_asyncio.Event()
+        self._bound_loop: _v14_Any = None          # v14.2: الحلقة المرتبة بالبوابة
         self._worker_task: _v14_Any = None
         self._pending: _v14_Dict[tuple, _v14_Any] = {}   # dedupe key -> future
         self._asset_chains: _v14_Dict[str, _v14_asyncio.Lock] = {}
@@ -6594,6 +6615,39 @@ class V14RequestGate:
         self._done_slots = SlotRegistry()
 
     # ---------- سلاسل العملات ----------
+    def _ensure_loop(self) -> None:
+        """v14.2: أعد ربط البوابة بالحلقة الجارية عند تغيّرها.
+
+        start_async_engine يعيد إنشاء حلقة asyncio عند إعادة الاتصال
+        (gen 2+). كل عناصر asyncio هنا (Event/Lock/Future) ترتبط بأول
+        حلقة تستعملها وترفع RuntimeError لاحقاً («bound to a different
+        event loop») — فتموت البوابة بصمت. عند تغيّر الحلقة: نُعيد
+        إنشاء الحدث والأقفال، ونُفشل أي طلبات معلّقة من الحلقة الميتة
+        فوراً بدل تعليقها حتى مهلة الوفاة."""
+        try:
+            loop = _v14_asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if getattr(self, "_bound_loop", None) is loop:
+            return
+        if self._bound_loop is not None:
+            # تغيّر فعلي من حلقة سابقة (إعادة اتصال) — لا شيء على أول ربط:
+            # العامل الجديد قد يبدأ بعد تسليم طلبات على نفس الحلقة الجارية
+            # (نمط الاختبارات الذاتية) فلا يُلغى شيء في أول ربط.
+            self._wake = _v14_asyncio.Event()
+            self._asset_chains = {}
+            # أُلغِ الطلبات المعلّقة من الحلقة القديمة فوراً (بلا تعليق وبلا
+            # تحذير «exception was never retrieved»)
+            for fut in list(self._pending.values()):
+                try:
+                    if fut is not None and not fut.done():
+                        fut.cancel()
+                except Exception:
+                    pass
+            self._pending = {}
+            self._worker_task = None
+        self._bound_loop = loop
+
     def _chain(self, api_symbol: str) -> _v14_asyncio.Lock:
         """قفل تسلسل لكل عملة — طلبات العملة الواحدة لا تتداخل أبداً."""
         lock = self._asset_chains.get(api_symbol)
@@ -6738,6 +6792,7 @@ class V14RequestGate:
 
         كل خطأ يُسجل ويُحصَّد — العامل لا يموت أبداً (دون انهيار الخوادم).
         """
+        self._ensure_loop()   # v14.2: أعد الربط إذا تغيّرت الحلقة (إعادة اتصال)
         self._running = True
         V14_JOURNAL.record("gate_worker_start")
         while True:
