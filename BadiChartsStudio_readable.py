@@ -136,9 +136,7 @@ svg{vertical-align:middle;flex-shrink:0}
 #gridHost{position:relative;flex:1;min-width:0;min-height:0;display:grid;gap:5px;padding:5px;background:var(--bg)}
 #gridHost[data-n="1"]{grid-template-columns:1fr;grid-template-rows:1fr}
 .pane{position:relative;display:flex;flex-direction:column;min-width:0;min-height:0;border:0;border-radius:9px;overflow:hidden;background:var(--bg);cursor:pointer}
-.pane-head{display:flex;height:26px;flex-shrink:0;align-items:center;gap:7px;padding:0 9px;background:var(--panel);border-bottom:1px solid var(--border);font-size:10.5px;user-select:none}
-.pane-head b{font-size:11px;color:var(--t-bright);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.pane-head .aflag{width:20px;height:11px}
+/* رأس اللوحة (شريط اسم العملة) أُزيل بالكامل — الشارت يملأ اللوحة الآن (طلب المستخدم) */
 .pane-tf{font-size:9.5px;font-weight:800;color:var(--accent-t);background:var(--acc-soft);border-radius:6px;padding:1px 6px;flex-shrink:0;direction:ltr}
 .pane-pay{font-size:9.5px;font-weight:800;color:var(--ok);flex-shrink:0}
 .pane-cv{position:relative;flex:1;min-height:0}
@@ -1684,7 +1682,8 @@ function addPane() {
   el.className = "pane";
   el.dataset.pane = i;
   el.title = "Open this chart — click to select it";
-  el.innerHTML = '<div class="pane-head"></div><div class="pane-cv"><canvas></canvas></div>';
+  /* شريط اسم العملة فوق الشارت أُزيل نهائيًا — المعلومة نفسها موجودة في سطر OHLC تحته (طلب المستخدم) */
+  el.innerHTML = '<div class="pane-cv"><canvas></canvas></div>';
   $("gridHost").appendChild(el);
   const cv = el.querySelector("canvas");
   const cfg = assetCfg(name);
@@ -7422,73 +7421,7 @@ ApplicationWindow {
                 /* زر إغلاق لوحة الإعدادات بأيقونة X (طلب المستخدم) */
                 IBtn { iconName: "x"; onClicked: settingsPop.close() }
             }
-            Label { text: backend.s.currs; font.pixelSize: 13; font.bold: true; color: backend.c.fg }
-            Label {
-                text: backend.s.currsHint; font.pixelSize: 10; color: backend.c.sub
-                wrapMode: Text.WordWrap; Layout.fillWidth: true
-            }
-            Column {
-                id: curCol
-                Layout.fillWidth: true
-                spacing: 6
-                    Repeater {
-                        model: backend.board
-                        delegate: Rectangle {
-                            id: curRow
-                            property bool isAdded: backend.added.indexOf(modelData.name) >= 0
-                            property bool mOpen: backend.marketOpen(modelData.name)
-                            width: curCol.width
-                            height: 44; radius: 10
-                            color: rm.containsMouse ? backend.c.hover : backend.c.bg
-                            border.width: 1; border.color: backend.c.border
-                            RowLayout {
-                                anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; spacing: 9
-                                Image {
-                                    source: modelData.flag
-                                    fillMode: Image.PreserveAspectFit
-                                    Layout.preferredWidth: 27; Layout.preferredHeight: 14
-                                    smooth: true; mipmap: true
-                                }
-                                Label {
-                                    text: modelData.name; font.pixelSize: 12; font.bold: true
-                                    color: backend.c.fg; Layout.fillWidth: true; elide: Text.ElideRight
-                                }
-                                Label {
-                                    text: modelData.payout + "%"; font.pixelSize: 11; font.bold: true
-                                    color: backend.c.good
-                                }
-                                /* شارة حالة السوق بجانب نسبة الدفع — مفتوح أخضر / مغلوق أحمر (طلب المستخدم) */
-                                Rectangle {
-                                    width: mst.implicitWidth + 14; height: 20; radius: 7
-                                    color: curRow.mOpen ? Qt.rgba(0.13, 0.88, 0.54, 0.13)
-                                                        : Qt.rgba(0.97, 0.30, 0.37, 0.13)
-                                    Label {
-                                        id: mst; anchors.centerIn: parent
-                                        text: curRow.mOpen ? backend.s.mktOpen : backend.s.mktClosed
-                                        font.pixelSize: 9; font.bold: true
-                                        color: curRow.mOpen ? backend.c.good : backend.c.bad
-                                    }
-                                }
-                                Rectangle {
-                                    width: 26; height: 26; radius: 8
-                                    color: curRow.isAdded ? backend.c.accent : "transparent"
-                                    border.width: curRow.isAdded ? 0 : 1
-                                    border.color: backend.c.border
-                                    Icon {
-                                        anchors.centerIn: parent
-                                        name: curRow.isAdded ? "ok" : "plus"; sz: 13
-                                        tint: curRow.isAdded ? "#FFFFFF" : backend.c.sub
-                                    }
-                                }
-                            }
-                            MouseArea {
-                                id: rm; anchors.fill: parent; hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: backend.toggleAdded(modelData.name)
-                            }
-                        }
-                    }
-                }
+            /* قائمة العملات أُزيلت من بطاقة الإعدادات نهائيًا — الإضافة والإزالة من قائمة + فقط (طلب المستخدم) */
             /* ───── إعدادات أخرى: الوضع الليلي + اللغة + أصوات الإشارات (طلب المستخدم) ───── */
             Rectangle { Layout.fillWidth: true; height: 1; color: backend.c.border }
             RowLayout {
