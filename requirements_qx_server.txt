@@ -4,3 +4,5 @@ websocket-client
 beautifulsoup4
 fake-useragent
 orjson
+fastapi
+uvicorn
