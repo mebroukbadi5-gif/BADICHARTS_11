@@ -3373,7 +3373,7 @@ T = {
         "otherSett": "Other settings", "darkMode": "Dark mode", "langLbl": "Language", "sndLbl": "Signal sounds",
         "sbLbl": "Status bar", "cdLbl": "Candle countdown",
         "histDays": "History candles — days", "histSave": "Save",
-        "histDaysHint": "When you open a currency it loads a batch of 300 candles then another 300 (like before) up to this many days (0.5 – 30). Default: 2 days. Type the number and press Save.",
+        "histDaysHint": "When you open a currency the engine fetches this many days in ONE request (0.5 – 30, default 2); the server delivers it in batches and every batch of 300 candles rises to the chart immediately — the chart stays free (zoom/pan) and no candles are lost. Type the number and press Save.",
         "histSaved": "History days saved — opening a currency now loads the new range",
         "badiSect": "Encrypted indicators (BADI)", "keyFp": "Key fingerprint:",
         "notifT": "Notifications", "notifEmpty": "No notifications yet",
@@ -3455,7 +3455,7 @@ T = {
         "otherSett": "إعدادات أخرى", "darkMode": "الوضع الليلي", "langLbl": "اللغة", "sndLbl": "أصوات الإشارات",
         "sbLbl": "شريط الحالة", "cdLbl": "العد التنازلي على الشارت",
         "histDays": "شموع التاريخ — عدد الأيام", "histSave": "حفظ",
-        "histDaysHint": "عند فتح العملة تُجلب دفعة 300 شمعة ثم 300 اخرى (مثل السابق) حتى بلوغ هذا العدد من الأيام (0.5 – 30). الافتراضي يومان. اكتب الرقم واضغط حفظ.",
+        "histDaysHint": "عند فتح العملة يجلب المحرك هذا العدد من الأيام بطلب واحد (0.5 – 30، الافتراضي يومان)، والخادم يرفعه على دفعات وكل دفعة 300 شمعة تُرفع إلى الشارت فوراً — الشارت يبقى حراً (زوم/تحريك) ولا تُفقد أي شمعة. اكتب الرقم واضغط حفظ.",
         "histSaved": "تم حفظ عدد الأيام — فتح العملة يجلب المدى الجديد",
         "badiSect": "المؤشرات المشفرة (BADI)", "keyFp": "بصمة المفتاح:",
         "notifT": "الإشعارات", "notifEmpty": "لا توجد إشعارات بعد",
@@ -5518,6 +5518,7 @@ class Backend(QObject):
     darkChanged = Signal()
     filesChanged = Signal()
     candlesChanged = Signal()
+    histChainChanged = Signal()            # v14.5: سلسلة التاريخ تعمل الآن (لا إعادة ضبط للشارت أثناءها)
     histChanged = Signal()
     consoleMsg = Signal(str, str)          # kind, text
     pyValues = Signal(str, str, str)       # id, seriesJson, rangeJson
@@ -5583,11 +5584,14 @@ class Backend(QObject):
         self._qx_load_pending = set()  # العملات المنتظرة في الطابور (منع التكرار)
         self._qx_load_lock = threading.Lock()
         self._qx_load_busy = False     # عامل الطابور يعمل الآن
-        # v14.3 (طلب المستخدم): دفعات التاريخ المتسلسلة عند فتح العملة فقط —
-        # دفعة 300 ثم 300 حتى عدد الأيام المضبوط، وكل دفعة تُرفع للشارت فوراً
-        self._qx_chain_busy = set()    # عملات/فريمات تجري عليها الدفعات الآن
+        # v14.5 (طلب المستخدم): طلب واحد بمدى الأيام كاملاً — الخادم يجيبه على
+        # دفعات وكل دفعة (300 شمعة) تُرفع إلى الشارت فور وصولها بعد المعالجة.
+        # لا طلب 300 شمعة جديدة في كل مرة (كان يعيد نفس الدفعة الأولى).
+        self._qx_chain_gen = {}        # مولّد لكل مفتاح (عملة، فريم) — يُجهض السلسلة القديمة عند بدء أحدث
+        self._qx_chain_running = {}    # المفتاح -> مولّد السلسلة الجارية (لحالة histChainActive)
         self._qx_chain_done = set()    # عملات/فريمات بلغت هدف الأيام أو نفد تاريخها
         self._qx_chain_lock = threading.Lock()
+        self._qx_chain_active = False  # سلسلة التاريخ تعمل للعملة/الفريم المعروضين الآن
         self._files = self._load_files()
         _ensure_badi_dirs()
         self.syncDiskFiles(emit=False)     # استيراد أي ملفات وضعها المستخدم في مجلد BadiCharts
@@ -6566,6 +6570,14 @@ class Backend(QObject):
     def histDaysStr(self):
         return str(self._hist_days)
 
+    @Property(bool, notify=histChainChanged)
+    def histChainActive(self):
+        """v14.5 (طلب المستخدم حرفياً: «الشارت لا نريده ان يتاثر اطلاقا يجب ان
+        يبقا حر ولا يتاثر ولا نريد فقدان الشموع»): صفحة الويب تعرف من هذه
+        الخاصية أن دفعات التاريخ تجري الآن — فلا تعيد ضبط الشارت أبداً أثناءها
+        (لا syncFull) — الزوم والموضع يبقيان حرين والشموع لا تُفقد."""
+        return bool(self._qx_chain_active)
+
     @Slot(str)
     def setHistDays(self, v):
         """v14.3 (طلب المستخدم): يكتب الرقم في بطاقة الإعدادات ويضغط حفظ —
@@ -6600,24 +6612,169 @@ class Backend(QObject):
                 self._qx_start_history_chain(api, "1m")
 
     def _qx_start_history_chain(self, api, tf_label="1m"):
-        """v14.3 (طلب المستخدم حرفياً): «عند فتح العملة يجلب دفعة 300 شمعة ثم
-        يجلب 300 اخرى مثل ماكانت تفعل في السابق خليها تجلب 2 يوم ... اي دفعة
-        تجلبها ترفعها الى الشارت». تعمل عند فتح العملة وفقط، وتتوقف عند بلوغ
-        عدد الأيام المضبوط أو عند نهاية تاريخ الخادم. طريقة الرجوع للخلف
-        (التمرير) أُلغيت — لا طلبات من التمرير ولا رسائل في الترمينال."""
+        """v14.5 (طلب المستخدم حرفياً): «المحرك خليه يجلب شمعة تلك العملة حتا ل
+        2 يوم وليس كل مرة يطلب 300 شمعة بل يرفع الى الشارت 300 شمعة كل دفعة اما
+        طريقة الجلب يجلب 2 يوم ... اي دفعة جلبها يرفعها الى الشارت».
+
+        تعمل عند فتح العملة وفقط: طلب **واحد** بمدى الأيام كاملاً عبر نفس
+        طريقة الجلب الأصلية (CLIENT.get_candles → history/load)، والخادم يرفع
+        الرد على دفعات — كل دفعة تُعالج وتُرفع إلى الشارت فوراً (300 شمعة لكل
+        دفعة) دون انتظار انتهاء الجلب كله. لا طلب 300 شمعة جديدة بمرساة متحركة
+        — كان يعيد نفس الدفعة الأولى. طريقة الرجوع للخلف (التمرير) أُلغيت."""
         qx = _qx_module()
         if not qx or not api or not self._qx_logged:
             return
+        tf_sec = dict(TFS).get(tf_label, 60)
+        if tf_sec < 60:
+            return   # فريمات الثواني تُبنى من التيك الحي (سياسة الخادم) — لا تاريخ مطلب
         key = (api, tf_label)
         with self._qx_chain_lock:
-            if key in self._qx_chain_busy or key in self._qx_chain_done:
+            if key in self._qx_chain_done:
                 return
-            self._qx_chain_busy.add(key)
-        threading.Thread(target=self._qx_chain_worker, args=(api, tf_label),
+            gen = int(self._qx_chain_gen.get(key, 0)) + 1
+            self._qx_chain_gen[key] = gen     # يُجهض أي سلسلة قديمة لنفس المفتاح
+            self._qx_chain_running[key] = gen
+        threading.Thread(target=self._qx_chain_worker, args=(api, tf_label, gen),
                          daemon=True, name="qxHistChain").start()
 
-    def _qx_chain_worker(self, api, tf_label):
+    def _qx_chain_set_active(self, active):
+        if bool(active) != bool(self._qx_chain_active):
+            self._qx_chain_active = bool(active)
+            try:
+                self.histChainChanged.emit()
+            except Exception:
+                pass
+
+    def _qx_chain_push_message(self, api, tf_label, tf_sec, raw,
+                               horizon, pushed_t, viewing):
+        """معالجة دفعة وصلت من الخادم: تنسيق + دمج في ذاكرة المحرك نفسها +
+        رفع 300 شمعة لكل دفعة إلى الشارت فوراً (prepend بلا إعادة ضبط).
+        تعيد عدد الشموع المرفوعة فعلاً."""
+        qx = _qx_module()
+        if not qx or not raw:
+            return 0
+        if tf_sec == 60:
+            eng_all = qx._format_raw_candles(raw)               # تنسيق الخادم الرسمي
+            app_all = self._fmt_engine_candles(list(eng_all))
+        else:
+            app_all = self._qx_fmt_raw(raw, tf_sec)
+            eng_all = []
+        new_c = [c for c in app_all
+                 if (horizon <= 0 or c["t"] < horizon) and c["t"] not in pushed_t]
+        if not new_c:
+            return 0
+        new_c.sort(key=lambda x: x["t"])
+        cap = int(getattr(qx, "PAGINATION_BATCH", 300))
+        n_pushed = 0
+        i = 0
+        while i < len(new_c):
+            chunk = new_c[i:i + cap]
+            i += len(chunk)
+            for c in chunk:
+                pushed_t.add(c["t"])
+            # دمج الدفعة في ذاكرة المحرك نفسها (نفس دمج fetch_older_batch الأصلية)
+            if tf_sec == 60 and eng_all:
+                try:
+                    t_lo, t_hi = chunk[0]["t"], chunk[-1]["t"]
+                    eng_chunk = [c for c in eng_all if t_lo <= c["time"] <= t_hi]
+                    asset = qx._get_or_create_asset(api)
+                    merged = list(eng_chunk) + list(asset.candles or [])
+                    seen, unique = set(), []
+                    for c in merged:
+                        if c["time"] not in seen:
+                            seen.add(c["time"])
+                            unique.append(c)
+                    unique.sort(key=lambda x: x["time"])
+                    unique = unique[-int(getattr(qx, "ASSET_MAX_CANDLES", 45000)):]
+                    qx._apply_candles_to_asset(asset, unique)
+                except Exception:
+                    pass
+            n_pushed += len(chunk)
+            if not viewing():
+                continue   # العملة/الفريم تغيّرا — يُكمل دمج المحرك دون رفع للصفحة
+            # مزامنة غذاء بايثون — الصفحة تدمج الدفعة عبر prependCandles
+            # (بلا إعادة ضبط ولا قفزة: الزوم والموضع يبقيان كما هما)
+            self._candles = chunk + self._candles
+            seen_t = set()
+            merged_app = []
+            for c in self._candles:
+                if c["t"] not in seen_t:
+                    seen_t.add(c["t"])
+                    merged_app.append(c)
+            merged_app.sort(key=lambda x: x["t"])
+            self._candles = merged_app[-self._QX_FEED_CAP:]
+            _tail = self._candles[-3:]
+            self._qx_last_sig = ((len(self._candles),) + tuple(
+                (c["t"], round(float(c["o"]), 10), round(float(c["h"]), 10),
+                 round(float(c["l"]), 10), round(float(c["c"]), 10)) for c in _tail)) if _tail else None
+            self._emit_qx({"type": "older", "candles": chunk,
+                           "asset": self._asset, "tf": tf_label})
+            self.candlesChanged.emit()
+            time.sleep(0.12)
+        return n_pushed
+
+    def _qx_seal_gaps(self, api):
+        """سد ثغرات العملة — الآلة الأصلية حرفياً من qx_server_v10.py
+        (MT4_WRITER.fill_gap_once كما هي، نفس نداء mt4_gap_filler الأصلي).
+
+        لماذا لم تكن تعمل مع كل العملات؟ علامة التجمّد المحفوظة
+        (gap_state.filled=1 في candles.db) كانت تجعل الآلة تعود فوراً بلا سد
+        لأي عملة جمّدتها جلسة سابقة — فتبقى مثقوبة. هنا تُرفع العلامة عن هذه
+        العملة وحدها ثم تُنفَّذ الخوارزمية الأصلية نفسها كما هي (سد أقل من
+        ثانية: جلب آخر 10 شموع حقيقية واستبدال الناقص منها). وبعد السد يُعاد
+        الخطر الكامل للذاكرة حتى لا يقص السد التاريخ المجلوب (v10 كان يحتفظ
+        بآخر 1000 شمعة فقط — v14 يحتفظ بكل دفعات التاريخ)."""
+        qx = _qx_module()
+        if not qx or getattr(qx, "CLIENT", None) is None:
+            return
+        try:
+            asset = qx._get_or_create_asset(api)
+        except Exception:
+            return
+        try:
+            variants = [api]
+            if getattr(asset, "symbol", ""):
+                variants.append(asset.symbol)
+            qx.clear_gap_flag_any(variants)
+            try:
+                qx.MT4_WRITER._gap_filled[asset.symbol] = False
+            except Exception:
+                pass
+        except Exception:
+            pass
+        full_before = list(asset.candles or [])
+        try:
+            fut = asyncio.run_coroutine_threadsafe(
+                qx.MT4_WRITER.fill_gap_once(qx.CLIENT, asset,
+                                            int(getattr(qx, "PERIOD", 1))),
+                qx.ASYNC_LOOP)
+            fut.result(timeout=30)
+        except Exception:
+            return
+        # إعادة الخط الكامل: شموع الآلة المُصلحة تحل محل المطابق زمنياً فقط —
+        # لا فقدان لأي شمعة من دفعات التاريخ (طلب المستخدم: لا نريد فقدان الشموع)
+        try:
+            repaired = list(asset.candles or [])
+            if full_before and repaired:
+                rep_map = {c["time"]: c for c in repaired}
+                full_t = {c["time"] for c in full_before}
+                restored = [rep_map.get(c["time"], c) for c in full_before]
+                restored += [c for c in repaired if c["time"] not in full_t]
+                seen, unique = set(), []
+                for c in sorted(restored, key=lambda x: x["time"]):
+                    if c["time"] not in seen:
+                        seen.add(c["time"])
+                        unique.append(c)
+                unique = unique[-int(getattr(qx, "ASSET_MAX_CANDLES", 45000)):]
+                qx._apply_candles_to_asset(asset, unique)
+        except Exception:
+            pass
+
+    def _qx_chain_worker(self, api, tf_label, gen):
         key = (api, tf_label)
+        days = 2.0
+        total_pushed = 0
+        viewing_ok = False
         try:
             qx = _qx_module()
             if not qx or getattr(qx, "CLIENT", None) is None:
@@ -6633,79 +6790,129 @@ class Backend(QObject):
                     return cur_api == api and self._tf == tf_label
                 except Exception:
                     return False
+
+            def _stale():
+                """سلسلة أحدث بدأت لنفس المفتاح (تغيير الأيام مثلاً) — هذه تُجهض."""
+                try:
+                    with self._qx_chain_lock:
+                        return self._qx_chain_gen.get(key) != gen
+                except Exception:
+                    return False
             try:
                 qx.QX_HISTORY_DAYS = days
             except Exception:
                 pass
-            batches = 0
-            max_batches = max(2, int((days * 86400) // max(1, 300 * tf_sec)) + 3)
-            while True:
-                if getattr(qx, "CLIENT", None) is None or not getattr(qx, "CONNECTION_ALIVE", False):
-                    break
-                if tf_sec == 60:
-                    feed = self._qx_engine_candles(api)
-                else:
-                    feed = list(self._candles) if _viewing() else []
-                if not feed:
-                    break
-                oldest = int(feed[0]["t"])
-                if int(time.time()) - oldest >= target:
-                    break                     # بلوغ عدد الأيام المضبوط — توقف
-                prev_oldest = oldest
-                if tf_sec == 60:
-                    # دفعة الخادم الرسمية: 300 شمعة أقدم تُدمج في ذاكرة الخادم
-                    # نفسها (نفس الطريقة الأصلية — fetch_older_batch)
-                    fut = asyncio.run_coroutine_threadsafe(
-                        qx.fetch_older_batch(api, prev_oldest, qx.PAGINATION_BATCH),
+            if _stale():
+                return
+            viewing_ok = _viewing()
+            # حماية الزوم: الصفحة لا تعيد ضبط الشارت أثناء السلسلة (طلب المستخدم:
+            # الشارت لا نريده ان يتاثر اطلاقا يجب ان يبقا حر ولا يتاثر)
+            if viewing_ok:
+                self._qx_chain_set_active(True)
+            # أفق التاريخ الجديد: كل ما هو أقدم من أول شمعة على الشارت الآن
+            horizon = 0
+            try:
+                if viewing_ok and self._candles:
+                    horizon = int(self._candles[0]["t"])
+            except Exception:
+                horizon = 0
+            pushed_t = set()
+            # ═══ طلب واحد بمدى الأيام كاملاً — نفس طريقة الجلب الأصلية ═══
+            end = int(time.time())
+            fut = asyncio.run_coroutine_threadsafe(
+                qx.qx_fetch_window_raw(api, end, target + tf_sec, tf_sec,
+                                       foreground=True, timeout=60.0, retries=1),
+                qx.ASYNC_LOOP)
+            res = fut.result(timeout=90)
+            if _stale():
+                return
+            if res:
+                total_pushed += self._qx_chain_push_message(
+                    api, tf_label, tf_sec, res, horizon, pushed_t, _viewing)
+            # ═══ بقية دفعات الخادم لنفس الطلب — كل دفعة تصل تُرفع فوراً ═══
+            try:
+                er = qx.CLIENT.api.event_registry
+                quiet_until = time.time() + 2.5
+                hard_until = time.time() + 15.0
+                while time.time() < hard_until and time.time() < quiet_until:
+                    if _stale():
+                        return
+                    f2 = asyncio.run_coroutine_threadsafe(
+                        er.wait_event(f"candles_ready_{api}", timeout=2.0),
                         qx.ASYNC_LOOP)
-                    n = int(fut.result(timeout=90) or 0)
-                    if not n:
-                        break                 # نهاية تاريخ الخادم لهذه العملة
-                    feed = self._qx_engine_candles(api)
-                    batch = [c for c in feed if c["t"] < prev_oldest][-qx.PAGINATION_BATCH:]
-                    if not batch:
-                        break                 # لا تقدم فعلي — لا تكرر نفس المرساة
-                else:
-                    fut = asyncio.run_coroutine_threadsafe(
-                        qx.qx_fetch_window_raw(api, prev_oldest,
-                                               qx.PAGINATION_BATCH * tf_sec, tf_sec,
-                                               foreground=True, timeout=45.0), qx.ASYNC_LOOP)
-                    res = fut.result(timeout=60)
-                    batch = [c for c in self._qx_fmt_raw(res, tf_sec)
-                             if c["t"] < prev_oldest][-qx.PAGINATION_BATCH:]
-                    if not batch:
+                    msg = f2.result(timeout=4.0)
+                    if not msg:
                         break
-                    feed = batch + list(self._candles)
-                batches += 1
-                # رفع الدفعة إلى الشارت فوراً (طلب المستخدم: أي دفعة تجلبها ترفعها)
-                if batch and _viewing():
-                    if tf_sec == 60:
-                        self._candles = feed[-self._QX_FEED_CAP:]
+                    raw = []
+                    if isinstance(msg, dict):
+                        raw = (msg.get("candles") or msg.get("data")
+                               or msg.get("history") or [])
+                    if raw:
+                        n_new = self._qx_chain_push_message(
+                            api, tf_label, tf_sec, raw, horizon, pushed_t, _viewing)
+                        if n_new > 0:
+                            total_pushed += n_new
+                            quiet_until = time.time() + 2.5
                     else:
-                        seen_t = set()
-                        merged = []
-                        for c in sorted(feed, key=lambda x: x["t"]):
-                            if c["t"] not in seen_t:
-                                seen_t.add(c["t"])
-                                merged.append(c)
-                        self._candles = merged[-self._QX_FEED_CAP:]
-                    self._qx_last_sig = None
-                    # دمج سلس في الصفحة (prepend بلا إعادة ضبط ولا قفزة)
-                    self._emit_qx({"type": "older", "candles": batch,
-                                   "asset": self._asset, "tf": tf_label})
-                    self.candlesChanged.emit()
-                if batches >= max_batches:
+                        time.sleep(0.15)
+            except Exception:
+                pass
+            # ═══ تكملة المدى إن قصّ الخادم الرد الأول — نفس طريقة الجلب الأصلية
+            #     بنافذة زمنية متبقية (وليس 300 شمعة ثابتة التي كانت تعيد نفس
+            #     الدفعة الأولى). التكرار مستحيل: كل شمعة تُرفع مرة واحدة فقط
+            #     (pushed_t) والصفحة ترفض أي شمعة ليست أقدم من رأس الشارت. ═══
+            steps = 0
+            while steps < 6 and not _stale():
+                try:
+                    cur_oldest = min(pushed_t) if pushed_t else (
+                        horizon if horizon > 0 else int(time.time()))
+                except Exception:
                     break
-                time.sleep(0.25)
+                covered = int(time.time()) - int(cur_oldest)
+                if covered >= target:
+                    break                      # بلوغ عدد الأيام المضبوط — توقف
+                remaining = target - covered
+                try:
+                    fut3 = asyncio.run_coroutine_threadsafe(
+                        qx.qx_fetch_window_raw(api, cur_oldest, remaining + tf_sec,
+                                               tf_sec, foreground=True,
+                                               timeout=60.0, retries=1),
+                        qx.ASYNC_LOOP)
+                    res3 = fut3.result(timeout=90)
+                except Exception:
+                    break
+                if not res3:
+                    break                      # نهاية تاريخ الخادم لهذه العملة
+                n3 = self._qx_chain_push_message(
+                    api, tf_label, tf_sec, res3, horizon, pushed_t, _viewing)
+                if n3 <= 0:
+                    break                      # لا جديد فعلاً — لا تكرر نفس المرساة
+                total_pushed += n3
+                steps += 1
+            if _stale():
+                return
+            # ═══ سد الثغرات — الآلة الأصلية حرفياً من v10، لكل عملة تُفتح دون استثناء ═══
+            if tf_sec == 60:
+                self._qx_seal_gaps(api)
             with self._qx_chain_lock:
                 self._qx_chain_done.add(key)
-            if batches:
-                self._log("ok", f"history: +{batches} batches ({days} days target) — {self._asset if _viewing() else api} {tf_label}")
+            if total_pushed:
+                self._log("ok", f"history: +{total_pushed} candles ({days} days) — "
+                                f"{self._asset if _viewing() else api} {tf_label}")
         except Exception as e:
             self._log("err", f"history chain {tf_label}: " + str(e)[:120])
         finally:
-            with self._qx_chain_lock:
-                self._qx_chain_busy.discard(key)
+            try:
+                with self._qx_chain_lock:
+                    # القديمة تُزيل علامتها فقط — لا تلغي سلسلة أحدث لنفس المفتاح
+                    if self._qx_chain_running.get(key) == gen:
+                        self._qx_chain_running.pop(key, None)
+                    cur_api = (self._qx_symbols.get(self._asset)
+                               or self._api_from_display(self._asset))
+                    still_active = (cur_api, self._tf) in self._qx_chain_running
+                self._qx_chain_set_active(still_active)
+            except Exception:
+                self._qx_chain_set_active(False)
 
     def _qx_tail_repaired(self, engine):
         """v14.3: كشف إصلاحات آلة سد الثغرات داخل منطقة الذيل (آخر 40 شمعة).
@@ -9769,6 +9976,7 @@ ApplicationWindow {
     property int lastLen: -1
     property bool lastLoading: false      // v13.2: حالة دائرة التحميل في الشارت
     property var prependSentAt: 0         // v14.4: لحظة إرسال آخر دفعة تاريخية (فورية — بلا سباق)
+    property bool histChain: backend.histChainActive   // v14.5: سلسلة التاريخ تجري الآن — لا إعادة ضبط للشارت أثناءها
     property var filesAcc: ({})
     property var pendingExport: null      // مؤشر معلّق ينتظر إدخال معرّف المشتري (ترخيص)
 
@@ -9838,6 +10046,19 @@ ApplicationWindow {
                 && backend.candlesCount >= win.lastLen) {
             win.lastLen = backend.candlesCount
             return
+        }
+        /* v14.5 (طلب المستخدم حرفياً: «الشارت لا نريده ان يتاثر اطلاقا يجب ان
+           يبقا حر ولا يتاثر ولا نريد فقدان الشموع»): أثناء سلسلة التاريخ
+           (طلب واحد بمدى الأيام وكل دفعة تُدمج عبر prependCandles) يُمنع
+           إعادة ضبط الشارت نهائياً — الفروقات الكبيرة هنا ناتجة عن الدفعات
+           نفسها وليست خطأً. الزوم والموضع يبقيان حرين طوال السلسلة. */
+        if (win.histChain && backend.assetLabel === win.lastAsset
+                && backend.tfLabel === win.lastTf) {
+            var dchain = backend.candlesCount - win.lastLen
+            if (dchain > 60 || dchain < 0) {
+                win.lastLen = backend.candlesCount
+                return
+            }
         }
         if (backend.assetLabel !== win.lastAsset || backend.tfLabel !== win.lastTf) {
             win.syncFull()
