@@ -1,0 +1,587 @@
+  1957→                asyncio.run_coroutine_threadsafe(health_monitor(), ASYNC_LOOP)
+  1958→                asyncio.run_coroutine_threadsafe(auto_reconnect(), ASYNC_LOOP)
+  1959→                asyncio.run_coroutine_threadsafe(keepalive_loop(), ASYNC_LOOP)
+  1960→                # ===== FIX: stale watchdog loop =====
+  1961→                asyncio.run_coroutine_threadsafe(stale_message_watchdog(), ASYNC_LOOP)
+  1962→                for asset in ALL_STREAMING_ASSETS:
+  1963→                    asset.stream_task = None
+  1964→                    asset.streaming = False
+  1965→            new_loop.run_forever()
+  1966→        except Exception as e:
+  1967→            log_exception(f"AsyncEngine (gen {ASYNC_ENGINE_GENERATION})", e)
+  1968→            CONNECTION_ALIVE = False
+  1969→            time.sleep(1)
+  1970→
+  1971→async_thread = threading.Thread(target=start_async_engine, daemon=True, name="AsyncEngine")
+  1972→async_thread.start()
+  1973→_ENGINE_READY.wait(timeout=10)
+  1974→
+  1975→class Asset:
+  1976→    @staticmethod
+  1977→    def _derive_mt4_symbol(raw_symbol: str) -> str:
+  1978→        s = raw_symbol.strip()
+  1979→        is_otc = s.upper().endswith("_OTC")
+  1980→        if is_otc:
+  1981→            base = s[:-4].upper()
+  1982→            if PERIOD_SECONDS < 60:
+  1983→                # Sub-minute: compact name "AUDUSDOTC5S" (11 chars, fits 12-byte header)
+  1984→                result = f"{base}OTC{SUBSECOND_LABEL}"
+  1985→            else:
+  1986→                result = f"{base}-OTC"
+  1987→        else:
+  1988→            if PERIOD_SECONDS < 60:
+  1989→                result = f"{s.upper()}{SUBSECOND_LABEL}"
+  1990→            else:
+  1991→                result = s.upper()
+  1992→        return result[:12] if result else raw_symbol.upper()[:12]
+  1993→
+  1994→    def __init__(self, symbol):
+  1995→        self.api_symbol = symbol
+  1996→        self.symbol = self._derive_mt4_symbol(symbol)
+  1997→        self.period = PERIOD
+  1998→        self.price = 0.0
+  1999→        self.previous_price = 0.0
+  2000→        # For sub-minute: filename = {symbol}1.hst (e.g., AUDUSD-5S1.hst)
+  2001→        # symbol is "AUDUSD-5S" (compact, fits 12-byte HST header)
+  2002→        # For 60s+: filename = {symbol}{PERIOD}.hst (e.g., AUDUSD-OTC5.hst)
+  2003→        if PERIOD_SECONDS < 60:
+  2004→            self.path = os.path.join(MT4_HISTORY_PATH, f"{self.symbol}1.hst")
+  2005→        else:
+  2006→            self.path = os.path.join(MT4_HISTORY_PATH, f"{self.symbol}{PERIOD}.hst")
+  2007→        self.candles = []
+  2008→        self.last_write = 0.0
+  2009→        self.updates = 0
+  2010→        self.streaming = False
+  2011→        self.stream_task = None
+  2012→        self.last_update_time = 0
+  2013→        self.last_saved_close = 0.0
+  2014→        self.last_saved_candle_time = 0
+  2015→        self.last_saved_candle_count = 0
+  2016→        self.dirty = False
+  2017→        self._gap_filled = False
+  2018→
+  2019→    def digits(self, price: float = None) -> int:
+  2020→        # FIX J: _resolve_digits ( mt4_digits.json)
+  2021→        p = price if price is not None else self.price
+  2022→        return _resolve_digits(self.symbol, p or 0.0)
+  2023→
+  2024→    def has_new_data(self):
+  2025→        if not self.candles: return False
+  2026→        c = self.candles[-1]
+  2027→        return (c['close'] != self.last_saved_close or c['time'] != self.last_saved_candle_time or len(self.candles) != self.last_saved_candle_count)
+  2028→
+  2029→    def mark_dirty(self): self.dirty = True
+  2030→
+  2031→    def write(self, force=False):
+  2032→        # v9.0: skip HST writing entirely when WRITE_HST_FILES_ENABLED is False.
+  2033→        # The web dashboard (Flask) is the only output channel.
+  2034→        if not WRITE_HST_FILES_ENABLED:
+  2035→            return False
+  2036→        if not force and not self.has_new_data(): return False
+  2037→        temp = self.path + ".tmp"
+  2038→        # For sub-minute timeframes, write period=1 (M1) in the header so MT4 opens it
+  2039→        header_period = 1 if PERIOD_SECONDS < 60 else self.period
+  2040→        try:
+  2041→            with open(temp, 'wb') as f:
+  2042→                f.write(struct.pack('<i', 400))
+  2043→                f.write(b"(C)opyright 2003, MetaQuotes Software Corp.".ljust(64, b'\0'))
+  2044→                f.write(self.symbol.encode('ascii').ljust(12, b'\0')[:12])
+  2045→                f.write(struct.pack('<i', header_period))
+  2046→                first_price = self.candles[0]['close'] if self.candles else self.price
+  2047→                f.write(struct.pack('<i', self.digits(first_price)))
+  2048→                f.write(struct.pack('<i', int(time.time())))
+  2049→                f.write(struct.pack('<i', int(time.time())))
+  2050→                f.write(b'\0' * 52)
+  2051→                for c in self.candles:
+  2052→                    f.write(struct.pack('<i', c['time']))
+  2053→                    f.write(struct.pack('<d', c['open']))
+  2054→                    f.write(struct.pack('<d', c['low']))
+  2055→                    f.write(struct.pack('<d', c['high']))
+  2056→                    f.write(struct.pack('<d', c['close']))
+  2057→                    f.write(struct.pack('<q', int(c.get('volume', 0))))
+  2058→            # ===== FIX 4: WinError 5 (Access Denied) + WinError 32 =====
+  2059→            # WinError 32. WinError 5 (Access Denied)
+  2060→            # MT4 ( ).
+  2061→            # : retry WinError 5 + 32 + fallback.
+  2062→            def _is_lock_error(err_str):
+  2063→                err_str = err_str.lower()
+  2064→                return (
+  2065→                    "winerror 32" in err_str or
+  2066→                    "used by another process" in err_str or
+  2067→                    "winerror 5" in err_str or
+  2068→                    "access denied" in err_str or
+  2069→                    "accès refusé" in err_str or
+  2070→                    "acces refusé" in err_str or
+  2071→                    "permission" in err_str
+  2072→                )
+  2073→            replaced = False
+  2074→            for attempt in range(8):  # 8 5
+  2075→                try:
+  2076→                    os.replace(temp, self.path)
+  2077→                    replaced = True
+  2078→                    break
+  2079→                except (PermissionError, OSError) as e:
+  2080→                    err_str = str(e)
+  2081→                    if _is_lock_error(err_str):
+  2082→                        # : 50ms, 100ms, 150ms, 200ms, 250ms...
+  2083→                        time.sleep(0.05 + 0.05 * attempt)
+  2084→                        continue
+  2085→                    raise
+  2086→            if not replaced:
+  2087→                # ===== FIX 4: fallback — rename =====
+  2088→                # os.replace 8 .
+  2089→                try:
+  2090→                    with open(self.path, 'wb') as f:
+  2091→                        # (header + candles)
+  2092→                        with open(temp, 'rb') as src:
+  2093→                            f.write(src.read())
+  2094→                    replaced = True
+  2095→                except Exception as fallback_err:
+  2096→                    if not _is_lock_error(str(fallback_err)):
+  2097→                        logmsg(f"[write:{self.symbol}] fallback write failed: {fallback_err}")
+  2098→            try:
+  2099→                if os.path.exists(temp): os.remove(temp)
+  2100→            except Exception: pass
+  2101→            if replaced:
+  2102→                self.last_write = time.time()
+  2103→                if self.candles:
+  2104→                    self.last_saved_close = self.candles[-1]['close']
+  2105→                    self.last_saved_candle_time = self.candles[-1]['time']
+  2106→                    self.last_saved_candle_count = len(self.candles)
+  2107→                self.dirty = False
+  2108→                return True
+  2109→            return False
+  2110→        except Exception as e:
+  2111→            err_str = str(e).lower()
+  2112→            # ===== FIX 8: WinError 2 (file not found) + WinError 5 + 32 =====
+  2113→            # — retry .
+  2114→            if not any(x in err_str for x in [
+  2115→                'winerror 2', 'winerror 5', 'winerror 32', 'winerror 13',
+  2116→                'introuvable', 'refusé', 'access', 'permission', 'used by another',
+  2117→                'ebusy', 'eperm', 'no such file'
+  2118→            ]):
+  2119→                logmsg(f"[write:{self.symbol}] write failed: {e}")
+  2120→            try:
+  2121→                if os.path.exists(temp): os.remove(temp)
+  2122→            except Exception: pass
+  2123→            return False
+  2124→
+  2125→class WriterThread(threading.Thread):
+  2126→    """FIX 11: WriterThread — HST 500ms Asset.write.
+  2127→ 
+  2128→ : (1000 4s).
+  2129→ :
+  2130→ - fetch_candles_with_retry (1000 )
+  2131→ - Asset.write HST {derived_symbol}{PERIOD}.hst (AUDJPY-OTC1.hst)
+  2132→ - WriterThread asset.dirty 100ms + HST 500ms
+  2133→ 
+  2134→ FIX 10 ( ) realtime_stream MT4_WRITER.update_candle.
+  2135→ Asset.write WriterThread MT4_WRITER
+  2136→ .
+  2137→ """
+  2138→    def __init__(self):
+  2139→        super().__init__(daemon=True, name="WriterThread")
+  2140→        self.running = True
+  2141→    def run(self):
+  2142→        while self.running:
+  2143→            try:
+  2144→                now = time.time()
+  2145→                dirty_count = 0
+  2146→                for asset in ALL_STREAMING_ASSETS:
+  2147→                    # ===== FIX 11: MT4_WRITER =====
+  2148→                    # ( — )
+  2149→                    if asset.symbol in MT4_WRITER.sync_state:
+  2150→                        # Still update web store even for MT4_WRITER-managed assets
+  2151→                        try:
+  2152→                            _web_update_asset(asset, full_resync=True)
+  2153→                        except Exception:
+  2154→                            pass
+  2155→                        continue
+  2156→                    if asset.dirty and (now - asset.last_write >= WRITE_INTERVAL):
+  2157→                        if asset.write():
+  2158→                            dirty_count += 1
+  2159→                            # Update web dashboard candle store
+  2160→                            try:
+  2161→                                _web_update_asset(asset, full_resync=True)
+  2162→                            except Exception:
+  2163→                                pass
+  2164→                if dirty_count > 0: refresh_mt4()
+  2165→                time.sleep(0.1)
+  2166→            except Exception as e:
+  2167→                logmsg(f"[WriterThread] loop error: {e}")
+  2168→                time.sleep(0.5)
+  2169→
+  2170→writer_thread = WriterThread()
+  2171→writer_thread.start()
+  2172→
+  2173→async def connect_quotex(email, password, force_fresh=False, max_attempts=3):
+  2174→    global CLIENT, CONNECTION_ALIVE, EMAIL, PASSWORD
+  2175→    EMAIL, PASSWORD = email, password
+  2176→    for attempt in range(1, max_attempts + 1):
+  2177→        try:
+  2178→            if CLIENT:
+  2179→                try:
+  2180→                    close_task = asyncio.create_task(CLIENT.close())
+  2181→                    await asyncio.wait([close_task], timeout=3.0)
+  2182→                except Exception: pass
+  2183→                finally: CLIENT = None
+  2184→            await asyncio.sleep(0.3)
+  2185→            if force_fresh or attempt > 1:
+  2186→                session_manager.delete_session_file()
+  2187→                session_manager.delete_browser_dir()
+  2188→            # FIX K: QX_HOST ( )
+  2189→            CLIENT = Quotex(email=email, password=password, host=QX_HOST, lang="en")
+  2190→            with suppress_terminal_output():
+  2191→                check, reason = await CLIENT.connect()
+  2192→            if check:
+  2193→                try:
+  2194→                    await CLIENT.change_account("PRACTICE")
+  2195→                    await asyncio.sleep(0.5)
+  2196→                except Exception: pass
+  2197→                try: await CLIENT.get_all_assets()
+  2198→                except Exception: pass
+  2199→                CONNECTION_ALIVE = True
+  2200→                # FIX K:
+  2201→                session_manager.record_success(email, host=QX_HOST)
+  2202→                return True
+  2203→            else:
+  2204→                error_msg = str(reason) if reason else "Unknown error"
+  2205→                session_manager.record_failure(error_msg)
+  2206→        except Exception as e:
+  2207→            error_msg = str(e)[:200]
+  2208→            session_manager.record_failure(error_msg)
+  2209→            if attempt < max_attempts: await asyncio.sleep(5 * attempt)
+  2210→    CONNECTION_ALIVE = False
+  2211→    return False
+  2212→
+  2213→async def keepalive_loop():
+  2214→    # ===== FIX 7: keepalive (5s) + =====
+  2215→    # : " ".
+  2216→    # : keepalive_loop
+  2217→    # `await asyncio.sleep(KEEPALIVE_PING_INTERVAL)` .
+  2218→    # : `asyncio.sleep` (0.5s) .
+  2219→    # keepalive .
+  2220→    tick_count = 0
+  2221→    last_ping_at = 0.0
+  2222→    while True:
+  2223→        await asyncio.sleep(0.5)  # 500ms ()
+  2224→        now = time.time()
+  2225→        # : ping
+  2226→        if now - last_ping_at < KEEPALIVE_PING_INTERVAL:
+  2227→            continue
+  2228→        last_ping_at = now
+  2229→        if not CONNECTION_ALIVE or CLIENT is None or CLIENT.api is None: continue
+  2230→        try:
+  2231→            # 1) engine.io ping ( Socket.IO EIO=3) —
+  2232→            CLIENT.api.send_websocket_request("2", no_force_send=False)
+  2233→            # 2) application-level tick —
+  2234→            CLIENT.api.send_websocket_request('42["tick"]', no_force_send=False)
+  2235→            # 3)
+  2236→            if tick_count % 3 == 0:
+  2237→                CLIENT.api.send_websocket_request('42["instruments/get"]', no_force_send=False)
+  2238→            tick_count += 1
+  2239→        except Exception:
+  2240→            pass
+  2241→
+  2242→
+  2243→async def stale_message_watchdog():
+  2244→    # ===== FIX: watchdog + =====
+  2245→    # WS STALE_MESSAGE_TIMEOUT (45s)
+  2246→    # .
+  2247→    # latency ~25s <5s.
+  2248→    # FIX B: auto_reconnect
+  2249→    # (> ) —
+  2250→    # .
+  2251→    global CONNECTION_ALIVE, LAST_CONNECTION_DROP_TIME
+  2252→    while True:
+  2253→        await asyncio.sleep(STALE_WATCHDOG_INTERVAL)
+  2254→        if not CONNECTION_ALIVE or CLIENT is None or CLIENT.api is None:
+  2255→            continue
+  2256→        try:
+  2257→            silent_for = time.time() - CLIENT.api.last_message_at
+  2258→            if silent_for > STALE_MESSAGE_TIMEOUT:
+  2259→                logmsg(
+  2260→                    f"[stale_watchdog] no messages for {silent_for:.1f}s "
+  2261→                    f"(>{STALE_MESSAGE_TIMEOUT}s); recycling connection."
+  2262→                )
+  2263→                # ===== FIX B: =====
+  2264→                # LONG_DISCONNECT_THRESHOLD (1h)
+  2265→                # .
+  2266→                if LAST_CONNECTION_DROP_TIME == 0:
+  2267→                    LAST_CONNECTION_DROP_TIME = time.time()
+  2268→                    logmsg(f"[stale_watchdog] drop time recorded at {LAST_CONNECTION_DROP_TIME:.0f}")
+  2269→                CONNECTION_ALIVE = False
+  2270→                # WS close frame on_close
+  2271→                try:
+  2272→                    if CLIENT.api.websocket_client and CLIENT.api.websocket_client.wss:
+  2273→                        CLIENT.api.websocket_client.wss.close()
+  2274→                except Exception:
+  2275→                    pass
+  2276→                # auto_reconnect
+  2277→        except Exception as e:
+  2278→            logmsg(f"[stale_watchdog] error: {e}")
+  2279→
+  2280→async def health_monitor():
+  2281→    global LAST_HEALTH_CHECK, CONNECTION_ALIVE
+  2282→    consecutive_dead_checks = 0
+  2283→    while True:
+  2284→        await asyncio.sleep(HEALTH_CHECK_INTERVAL)
+  2285→        now = time.time()
+  2286→        LAST_HEALTH_CHECK = now
+  2287→        if not CONNECTION_ALIVE or CLIENT is None:
+  2288→            consecutive_dead_checks = 0
+  2289→            continue
+  2290→        is_dead = False
+  2291→        dead_reason = ""
+  2292→        stale_count = sum(1 for a in ALL_STREAMING_ASSETS if a.updates > 0 and (now - a.last_update_time) > STALE_DATA_TIMEOUT)
+  2293→        if stale_count > len(ALL_STREAMING_ASSETS) * STALE_RATIO_TRIGGER:
+  2294→            is_dead = True
+  2295→            dead_reason = f"stale ratio {stale_count}/{len(ALL_STREAMING_ASSETS)} exceeded {STALE_RATIO_TRIGGER}"
+  2296→        if is_dead:
+  2297→            logmsg(f"[health_monitor] marking connection DEAD: {dead_reason}")
+  2298→            CONNECTION_ALIVE = False
+  2299→            consecutive_dead_checks = 0
+  2300→
+  2301→async def auto_reconnect():
+  2302→    # ===== FIX B: + =====
+  2303→    # : " ".
+  2304→    # ( stale_message_watchdog )
+  2305→    # LONG_DISCONNECT_THRESHOLD (1h).
+  2306→    # 1000 .
+  2307→    # FIX K: QX_HOST
+  2308→    global CLIENT, CONNECTION_ALIVE, RECONNECTING, LAST_CONNECTION_DROP_TIME, QX_HOST
+  2309→    consecutive_failures = 0
+  2310→    while True:
+  2311→        await asyncio.sleep(RECONNECT_CHECK_INTERVAL)
+  2312→        # ===== FIX B: ( ) =====
+  2313→        # stale_message_watchdog
+  2314→        # (on_close on_error connect_quotex ).
+  2315→        # .
+  2316→        if not CONNECTION_ALIVE and LAST_CONNECTION_DROP_TIME == 0:
+  2317→            LAST_CONNECTION_DROP_TIME = time.time()
+  2318→            logmsg(f"[reconnect] connection loss detected at {LAST_CONNECTION_DROP_TIME:.0f}; "
+  2319→                   f"will re-fetch all candles if outage exceeds {LONG_DISCONNECT_THRESHOLD}s")
+  2320→        if CONNECTION_ALIVE or RECONNECTING:
+  2321→            consecutive_failures = 0
+  2322→            continue
+  2323→        RECONNECTING = True
+  2324→        try:
+  2325→            email = session_manager.get_saved_email()
+  2326→            # ===== FIX: try RECONNECTING =====
+  2327→            # : `if not (email and PASSWORD): continue`
+  2328→            # => try RECONNECTING = True =>
+  2329→            # => !
+  2330→            if not (email and PASSWORD):
+  2331→                # RECONNECTING
+  2332→                RECONNECTING = False
+  2333→                continue
+  2334→            delay = 0 if consecutive_failures == 0 else min(RECONNECT_BASE_DELAY * (2 ** (consecutive_failures - 1)), RECONNECT_MAX_DELAY)
+  2335→            if delay > 0:
+  2336→                logmsg(f"[reconnect] connection lost, retrying in {delay:.0f}s...")
+  2337→                await asyncio.sleep(delay)
+  2338→            else:
+  2339→                logmsg("[reconnect] connection lost, reconnecting immediately...")
+  2340→            # FIX K:
+  2341→            _saved_host = session_manager.get_saved_host()
+  2342→            if _saved_host and QX_HOST != _saved_host:
+  2343→                QX_HOST = _saved_host
+  2344→                logmsg(f"[reconnect] using saved host: {QX_HOST}")
+  2345→            success = await connect_quotex(email, PASSWORD, force_fresh=True, max_attempts=1)
+  2346→            if success:
+  2347→                logmsg("[reconnect] reconnect successful, restarting streams...")
+  2348→                consecutive_failures = 0
+  2349→                # ===== FIX 7: auto-throttle ( ) =====
+  2350→                # ===== FIX: last_message_at =====
+  2351→                # stale_watchdog .
+  2352→                if CLIENT is not None and CLIENT.api is not None:
+  2353→                    CLIENT.api.last_message_at = time.time()
+  2354→                # ===== FIX B: =====
+  2355→                drop_duration = 0.0
+  2356→                should_refetch_all = False
+  2357→                if LAST_CONNECTION_DROP_TIME > 0:
+  2358→                    drop_duration = time.time() - LAST_CONNECTION_DROP_TIME
+  2359→                    if drop_duration > LONG_DISCONNECT_THRESHOLD:
+  2360→                        should_refetch_all = True
+  2361→                        logmsg(
+  2362→                            f"[reconnect] LONG disconnect detected: {drop_duration/60:.1f} min "
+  2363→                            f"> {LONG_DISCONNECT_THRESHOLD/60:.0f} min threshold — "
+  2364→                            f"will re-fetch ALL candles from scratch"
+  2365→                        )
+  2366→
+  2367→                LAST_CONNECTION_DROP_TIME = 0
+  2368→                if should_refetch_all:
+  2369→                    # streams
+  2370→                    try:
+  2371→                        asyncio.run_coroutine_threadsafe(refetch_all_candles(), ASYNC_LOOP)
+  2372→                    except Exception as e:
+  2373→                        logmsg(f"[reconnect] failed to schedule full re-fetch: {e}")
+  2374→                        # fallback: streams
+  2375→                        for asset in ALL_STREAMING_ASSETS:
+  2376→                            try:
+  2377→                                if asset.stream_task and not asset.stream_task.done():
+  2378→                                    asset.stream_task.cancel()
+  2379→                                asset.streaming = False
+  2380→                                asset.stream_task = asyncio.run_coroutine_threadsafe(subsecond_stream(asset) if IS_SUBSECOND else realtime_stream(asset), ASYNC_LOOP)
+  2381→                                await asyncio.sleep(0.05)
+  2382→                            except Exception as e2:
+  2383→                                logmsg(f"[reconnect] failed to restart stream for {asset.symbol}: {e2}")
+  2384→                else:
+  2385→                    # (< ) — streams
+  2386→                    if drop_duration > 0:
+  2387→                        logmsg(f"[reconnect] short disconnect ({drop_duration:.1f}s) — restarting streams only")
+  2388→                    for asset in ALL_STREAMING_ASSETS:
+  2389→                        try:
+  2390→                            if asset.stream_task and not asset.stream_task.done():
+  2391→                                asset.stream_task.cancel()
+  2392→                            asset.streaming = False
+  2393→                            asset.stream_task = asyncio.run_coroutine_threadsafe(subsecond_stream(asset) if IS_SUBSECOND else realtime_stream(asset), ASYNC_LOOP)
+  2394→                            await asyncio.sleep(0.05)
+  2395→                        except Exception as e:
+  2396→                            logmsg(f"[reconnect] failed to restart stream for {asset.symbol}: {e}")
+  2397→            else:
+  2398→                consecutive_failures += 1
+  2399→        except Exception as e:
+  2400→            logmsg(f"[reconnect] unexpected error: {e}")
+  2401→            consecutive_failures += 1
+  2402→        finally:
+  2403→            RECONNECTING = False
+  2404→
+  2405→def _make_progress_printer(symbol: str, start_ts: float, idx: int, total: int):
+  2406→    display = pretty_asset_name(symbol)
+  2407→    def on_progress(current, total, label=None, worker_label=None):
+  2408→        total = total or FETCH_DURATION_SECONDS
+  2409→        pct = min(current / total, 1.0) if total > 0 else 0
+  2410→        bar_len = 20
+  2411→        filled = int(bar_len * pct)
+  2412→        bar = "#" * filled + "-" * (bar_len - filled)
+  2413→        elapsed = time.time() - start_ts
+  2414→        print(f"\r  {display:<25} [{bar}] {pct*100:4.1f}% {elapsed:>2.0f}s", end="", flush=True)
+  2415→    return on_progress
+  2416→
+  2417→async def fetch_candles_once(asset: Asset, idx=1, total=1):
+  2418→    api_name = asset.api_symbol
+  2419→    display_name = asset.symbol
+  2420→    candles = []
+  2421→    # Sub-minute timeframes: fetch period=1 (1s candles) then aggregate locally
+  2422→    is_sub_minute = PERIOD_SECONDS < 60
+  2423→    fetch_period = 1 if is_sub_minute else PERIOD_SECONDS
+  2424→    if is_sub_minute:
+  2425→        # Use get_candles (single request) — more reliable for period=1
+  2426→        # Make staggered requests going backwards in time
+  2427→        try:
+  2428→            on_progress = _make_progress_printer(display_name, time.time(), idx, total)
+  2429→            try: on_progress(FETCH_DURATION_SECONDS, FETCH_DURATION_SECONDS)
+  2430→            except Exception: pass
+  2431→            # الهدف: نحاول جلب ما يكفي لـ INITIAL_CANDLES شموع مجمّعة
+  2432→            # INITIAL_CANDLES * PERIOD_SECONDS = عدد شموع 1s المطلوبة
+  2433→            # هامش 1.5x (بدل 2x) لتقليل وقت الجلب وبالتالي تقليل الفجوة الزمنية
+  2434→            # الفجوة الكبيرة = شموع مفقودة أكثر بين التاريخي والبث المباشر
+  2435→            target_1s_count = int(INITIAL_CANDLES * PERIOD_SECONDS * 1.5)
+  2436→            chunk_seconds = 500  # ~500 1s candles per request (server limit)
+  2437→            all_candles_1s = []
+  2438→            current_end = time.time()
+  2439→            # زيادة max_chunks من 20 → 40 لضمان جلب كافٍ حتى للأصول البطيئة
+  2440→            max_chunks = 40
+  2441→            chunks_done = 0
+  2442→            # تتبع الـ chunks الفارغة المتتالية (للإيقاف المبكر الذكي)
+  2443→            empty_chunks_in_a_row = 0
+  2444→            while len(all_candles_1s) < target_1s_count and chunks_done < max_chunks:
+  2445→                chunk_end = current_end - (chunks_done * chunk_seconds)
+  2446→                try:
+  2447→                    res_chunk = await asyncio.wait_for(
+  2448→                        CLIENT.get_candles(api_name, chunk_end, chunk_seconds, fetch_period),
+  2449→                        timeout=20,
+  2450→                    )
+  2451→                except Exception as e:
+  2452→                    if chunks_done == 0:
+  2453→                        logmsg(f"[fetch:{display_name}] get_candles(period=1) chunk {chunks_done+1} failed: {e}")
+  2454→                    # retry once on transient error
+  2455→                    if empty_chunks_in_a_row < 2:
+  2456→                        empty_chunks_in_a_row += 1
+  2457→                        await asyncio.sleep(0.2)
+  2458→                        continue
+  2459→                    break
+  2460→                if not res_chunk or len(res_chunk) == 0:
+  2461→                    empty_chunks_in_a_row += 1
+  2462→                    # 3 chunks فارغة متتالية = نهاية التاريخ المتاح → توقف
+  2463→                    if empty_chunks_in_a_row >= 3:
+  2464→                        break
+  2465→                    chunks_done += 1
+  2466→                    continue
+  2467→                # عتبة إيقاف أقل صرامة (من 50 → 10): بعض الأصول تُرجع 20-30 شمعة فقط في نهاية الأسبوع
+  2468→                # هذا طبيعي ولا يعني أننا وصلنا لنهاية التاريخ
+  2469→                if len(res_chunk) < 10 and chunks_done > 0:
+  2470→                    all_candles_1s.extend(res_chunk)
+  2471→                    break
+  2472→                empty_chunks_in_a_row = 0
+  2473→                all_candles_1s.extend(res_chunk)
+  2474→                chunks_done += 1
+  2475→                try:
+  2476→                    pct = min(len(all_candles_1s) / target_1s_count, 1.0)
+  2477→                    on_progress(pct * FETCH_DURATION_SECONDS, FETCH_DURATION_SECONDS)
+  2478→                except Exception:
+  2479→                    pass
+  2480→                # delay صغير (0.03 بدل 0.05) لتسريع الجلب
+  2481→                await asyncio.sleep(0.03)
+  2482→            # De-duplicate by time
+  2483→            seen_ts = set()
+  2484→            unique_1s = []
+  2485→            for c in all_candles_1s:
+  2486→                if isinstance(c, dict):
+  2487→                    ts = int(float(c.get('time', c.get('timestamp', 0))))
+  2488→                    if ts not in seen_ts:
+  2489→                        seen_ts.add(ts)
+  2490→                        unique_1s.append(c)
+  2491→            candles = unique_1s
+  2492→            # No log message here — fetch_candles_with_retry prints the final count
+  2493→        except Exception as e:
+  2494→            print()
+  2495→            logmsg(f"[fetch:{display_name}] get_candles(period=1) failed: {e}")
+  2496→    else:
+  2497→        # 60s+ timeframe — use parallel get_historical_candles
+  2498→        if hasattr(CLIENT, 'get_historical_candles'):
+  2499→            try:
+  2500→                on_progress = _make_progress_printer(display_name, time.time(), idx, total)
+  2501→                res = await asyncio.wait_for(
+  2502→                    CLIENT.get_historical_candles(
+  2503→                        api_name,
+  2504→                        amount_of_seconds=FETCH_DURATION_SECONDS,
+  2505→                        period=PERIOD_SECONDS,
+  2506→                        max_workers=FETCH_MAX_WORKERS,
+  2507→                        progress_callback=on_progress
+  2508→                    ),
+  2509→                    timeout=60,
+  2510→                )
+  2511→                if res and len(res) > 0: candles = res
+  2512→            except Exception as e:
+  2513→                print()
+  2514→                logmsg(f"[fetch:{display_name}] get_historical_candles failed: {e}")
+  2515→    if candles:
+  2516→        formatted = []
+  2517→        for c in candles:
+  2518→            if not isinstance(c, dict): continue
+  2519→            try:
+  2520→                ts = int(float(c.get("time", c.get("timestamp", 0))))
+  2521→                # Align to fetch_period (1s for sub-minute, PERIOD_SECONDS otherwise)
+  2522→                aligned = _align_time(ts, period_seconds=fetch_period)
+  2523→                o, h, l, cl = float(c.get("open", 0)), float(c.get("high", c.get("max", 0))), float(c.get("low", c.get("min", 0))), float(c.get("close", 0))
+  2524→                if o > 0 and h > 0 and l > 0 and cl > 0:
+  2525→                    formatted.append({'time': aligned, 'open': o, 'high': h, 'low': l, 'close': cl, 'volume': random.randint(50, 200)})
+  2526→            except Exception: continue
+  2527→        # Aggregate 1s candles into target subsecond timeframe
+  2528→        if is_sub_minute and formatted:
+  2529→            formatted = _aggregate_sub_minute(formatted, PERIOD_SECONDS)
+  2530→        seen, unique = set(), []
+  2531→        for c in formatted:
+  2532→            if c['time'] not in seen:
+  2533→                seen.add(c['time'])
+  2534→                unique.append(c)
+  2535→        unique.sort(key=lambda x: x['time'])
+  2536→        return unique[-INITIAL_CANDLES:]
+  2537→    return []
+  2538→
+  2539→
+  2540→# ==============================================================================
+  2541→# ===== BRIDGE FETCH HELPER (سد فجوة الشموع الأخيرة بين التاريخي والبث) =====
+
+[showing lines 1957-2541 of 6137; use offset=2542 with limit to continue reading]

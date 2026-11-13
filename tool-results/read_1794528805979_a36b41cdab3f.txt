@@ -1,0 +1,1602 @@
+     1→#!/usr/bin/env python3
+     2→# -*- coding: utf-8 -*-
+     3→
+     4→import os
+     5→import sys
+     6→import ssl
+     7→import json
+     8→import time
+     9→import math
+    10→import struct
+    11→import logging
+    12→import asyncio
+    13→import calendar
+    14→import platform
+    15→import random
+    16→import re
+    17→import shutil
+    18→import threading
+    19→import traceback
+    20→import itertools
+    21→import configparser
+    22→import contextlib
+    23→from pathlib import Path
+    24→from datetime import datetime, timedelta
+    25→from collections import OrderedDict, defaultdict
+    26→from dataclasses import dataclass, field
+    27→from enum import IntEnum
+    28→from typing import Any, Awaitable, Callable, Dict, Generic, Hashable, List, Literal, Mapping, Optional, Tuple, TypeVar
+    29→
+    30→import certifi
+    31→import requests
+    32→import websocket
+    33→from requests import Session
+    34→from requests.adapters import HTTPAdapter
+    35→from urllib3.util.retry import Retry
+    36→from bs4 import BeautifulSoup
+    37→from bs4.element import AttributeValueList
+    38→from fake_useragent import UserAgent
+    39→
+    40→try:
+    41→    import orjson as _orjson
+    42→    HAS_ORJSON = True
+    43→except ImportError:
+    44→    _orjson = None
+    45→    HAS_ORJSON = False
+    46→
+    47→# ==============================================================================
+    48→# WEB SERVER IMPORTS (Flask-based live chart dashboard)
+    49→# ==============================================================================
+    50→try:
+    51→    from flask import Flask, request as flask_request, Response, jsonify
+    52→    HAS_FLASK = True
+    53→except ImportError:
+    54→    HAS_FLASK = False
+    55→
+    56→# ==============================================================================
+    57→# SECTION 1: LOGGING & SSL SETUP
+    58→# ==============================================================================
+    59→def _prepare_logging():
+    60→    logger = logging.getLogger(__name__)
+    61→    logger.addHandler(logging.NullHandler())
+    62→    websocket_logger = logging.getLogger("websocket")
+    63→    websocket_logger.setLevel(logging.INFO)
+    64→    websocket_logger.addHandler(logging.NullHandler())
+    65→
+    66→_prepare_logging()
+    67→logger = logging.getLogger(__name__)
+    68→
+    69→cert_path = certifi.where()
+    70→os.environ['SSL_CERT_FILE'] = cert_path
+    71→os.environ['WEBSOCKET_CLIENT_CA_BUNDLE'] = cert_path
+    72→cacert = os.environ.get('WEBSOCKET_CLIENT_CA_BUNDLE')
+    73→
+    74→ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    75→ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
+    76→ssl_context.load_verify_locations(cert_path)
+    77→
+    78→
+    79→# ==============================================================================
+    80→# SECTION 1.5: EVENT-DRIVEN WAIT PRIMITIVES (replaces asyncio.sleep polling)
+    81→# ==============================================================================
+    82→# pyquotex._api._waits — " " .
+    83→# polling timeout asyncio.sleep
+    84→# asyncio.Event .
+    85→
+    86→async def wait_until(predicate: Callable[[], bool], *, timeout: float = 10.0,
+    87→                      poll_interval: float = 0.05) -> None:
+    88→    """ predicate() poll_interval True timeout.
+    89→
+    90→ asyncio.TimeoutError . :
+    91→ while not condition:
+    92→ await asyncio.sleep(X)
+    93→ latency X poll_interval (50ms ).
+    94→ """
+    95→    async def _loop():
+    96→        while not predicate():
+    97→            await asyncio.sleep(poll_interval)
+    98→    await asyncio.wait_for(_loop(), timeout=timeout)
+    99→
+   100→
+   101→async def wait_for_first_event(*events: asyncio.Event, timeout: float = 10.0) -> int:
+   102→    """ event index. TimeoutError .
+   103→
+   104→ :
+   105→ for _ in range(100):
+   106→ if cond_a: return A
+   107→ if cond_b: return B
+   108→ await asyncio.sleep(0.1)
+   109→ """
+   110→    if not events:
+   111→        raise ValueError("wait_for_first_event requires at least one event")
+   112→    tasks = [asyncio.ensure_future(e.wait()) for e in events]
+   113→    try:
+   114→        done, pending = await asyncio.wait(tasks, timeout=timeout,
+   115→                                           return_when=asyncio.FIRST_COMPLETED)
+   116→        for t in pending:
+   117→            t.cancel()
+   118→        for i, t in enumerate(tasks):
+   119→            if t in done and t.result() and not t.cancelled():
+   120→                return i
+   121→        # timeout
+   122→        raise asyncio.TimeoutError()
+   123→    except asyncio.CancelledError:
+   124→        for t in tasks:
+   125→            if not t.done():
+   126→                t.cancel()
+   127→        raise
+   128→
+   129→
+   130→def _schedule_event_set(event: Optional[asyncio.Event],
+   131→                        loop: Optional[asyncio.AbstractEventLoop]) -> None:
+   132→    """ asyncio.Event thread ( websocket thread).
+   133→
+   134→ run_coroutine_threadsafe coroutine 
+   135→ callback loop thread-safe loop.call_soon_threadsafe.
+   136→ """
+   137→    if event is None or loop is None:
+   138→        return
+   139→    try:
+   140→        if not loop.is_closed() and loop.is_running():
+   141→            loop.call_soon_threadsafe(event.set)
+   142→    except RuntimeError:
+   143→        # loop —
+   144→        pass
+   145→
+   146→
+   147→# ==============================================================================
+   148→# SECTION 2: CONSTANTS & SESSION
+   149→# ==============================================================================
+   150→USER_AGENT = "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/119.0"
+   151→base_dir = Path.cwd()
+   152→session_lock = threading.Lock()
+   153→
+   154→def resource_path(relative_path: str) -> Path:
+   155→    global base_dir
+   156→    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+   157→        base_dir = Path(sys._MEIPASS)
+   158→    return base_dir / relative_path
+   159→
+   160→def load_session(email: str, user_agent: str = None) -> dict:
+   161→    if user_agent is None:
+   162→        try: user_agent = UserAgent().random
+   163→        except Exception: user_agent = USER_AGENT
+   164→    output_file = Path(resource_path("session.json"))
+   165→    with session_lock:
+   166→        all_sessions = {}
+   167→        if output_file.exists():
+   168→            try: all_sessions = json.loads(output_file.read_text())
+   169→            except json.JSONDecodeError: pass
+   170→        else:
+   171→            output_file.parent.mkdir(exist_ok=True, parents=True)
+   172→        if email not in all_sessions:
+   173→            all_sessions[email] = {"cookies": None, "token": None, "user_agent": user_agent}
+   174→        output_file.write_text(json.dumps(all_sessions, indent=4))
+   175→        return all_sessions.get(email)
+   176→
+   177→def update_session(email: str, d: dict) -> dict:
+   178→    output_file = Path(resource_path("session.json"))
+   179→    with session_lock:
+   180→        current_sessions = {}
+   181→        if output_file.exists():
+   182→            try: current_sessions = json.loads(output_file.read_text())
+   183→            except json.JSONDecodeError: pass
+   184→        else:
+   185→            output_file.parent.mkdir(exist_ok=True, parents=True)
+   186→        current_sessions[email] = d
+   187→        output_file.write_text(json.dumps(current_sessions, indent=4))
+   188→        return current_sessions.get(email)
+   189→
+   190→# ==============================================================================
+   191→# SECTION 3: HTTP NAVIGATOR (PROVEN WORKING METHOD)
+   192→# ==============================================================================
+   193→retry_strategy = Retry(
+   194→    total=3, backoff_factor=1,
+   195→    status_forcelist=[429, 500, 502, 503, 504, 104],
+   196→    allowed_methods=["HEAD", "POST", "PUT", "GET", "OPTIONS"],
+   197→)
+   198→
+   199→class CipherSuiteAdapter(HTTPAdapter):
+   200→    __attrs__ = ['ssl_context', 'max_retries', 'config', '_pool_connections', '_pool_maxsize', '_pool_block', 'source_address']
+   201→    def __init__(self, *args, **kwargs):
+   202→        self.ssl_context = kwargs.pop('ssl_context', None)
+   203→        self.cipherSuite = kwargs.pop('cipherSuite', 'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384')
+   204→        self.source_address = kwargs.pop('source_address', None)
+   205→        self.server_hostname = kwargs.pop('server_hostname', None)
+   206→        self.ecdhCurve = kwargs.pop('ecdhCurve', 'prime256v1')
+   207→        if not self.ssl_context:
+   208→            self.ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+   209→            self.ssl_context.orig_wrap_socket = self.ssl_context.wrap_socket
+   210→            self.ssl_context.wrap_socket = self.wrap_socket
+   211→        if self.server_hostname:
+   212→            self.ssl_context.server_hostname = self.server_hostname
+   213→        if self.cipherSuite:
+   214→            self.ssl_context.set_ciphers(self.cipherSuite)
+   215→            self.ssl_context.set_ecdh_curve(self.ecdhCurve)
+   216→            self.ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
+   217→            self.ssl_context.maximum_version = ssl.TLSVersion.TLSv1_3
+   218→        super().__init__(**kwargs)
+   219→
+   220→    def wrap_socket(self, *args, **kwargs):
+   221→        if hasattr(self.ssl_context, 'server_hostname') and self.ssl_context.server_hostname:
+   222→            kwargs['server_hostname'] = self.ssl_context.server_hostname
+   223→            self.ssl_context.check_hostname = False
+   224→        else:
+   225→            self.ssl_context.check_hostname = True
+   226→        return self.ssl_context.orig_wrap_socket(*args, **kwargs)
+   227→
+   228→    def init_poolmanager(self, *args, **kwargs):
+   229→        kwargs['ssl_context'] = self.ssl_context
+   230→        kwargs['source_address'] = self.source_address
+   231→        return super().init_poolmanager(*args, **kwargs)
+   232→
+   233→class Browser(Session):
+   234→    def __init__(self, *args, **kwargs):
+   235→        self.response = None
+   236→        self.default_headers = None
+   237→        self.ecdhCurve = kwargs.pop('ecdhCurve', 'prime256v1')
+   238→        self.cipherSuite = kwargs.pop('cipherSuite', 'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384')
+   239→        self.source_address = kwargs.pop('source_address', None)
+   240→        self.server_hostname = kwargs.pop('server_hostname', None)
+   241→        self.proxies = kwargs.pop('proxies', None)
+   242→        super().__init__(*args, **kwargs)
+   243→        self.headers.update(self.get_headers())
+   244→        self.mount('https://', CipherSuiteAdapter(ecdhCurve=self.ecdhCurve, cipherSuite=self.cipherSuite, server_hostname=self.server_hostname, source_address=self.source_address, ssl_context=ssl_context, max_retries=retry_strategy))
+   245→
+   246→    def __enter__(self): return self
+   247→    def __exit__(self, exc_type, exc_val, exc_tb): self.close()
+   248→    async def __aenter__(self): return self
+   249→    async def __aexit__(self, exc_type, exc_val, exc_tb): self.__exit__(exc_type, exc_val, exc_tb)
+   250→
+   251→    def get_headers(self):
+   252→        self.default_headers = {"User-Agent": USER_AGENT}
+   253→        return self.default_headers
+   254→
+   255→    def set_headers(self, headers=None):
+   256→        self.headers.update(self.default_headers)
+   257→        if headers: self.headers.update(headers)
+   258→
+   259→    def get_cookies(self):
+   260→        return '; '.join(f'{i.name}={i.value}' for i in self.cookies)
+   261→
+   262→    def get_soup(self):
+   263→        if self.response and not self.response.ok: raise RuntimeError(self.response.reason)
+   264→        return BeautifulSoup(self.response.content, "html.parser")
+   265→
+   266→    def send_request(self, method, url, headers=None, **kwargs):
+   267→        merged_headers = self.headers.copy()
+   268→        if headers: merged_headers.update(headers)
+   269→        if self.proxies: kwargs['proxies'] = self.proxies
+   270→        self.response = self.request(method, url, headers=merged_headers, **kwargs)
+   271→        return self.response
+   272→
+   273→# ==============================================================================
+   274→# SECTION 4: HTTP LOGIN & SETTINGS
+   275→# ==============================================================================
+   276→class Login(Browser):
+   277→    url = ""
+   278→    cookies = None
+   279→    ssid = None
+   280→    # FALLBACK default only - real value is set per-instance from api.host
+   281→    base_url = 'qxbroker.com'
+   282→    https_base_url = f'https://{base_url}'
+   283→
+   284→    def __init__(self, api, *args, **kwargs):
+   285→        super().__init__(*args, **kwargs)
+   286→        self.api = api
+   287→        # ---- DYNAMIC DOMAIN: follow the user-selected host -----------------
+   288→        # All HTTP login traffic now goes to the SAME domain that the WebSocket
+   289→        # will later connect to via ws2.<host>, so cookies/token stay valid.
+   290→        if not getattr(api, 'host', None):
+   291→            pass  # keep the hard-coded fallback
+   292→        else:
+   293→            self.base_url = api.host
+   294→            self.https_base_url = f'https://{self.base_url}'
+   295→        self.headers = self.get_headers()
+   296→        self.full_url = f"{self.https_base_url}/{api.lang}"
+   297→
+   298→    def get_token(self):
+   299→        self.headers["Connection"] = "keep-alive"
+   300→        self.headers["Accept-Encoding"] = "gzip, deflate, br"
+   301→        self.headers["Accept-Language"] = "pt-BR,pt;q=0.8,en-US;q=0.5,en;q=0.3"
+   302→        self.headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+   303→        self.headers["Referer"] = f"{self.full_url}/sign-in"
+   304→        self.headers["Upgrade-Insecure-Requests"] = "1"
+   305→        self.headers["Sec-Ch-Ua-Mobile"] = "?0"
+   306→        self.headers["Sec-Ch-Ua-Platform"] = '"Linux"'
+   307→        self.headers["Sec-Fetch-Site"] = "same-origin"
+   308→        self.headers["Sec-Fetch-User"] = "?1"
+   309→        self.headers["Sec-Fetch-Dest"] = "document"
+   310→        self.headers["Sec-Fetch-Mode"] = "navigate"
+   311→        self.headers["Dnt"] = "1"
+   312→        self.send_request("GET", f"{self.full_url}/sign-in/modal/")
+   313→        html = self.get_soup()
+   314→        match = html.find("input", {"name": "_token"})
+   315→        return None if not match else match.get("value")
+   316→
+   317→    async def awaiting_pin(self, data, input_message):
+   318→        self.headers["Content-Type"] = "application/x-www-form-urlencoded"
+   319→        self.headers["Referer"] = f"{self.full_url}/sign-in/modal"
+   320→        data["keep_code"] = 1
+   321→        try:
+   322→            code = input(input_message)
+   323→            if not code.isdigit():
+   324→                print("Please enter a valid code.")
+   325→                await self.awaiting_pin(data, input_message)
+   326→            data["code"] = code
+   327→        except KeyboardInterrupt:
+   328→            print("\nClosing program.")
+   329→            sys.exit()
+   330→        await asyncio.sleep(1)
+   331→        self.send_request(method="POST", url=f"{self.full_url}/sign-in/modal", data=data)
+   332→
+   333→    def get_profile(self):
+   334→        self.response = self.send_request(method="GET", url=f"{self.full_url}/trade")
+   335→        if self.response:
+   336→            script = self.get_soup().find_all("script", {"type": "text/javascript"})
+   337→            script = script[0].get_text() if script else "{}"
+   338→            match = script.strip().replace(";", "").replace("window.settings = ", "")
+   339→            self.cookies = self.get_cookies()
+   340→            try:
+   341→                settings_dict = json.loads(match)
+   342→                self.ssid = settings_dict.get("token")
+   343→            except json.JSONDecodeError:
+   344→                self.ssid = None
+   345→            self.api.session_data["cookies"] = self.cookies
+   346→            self.api.session_data["token"] = self.ssid
+   347→            self.api.session_data["user_agent"] = self.headers["User-Agent"]
+   348→            update_session(self.api.username, self.api.session_data)
+   349→            return self.response, settings_dict if self.ssid else None
+   350→        return None, None
+   351→
+   352→    async def _post(self, data):
+   353→        self.response = self.send_request(method="POST", url=f"{self.full_url}/sign-in/", data=data)
+   354→        required_keep_code = self.get_soup().find("input", {"name": "keep_code"})
+   355→        if required_keep_code:
+   356→            auth_body = self.get_soup().find("main", {"class": "auth__body"})
+   357→            input_message = f'{auth_body.find("p").text}: ' if auth_body.find("p") else "Enter the PIN code sent to your email: "
+   358→            await self.awaiting_pin(data, input_message)
+   359→            await asyncio.sleep(1)
+   360→            return self.success_login()
+   361→        return self.success_login()
+   362→
+   363→    def success_login(self):
+   364→        if "trade" in str(self.response.url):
+   365→            return True, "Login successful."
+   366→        soup = self.get_soup()
+   367→        not_available = soup.select_one("#tab-1 > div > div.modal-sign__not-avalible__title")
+   368→        if not_available: return False, f"Service unavailable: {not_available.get_text(strip=True)}"
+   369→        error = soup.select_one("#tab-1 form > div:nth-child(2) > div")
+   370→        msg = error.get_text(strip=True) if error else "Unknown error"
+   371→        return False, f"Login failed. {msg}"
+   372→
+   373→    async def __call__(self, username, password, user_data_dir=None):
+   374→        data = {"_token": self.get_token(), "email": username, "password": password, "remember": 1}
+   375→        status, msg = await self._post(data)
+   376→        if status: self.get_profile()
+   377→        return status, msg
+   378→
+   379→class Settings(Browser):
+   380→    def __init__(self, api):
+   381→        super().__init__()
+   382→        self.set_headers()
+   383→        self.api = api
+   384→        self.headers = self.get_headers()
+   385→
+   386→    def get_settings(self):
+   387→        self.headers["content-type"] = "application/json"
+   388→        self.headers["referer"] = f"{self.api.https_url}/{self.api.lang}/trade"
+   389→        self.headers["cookie"] = self.api.session_data.get("cookies", "")
+   390→        self.headers["user-agent"] = self.api.session_data.get("user_agent", "")
+   391→        response = self.send_request("GET", f"{self.api.https_url}/api/v1/cabinets/digest")
+   392→        return response.json()
+   393→
+   394→# ==============================================================================
+   395→# SECTION 5: WEBSOCKET CLIENT & STATE (SYNC + EVENT REGISTRY INTEGRATION)
+   396→# ==============================================================================
+   397→class WebsocketStatus(IntEnum):
+   398→    DISCONNECTED = 0
+   399→    CONNECTED = 1
+   400→    CONNECTING = 2
+   401→    ERROR = -1
+   402→
+   403→class AuthStatus(IntEnum):
+   404→    NOT_AUTHENTICATED = 0
+   405→    AUTHENTICATING = 1
+   406→    AUTHENTICATED = 2
+   407→    FAILED = -1
+   408→
+   409→class ConnectionState:
+   410→    def __init__(self):
+   411→        self.SSID = None
+   412→        self.status = WebsocketStatus.DISCONNECTED
+   413→        self.auth_status = AuthStatus.NOT_AUTHENTICATED
+   414→        self.ssl_Mutual_exclusion = False
+   415→        self.ssl_Mutual_exclusion_write = False
+   416→        self.check_rejected_connection = False
+   417→        self.check_accepted_connection = False
+   418→        self.check_websocket_if_error = False
+   419→        self.check_websocket_if_connect = None
+   420→        self.websocket_error_reason = None
+   421→
+   422→        # ===== EVENT-DRIVEN ADDITIONS =====
+   423→        # asyncio polling. lazily async context
+   424→        # init_events() "no running event loop" .
+   425→        self.ws_connected_event: Optional[asyncio.Event] = None
+   426→        self.ws_closed_event: Optional[asyncio.Event] = None
+   427→        self.auth_accepted_event: Optional[asyncio.Event] = None
+   428→        self.auth_rejected_event: Optional[asyncio.Event] = None
+   429→        self.ws_error_event: Optional[asyncio.Event] = None
+   430→        # loop websocket thread
+   431→        self._loop: Optional[asyncio.AbstractEventLoop] = None
+   432→
+   433→    def init_events(self) -> None:
+   434→        """ loop . async context."""
+   435→        if self.ws_connected_event is None:
+   436→            self.ws_connected_event = asyncio.Event()
+   437→        if self.ws_closed_event is None:
+   438→            self.ws_closed_event = asyncio.Event()
+   439→        if self.auth_accepted_event is None:
+   440→            self.auth_accepted_event = asyncio.Event()
+   441→        if self.auth_rejected_event is None:
+   442→            self.auth_rejected_event = asyncio.Event()
+   443→        if self.ws_error_event is None:
+   444→            self.ws_error_event = asyncio.Event()
+   445→        try:
+   446→            self._loop = asyncio.get_running_loop()
+   447→        except RuntimeError:
+   448→            self._loop = None
+   449→
+   450→    def reset_events(self) -> None:
+   451→        """ ."""
+   452→        for ev in (self.ws_connected_event, self.ws_closed_event,
+   453→                   self.auth_accepted_event, self.auth_rejected_event,
+   454→                   self.ws_error_event):
+   455→            if ev is not None:
+   456→                ev.clear()
+   457→
+   458→    # wrappers thread (websocket thread)
+   459→    def signal_ws_connected(self) -> None:
+   460→        _schedule_event_set(self.ws_connected_event, self._loop)
+   461→
+   462→    def signal_ws_closed(self) -> None:
+   463→        _schedule_event_set(self.ws_closed_event, self._loop)
+   464→
+   465→    def signal_auth_accepted(self) -> None:
+   466→        _schedule_event_set(self.auth_accepted_event, self._loop)
+   467→
+   468→    def signal_auth_rejected(self) -> None:
+   469→        _schedule_event_set(self.auth_rejected_event, self._loop)
+   470→
+   471→    def signal_ws_error(self) -> None:
+   472→        _schedule_event_set(self.ws_error_event, self._loop)
+   473→
+   474→class WebsocketClient:
+   475→    def __init__(self, api):
+   476→        self.api = api
+   477→        self.state = api.state
+   478→        self.headers = {
+   479→            "User-Agent": self.api.session_data.get("user_agent", USER_AGENT),
+   480→            "Origin": self.api.https_url,
+   481→            "Host": f"ws2.{self.api.host}",
+   482→        }
+   483→        self.wss = websocket.WebSocketApp(
+   484→            self.api.wss_url,
+   485→            on_message=self.on_message,
+   486→            on_error=self.on_error,
+   487→            on_close=self.on_close,
+   488→            on_open=self.on_open,
+   489→            on_ping=self.on_ping,
+   490→            on_pong=self.on_pong,
+   491→            header=self.headers,
+   492→            cookie=self.api.session_data.get("cookies"),
+   493→        )
+   494→
+   495→    def on_message(self, wss, msg):
+   496→        self.state.ssl_Mutual_exclusion = True
+   497→        # ===== STALE-WATCHDOG: =====
+   498→        # watchdog .
+   499→        try:
+   500→            if self.api is not None:
+   501→                self.api.last_message_at = time.time()
+   502→        except Exception:
+   503→            pass
+   504→        try:
+   505→            msg_str = msg.decode("utf-8", errors="ignore") if isinstance(msg, bytes) else str(msg)
+   506→
+   507→            if msg_str == "2":
+   508→                try:
+   509→                    self.wss.send("3")
+   510→                except Exception:
+   511→                    pass
+   512→                self.state.ssl_Mutual_exclusion = False
+   513→                return
+   514→            if msg_str == "3":
+   515→                self.state.ssl_Mutual_exclusion = False
+   516→                return
+   517→
+   518→            if "authorization/reject" in msg_str:
+   519→                logger.warning("Token rejected.")
+   520→                self.state.check_rejected_connection = True
+   521→                self.state.auth_status = AuthStatus.FAILED
+   522→                # ===== EVENT-DRIVEN FIX =====
+   523→                self.state.signal_auth_rejected()
+   524→            elif "s_authorization" in msg_str:
+   525→                self.state.check_accepted_connection = True
+   526→                self.state.check_rejected_connection = False
+   527→                self.state.auth_status = AuthStatus.AUTHENTICATED
+   528→                self.state.status = WebsocketStatus.CONNECTED
+   529→                print("\n" + "="*60)
+   530→                print("Connected to server successfully")
+   531→                print("="*60 + "\n")
+   532→                # ===== EVENT-DRIVEN FIX =====
+   533→                self.state.signal_auth_accepted()
+   534→
+   535→            message = None
+   536→            if len(msg_str) > 1 and msg_str[1] in ('[', '{'):
+   537→                try:
+   538→                    message = json.loads(msg_str[1:])
+   539→                except Exception:
+   540→                    pass
+   541→
+   542→            if message is not None:
+   543→                self._process_message_and_raise_events(message)
+   544→
+   545→            if str(msg_str) == "41":
+   546→                self.state.check_websocket_if_connect = 0
+   547→        except Exception as e:
+   548→            logger.error("Unhandled error in on_message: %s", e)
+   549→        self.state.ssl_Mutual_exclusion = False
+   550→
+   551→    def _process_message_and_raise_events(self, message):
+   552→        try:
+   553→            loop = self.api._async_loop
+   554→            if loop is None or not loop.is_running():
+   555→                return
+   556→
+   557→            if isinstance(message, dict):
+   558→                asset = message.get("asset")
+   559→                if asset and (message.get("candles") or message.get("data") or message.get("history")):
+   560→                    self.api.candle_v2_data[asset] = message
+   561→                    self.api.candles.candles_data = message.get("candles") or message.get("data") or message.get("history")
+   562→
+   563→                    asyncio.run_coroutine_threadsafe(
+   564→                        self.api.event_registry.set_event(f'candles_ready_{asset}', message),
+   565→                        loop
+   566→                    )
+   567→
+   568→                    index = message.get("index")
+   569→                    if index is not None:
+   570→                        asyncio.run_coroutine_threadsafe(
+   571→                            self.api.event_registry.set_event(f'candles_ready_{asset}_{index}', message),
+   572→                            loop
+   573→                        )
+   574→
+   575→            if isinstance(message, dict) and (message.get("liveBalance") or message.get("demoBalance")):
+   576→                self.api.account_balance = message
+   577→
+   578→            if isinstance(message, list) and len(message) > 0 and isinstance(message[0], list) and len(message[0]) == 4:
+   579→                asset = message[0][0]
+   580→                self.api.realtime_candles[asset] = message[0]
+   581→        except Exception as e:
+   582→            logger.debug(f"Error processing message: {e}")
+   583→
+   584→    def on_error(self, wss, error):
+   585→        global CONNECTION_ALIVE
+   586→        logger.error(error)
+   587→        self.state.websocket_error_reason = str(error)
+   588→        self.state.check_websocket_if_error = True
+   589→        self.state.status = WebsocketStatus.ERROR
+   590→        self.state.check_accepted_connection = False
+   591→        # ===== EVENT-DRIVEN FIX =====
+   592→        self.state.signal_ws_error()
+   593→        try:
+   594→            CONNECTION_ALIVE = False
+   595→        except Exception:
+   596→            pass
+   597→
+   598→    def on_open(self, wss):
+   599→        logger.info("Websocket client connected.")
+   600→        self.state.check_websocket_if_connect = 1
+   601→        self.state.status = WebsocketStatus.CONNECTED
+   602→        # ===== EVENT-DRIVEN FIX =====
+   603→        self.state.signal_ws_connected()
+   604→        asset_name = self.api.current_asset or "EURUSD"
+   605→        period = self.api.current_period or 60
+   606→        self.wss.send('42["tick"]')
+   607→        self.wss.send('42["indicator/list"]')
+   608→        self.wss.send('42["drawing/load"]')
+   609→        self.wss.send('42["pending/list"]')
+   610→        self.wss.send(f'42["instruments/update",{{"asset":"{asset_name}","period":{period}}}]')
+   611→        self.wss.send(f'42["depth/follow","{asset_name}"]')
+   612→        self.wss.send('42["chart_notification/get"]')
+   613→        self.wss.send('42["instruments/get"]')
+   614→        self.wss.send('42["tick"]')
+   615→
+   616→    def on_close(self, wss, close_status_code, close_msg):
+   617→        global CONNECTION_ALIVE
+   618→        logger.info("Websocket connection closed.")
+   619→        self.state.check_websocket_if_connect = 0
+   620→        self.state.status = WebsocketStatus.DISCONNECTED
+   621→        self.state.check_accepted_connection = False
+   622→        # ===== EVENT-DRIVEN FIX =====
+   623→        self.state.signal_ws_closed()
+   624→        try:
+   625→            CONNECTION_ALIVE = False
+   626→        except Exception:
+   627→            pass
+   628→
+   629→    def on_ping(self, wss, ping_msg): pass
+   630→    def on_pong(self, wss, pong_msg): pass
+   631→
+   632→# ==============================================================================
+   633→# SECTION 6: QUOTEX API CORE
+   634→# ==============================================================================
+   635→class CandlesObj:
+   636→    def __init__(self): self.__candles_data = None
+   637→    @property
+   638→    def candles_data(self): return self.__candles_data
+   639→    @candles_data.setter
+   640→    def candles_data(self, candles_data): self.__candles_data = candles_data
+   641→
+   642→class EventRegistry:
+   643→    def __init__(self):
+   644→        self._events: Dict[str, asyncio.Event] = {}
+   645→        self._data: Dict[str, Any] = {}
+   646→        self._lock = asyncio.Lock()
+   647→
+   648→    async def get_event(self, key: str) -> asyncio.Event:
+   649→        async with self._lock:
+   650→            if key not in self._events:
+   651→                self._events[key] = asyncio.Event()
+   652→            return self._events[key]
+   653→
+   654→    async def set_event(self, key: str, data: Any = None):
+   655→        async with self._lock:
+   656→            if key not in self._events:
+   657→                self._events[key] = asyncio.Event()
+   658→            self._data[key] = data
+   659→            self._events[key].set()
+   660→
+   661→    async def wait_event(self, key: str, timeout: float = 30.0) -> Any:
+   662→        event = await self.get_event(key)
+   663→        try:
+   664→            await asyncio.wait_for(event.wait(), timeout=timeout)
+   665→            return self._data.get(key)
+   666→        except asyncio.TimeoutError:
+   667→            return None
+   668→
+   669→    async def clear_event(self, key: str):
+   670→        async with self._lock:
+   671→            if key in self._events:
+   672→                self._events[key].clear()
+   673→            if key in self._data:
+   674→                del self._data[key]
+   675→
+   676→class QuotexAPI:
+   677→    def __init__(self, host, username, password, lang, proxies=None, user_data_dir="."):
+   678→        self.state = ConnectionState()
+   679→        self.trace_ws = False
+   680→        self.current_asset = None
+   681→        self.current_period = None
+   682→        self.account_balance = None
+   683→        self.account_type = 1
+   684→        self.instruments = None
+   685→        self.host = host
+   686→        self.https_url = f"https://{host}"
+   687→        self.wss_url = f"wss://ws2.{host}/socket.io/?EIO=3&transport=websocket"
+   688→        self.websocket_thread = None
+   689→        self.websocket_client = None
+   690→        self.username = username
+   691→        self.password = password
+   692→        self.proxies = proxies
+   693→        self.lang = lang
+   694→        self.user_data_dir = user_data_dir
+   695→        self.session_data = {}
+   696→        self.browser = Browser()
+   697→        self.browser.set_headers()
+   698→        self.settings = Settings(self)
+   699→        self.candles = CandlesObj()
+   700→        self.candle_v2_data = {}
+   701→        self.realtime_price = defaultdict(list)
+   702→        self.realtime_candles = {}
+   703→        self.event_registry = EventRegistry()
+   704→        self._async_loop: Optional[asyncio.AbstractEventLoop] = None
+   705→        self._temp_status = ""
+   706→        # ===== STALE-WATCHDOG ADDITION =====
+   707→        # WS . watchdog
+   708→        # .
+   709→        self.last_message_at: float = time.time()
+   710→        # ===== FIX 7: Rate Limiter ( ) =====
+   711→        # . rate limiter
+   712→        # keepalive + watchdog.
+   713→        # rate limiter (15ms = ~66 req/s) bursts .
+   714→        self._ws_send_times: list[float] = []
+   715→        self._ws_min_interval: float = 0.015  # 15ms ( )
+   716→        self._ws_max_per_window: int = 100    # 100 / ()
+   717→        self._ws_window: float = 1.0          # 1
+   718→        self._throttle_multiplier: float = 1.0  # = 1.0 ( auto-throttle)
+   719→        self._last_send_at: float = 0.0
+   720→
+   721→    @property
+   722→    def login(self): return Login(self)
+   723→
+   724→    def _apply_rate_limit(self) -> None:
+   725→        """ rate limiting WS — .
+   726→
+   727→ - (_ws_min_interval * _throttle_multiplier)
+   728→ - (_ws_max_per_window / _throttle_multiplier)
+   729→ """
+   730→        now = time.time()
+   731→        # 1)
+   732→        min_interval = self._ws_min_interval * self._throttle_multiplier
+   733→        if self._last_send_at > 0:
+   734→            elapsed = now - self._last_send_at
+   735→            if elapsed < min_interval:
+   736→                time.sleep(min_interval - elapsed)
+   737→                now = time.time()
+   738→        # 2)
+   739→        window_size = self._ws_window * self._throttle_multiplier
+   740→        cutoff = now - window_size
+   741→        self._ws_send_times = [t for t in self._ws_send_times if t >= cutoff]
+   742→        # 3)
+   743→        if len(self._ws_send_times) >= self._ws_max_per_window:
+   744→
+   745→            sleep_for = (self._ws_send_times[0] + window_size) - now
+   746→            if sleep_for > 0:
+   747→                time.sleep(sleep_for)
+   748→                now = time.time()
+   749→                cutoff = now - window_size
+   750→                self._ws_send_times = [t for t in self._ws_send_times if t >= cutoff]
+   751→        # 4)
+   752→        self._ws_send_times.append(now)
+   753→        self._last_send_at = now
+   754→
+   755→    def increase_throttle(self, factor: float = 2.0, max_multiplier: float = 8.0) -> None:
+   756→        """ ( ).
+   757→ => => => .
+   758→ """
+   759→        new_multiplier = min(self._throttle_multiplier * factor, max_multiplier)
+   760→        if new_multiplier != self._throttle_multiplier:
+   761→            self._throttle_multiplier = new_multiplier
+   762→            logger.info(f" Throttle increased to {new_multiplier}x (rate limit stress)")
+   763→
+   764→    def decrease_throttle(self, factor: float = 0.5, min_multiplier: float = 1.0) -> None:
+   765→        """ ( )."""
+   766→        new_multiplier = max(self._throttle_multiplier * factor, min_multiplier)
+   767→        if new_multiplier != self._throttle_multiplier:
+   768→            self._throttle_multiplier = new_multiplier
+   769→            logger.info(f" Throttle restored to {new_multiplier}x")
+   770→
+   771→    def send_websocket_request(self, data, no_force_send=True):
+   772→        # ===== FIX: busy-wait -> sleep + try/finally =====
+   773→        if no_force_send:
+   774→            deadline = time.time() + 5.0  # 5s
+   775→            while (self.state.ssl_Mutual_exclusion or self.state.ssl_Mutual_exclusion_write):
+   776→                if time.time() > deadline:
+   777→                    # — . .
+   778→                    break
+   779→                time.sleep(0.001)  # `pass` — CPU
+   780→        # ===== FIX 6: rate limit =====
+   781→        # : heartbeat messages ("2" "42[\"tick\"]" "42[\"instruments/get\"]")
+   782→        # rate limit — keepalive.
+   783→        is_heartbeat = (
+   784→            data == "2" or
+   785→            data == '42["tick"]' or
+   786→            data == '42["instruments/get"]' or
+   787→            'pending/list' in data or
+   788→            'indicator/list' in data or
+   789→            'drawing/load' in data
+   790→        )
+   791→        if not is_heartbeat:
+   792→            try:
+   793→                self._apply_rate_limit()
+   794→            except Exception:
+   795→                # rate limiter
+   796→                pass
+   797→        self.state.ssl_Mutual_exclusion_write = True
+   798→        try:
+   799→            if self.websocket_client and self.websocket_client.wss:
+   800→                self.websocket_client.wss.send(data)
+   801→        finally:
+   802→            # ===== FIX: flag =====
+   803→            self.state.ssl_Mutual_exclusion_write = False
+   804→
+   805→    def subscribe_realtime_candle(self, asset, period):
+   806→        self.realtime_price[asset] = []
+   807→        self.realtime_candles[asset] = {}
+   808→        data = f'42["instruments/update", {json.dumps({"asset": asset, "period": period})}]'
+   809→        return self.send_websocket_request(data)
+   810→
+   811→    def follow_candle(self, asset):
+   812→        return self.send_websocket_request(f'42["depth/follow", {json.dumps(asset)}]')
+   813→
+   814→    def chart_notification(self, asset):
+   815→        return self.send_websocket_request(f'42["chart_notification/get", {json.dumps({"asset": asset, "version": "1.0.0"})}]')
+   816→
+   817→    def get_candles_ws(self, asset, index, time_val, offset, period):
+   818→        payload = {"asset": asset, "index": index, "time": time_val, "offset": offset, "period": period}
+   819→        data = f'42["history/load",{json.dumps(payload)}]'
+   820→        return self.send_websocket_request(data)
+   821→
+   822→    async def authenticate(self):
+   823→        async with self.login as login:
+   824→            status, msg = await login(self.username, self.password, self.user_data_dir)
+   825→        if status:
+   826→            self.state.SSID = self.session_data.get("token")
+   827→        return status, msg
+   828→
+   829→    async def start_websocket(self):
+   830→        self.state.check_websocket_if_connect = None
+   831→        self.state.check_websocket_if_error = False
+   832→        self.state.websocket_error_reason = None
+   833→        # ===== EVENT-DRIVEN FIX =====
+   834→        # +
+   835→        self.state.init_events()
+   836→        self.state.reset_events()
+   837→        # loop ( reconnect)
+   838→        try:
+   839→            self.state._loop = asyncio.get_running_loop()
+   840→        except RuntimeError:
+   841→            self.state._loop = None
+   842→
+   843→        if not self.state.SSID:
+   844→            await self.authenticate()
+   845→        self.websocket_client = WebsocketClient(self)
+   846→        payload = {
+   847→            "suppress_origin": True, "ping_interval": 24, "ping_timeout": 20, "ping_payload": "2",
+   848→            "origin": self.https_url, "host": f"ws2.{self.host}",
+   849→            "sslopt": {"check_hostname": True, "cert_reqs": ssl.CERT_REQUIRED, "ca_certs": cacert, "context": ssl_context},
+   850→        }
+   851→        if platform.system() == "Linux":
+   852→            payload["sslopt"]["ssl_version"] = ssl.PROTOCOL_TLS
+   853→        self.websocket_thread = threading.Thread(target=self.websocket_client.wss.run_forever, kwargs=payload)
+   854→        self.websocket_thread.daemon = True
+   855→        self.websocket_thread.start()
+   856→
+   857→        # ===== EVENT-DRIVEN FIX =====
+   858→        # polling:
+   859→        # for _ in range(100):
+   860→        # if self.state.check_websocket_if_error: return False, ...
+   861→        # elif self.state.check_websocket_if_connect == 1: return True, ...
+   862→        # elif self.state.check_rejected_connection: return False, "Token Rejected."
+   863→        # await asyncio.sleep(0.1)
+   864→        # : connected, rejected, error, closed
+   865→        try:
+   866→            idx = await wait_for_first_event(
+   867→                self.state.ws_connected_event,
+   868→                self.state.auth_rejected_event,
+   869→                self.state.ws_error_event,
+   870→                self.state.ws_closed_event,
+   871→                timeout=10.0,
+   872→            )
+   873→        except asyncio.TimeoutError:
+   874→            return False, "Timeout waiting for websocket open"
+   875→
+   876→        if idx == 0:
+   877→            return True, "Websocket connected successfully!!!"
+   878→        elif idx == 1:
+   879→            self.state.SSID = None
+   880→            return False, "Websocket Token Rejected."
+   881→        elif idx == 2:
+   882→            return False, self.state.websocket_error_reason or "Websocket error"
+   883→        elif idx == 3:
+   884→            return False, "Websocket connection closed."
+   885→        return False, "Unknown websocket state"
+   886→
+   887→    async def send_ssid(self, timeout=10):
+   888→        if not self.state.SSID: return False
+   889→        # ===== EVENT-DRIVEN FIX =====
+   890→        # ( send_ssid start_websocket )
+   891→        if self.state.auth_accepted_event is None:
+   892→            self.state.init_events()
+   893→        self.state.auth_accepted_event.clear()
+   894→        self.state.auth_rejected_event.clear()
+   895→
+   896→        payload = {"session": self.state.SSID, "isDemo": self.account_type, "tournamentId": 0}
+   897→        data = f'42["authorization",{json.dumps(payload)}]'
+   898→        self.send_websocket_request(data)
+   899→
+   900→        # ===== EVENT-DRIVEN FIX =====
+   901→        # polling:
+   902→        # while not check_accepted and not check_rejected:
+   903→        # if time.time() - start_time > timeout: return False
+   904→        # await asyncio.sleep(0.5)
+   905→        # accepted rejected .
+   906→        try:
+   907→            idx = await wait_for_first_event(
+   908→                self.state.auth_accepted_event,
+   909→                self.state.auth_rejected_event,
+   910→                timeout=timeout,
+   911→            )
+   912→        except asyncio.TimeoutError:
+   913→            return False
+   914→        return idx == 0  # True accepted, False rejected
+   915→
+   916→    async def connect(self, is_demo):
+   917→        self.account_type = 1 if is_demo else 0
+   918→        self.state.ssl_Mutual_exclusion = False
+   919→        self.state.ssl_Mutual_exclusion_write = False
+   920→        check_websocket, websocket_reason = await self.start_websocket()
+   921→        if not check_websocket: return check_websocket, websocket_reason
+   922→        check_ssid = await self.send_ssid()
+   923→        if not check_ssid:
+   924→            await self.authenticate()
+   925→            if self.state.SSID: await self.send_ssid()
+   926→        return check_websocket, websocket_reason
+   927→
+   928→    async def close(self):
+   929→        if self.websocket_client and self.websocket_client.wss:
+   930→            self.websocket_client.wss.close()
+   931→            await asyncio.sleep(1)
+   932→        if self.websocket_thread and self.websocket_thread.is_alive():
+   933→            self.websocket_thread.join(timeout=5)
+   934→        return True
+   935→
+   936→# ==============================================================================
+   937→# SECTION 7: QUOTEX STABLE API WITH FULL HISTORY MIXIN
+   938→# ==============================================================================
+   939→_request_counter = itertools.count(int(time.time() * 1000))
+   940→
+   941→def group_by_period(data, period):
+   942→    grouped = defaultdict(list)
+   943→    for tick in data:
+   944→        timestamp = int(tick[0])
+   945→        timeframe = int(timestamp // period)
+   946→        grouped[timeframe].append(tick)
+   947→    return dict(grouped)
+   948→
+   949→def calculate_candles(history, period):
+   950→    if not isinstance(history, list) or not history: return []
+   951→    grouped = group_by_period(history, period)
+   952→    candles = []
+   953→    for minute, ticks in grouped.items():
+   954→        open_price = ticks[0][1]
+   955→        close_price = ticks[-1][1]
+   956→        high_price = max(tick[1] for tick in ticks)
+   957→        low_price = min(tick[1] for tick in ticks)
+   958→        candle = {'time': minute * period, 'open': open_price, 'close': close_price, 'high': high_price, 'low': low_price, 'ticks': len(ticks)}
+   959→        candles.append(candle)
+   960→    return candles[:-1] if len(candles) > 1 else candles
+   961→
+   962→
+   963→# ===== FIX A: =====
+   964→# : calculate_candles "tick" [time, price]
+   965→# tick[1] open/high/low/close. Quotex
+   966→# "history/load" [time, open, close, high, low] (5 ).
+   967→# calculate_candles tick :
+   968→# open = high = low = close = open_price => !
+   969→# fill_gap_once => get_candles => prepare_candles.
+   970→# .
+   971→def _parse_raw_candles(raw_candles):
+   972→    """ WebSocket dicts OHLC .
+   973→
+   974→ "history/load":
+   975→ 1) [time, open, close, high, low] — Quotex (5 )
+   976→ 2) [time, open, close, high, low, vol] — volume (6 )
+   977→ 3) {"time", "open", "high", "low", "close", ...} — dict
+   978→ 4) [time, price(, volume)] — tick ( )
+   979→ """
+   980→    if not raw_candles: return []
+   981→    parsed = []
+   982→    for c in raw_candles:
+   983→        try:
+   984→            if isinstance(c, dict) and 'time' in c:
+   985→                t = int(c.get('time', c.get('timestamp', 0)))
+   986→                o = float(c.get('open', 0) or 0)
+   987→                h = float(c.get('high', c.get('max', 0)) or 0)
+   988→                l = float(c.get('low', c.get('min', 0)) or 0)
+   989→                cl = float(c.get('close', c.get('c', 0)) or 0)
+   990→                v = int(c.get('volume', c.get('vol', 0)) or 0)
+   991→                if t > 0 and o > 0 and h > 0 and l > 0 and cl > 0:
+   992→                    parsed.append({'time': t, 'open': o, 'high': h, 'low': l, 'close': cl, 'volume': v})
+   993→            elif isinstance(c, (list, tuple)) and len(c) >= 5:
+   994→                # Quotex WS: [time, open, close, high, low(, volume)]
+   995→                t = int(c[0])
+   996→                o = float(c[1])
+   997→                cl = float(c[2])
+   998→                h = float(c[3])
+   999→                l = float(c[4])
+  1000→                v = int(c[5]) if len(c) >= 6 else 0
+  1001→                if t > 0 and o > 0 and h > 0 and l > 0 and cl > 0:
+  1002→                    parsed.append({'time': t, 'open': o, 'high': h, 'low': l, 'close': cl, 'volume': v})
+  1003→            elif isinstance(c, (list, tuple)) and len(c) >= 2:
+  1004→                # tick format: [time, price(, volume)]
+  1005→                t = int(c[0])
+  1006→                p = float(c[1])
+  1007→                v = int(c[2]) if len(c) >= 3 else 0
+  1008→                if t > 0 and p > 0:
+  1009→                    parsed.append({'time': t, 'open': p, 'high': p, 'low': p, 'close': p, 'volume': v})
+  1010→        except (TypeError, ValueError):
+  1011→            continue
+  1012→    return parsed
+  1013→
+  1014→def process_candles_v2(history, asset, data):
+  1015→    if not history or not isinstance(history, dict): return data if data else []
+  1016→    candles_data = history.get(asset, {})
+  1017→    candles = candles_data.get("candles", [])[1:] if candles_data else []
+  1018→    combined = candles + (data if data else [])
+  1019→    if combined:
+  1020→        candle_dict = {c.get('time'): c for c in combined if isinstance(c, dict) and 'time' in c}
+  1021→        return list(candle_dict.values()) if candle_dict else []
+  1022→    return combined
+  1023→
+  1024→def merge_candles(candles_data):
+  1025→    if not candles_data: return []
+  1026→    candle_dict = {c['time']: c for c in candles_data if isinstance(c, dict) and 'time' in c}
+  1027→    return sorted(candle_dict.values(), key=lambda x: x['time']) if candle_dict else []
+  1028→
+  1029→class Quotex:
+  1030→    def __init__(self, email=None, password=None, host="qxbroker.com", lang="en", proxies=None, user_data_dir="browser", asset_default="EURUSD", period_default=60):
+  1031→        self.email = email
+  1032→        self.password = password
+  1033→        self.host = host
+  1034→        self.lang = lang
+  1035→        self.proxies = proxies
+  1036→        self.user_data_dir = user_data_dir
+  1037→        self.asset_default = asset_default
+  1038→        self.period_default = period_default
+  1039→        self.account_is_demo = 1
+  1040→        self.codes_asset = {}
+  1041→        self.api = None
+  1042→        self.subscribe_candle = []
+  1043→        self.subscribe_candle_all_size = []
+  1044→        self.subscribe_mood = []
+  1045→        session = load_session(self.email, USER_AGENT)
+  1046→        self.session_data = session
+  1047→
+  1048→    async def check_connect(self):
+  1049→        if self.api is None: return False
+  1050→        # ===== EVENT-DRIVEN FIX =====
+  1051→        # :
+  1052→        # await asyncio.sleep(1)
+  1053→        # return self.api.state.check_accepted_connection == 1
+  1054→        # . 2s 50ms
+  1055→        # — latency 1000ms <100ms.
+  1056→        try:
+  1057→            await wait_until(
+  1058→                lambda: self.api.state.check_accepted_connection == 1,
+  1059→                timeout=2.0,
+  1060→                poll_interval=0.05,
+  1061→            )
+  1062→            return True
+  1063→        except asyncio.TimeoutError:
+  1064→            return self.api.state.check_accepted_connection == 1
+  1065→
+  1066→    async def connect(self):
+  1067→        self.api = QuotexAPI(self.host, self.email, self.password, self.lang, proxies=self.proxies, user_data_dir=self.user_data_dir)
+  1068→        self.api.session_data = self.session_data
+  1069→        self.api.state.SSID = self.session_data.get("token")
+  1070→        self.api._async_loop = asyncio.get_running_loop()
+  1071→        if not self.session_data.get("token"):
+  1072→            check, reason = await self.api.authenticate()
+  1073→            if not check: return check, reason
+  1074→        check, reason = await self.api.connect(self.account_is_demo == 1)
+  1075→        if not check:
+  1076→            self.session_data = {}
+  1077→            return False, "Websocket connection rejected."
+  1078→        return check, reason
+  1079→
+  1080→    async def change_account(self, balance_mode: str):
+  1081→        self.account_is_demo = 0 if balance_mode.upper() == "REAL" else 1
+  1082→        self.api.account_type = self.account_is_demo
+  1083→        payload = {"demo": self.api.account_type, "tournamentId": 0}
+  1084→        self.api.send_websocket_request(f'42["account/change",{json.dumps(payload)}]')
+  1085→
+  1086→    async def get_all_assets(self):
+  1087→        return {}
+  1088→
+  1089→    async def start_candles_stream(self, asset="EURUSD", period=60):
+  1090→        if self.api:
+  1091→            self.api.current_asset = asset
+  1092→            self.api.current_period = period
+  1093→            self.api.subscribe_realtime_candle(asset, period)
+  1094→            self.api.chart_notification(asset)
+  1095→            self.api.follow_candle(asset)
+  1096→
+  1097→    async def get_realtime_candles(self, asset: str):
+  1098→        if self.api: return self.api.realtime_candles.get(asset, [])
+  1099→        return []
+  1100→
+  1101→    async def get_candles(self, asset, end_from_time, offset, period, progressive=False, timeout=30, use_cache=False):
+  1102→        if self.api is None: return None
+  1103→        if end_from_time is None: end_from_time = time.time()
+  1104→        index = calendar.timegm(time.gmtime())
+  1105→        self.api.candles.candles_data = None
+  1106→        await self.api.event_registry.clear_event(f'candles_ready_{asset}')
+  1107→        await self.start_candles_stream(asset, period)
+  1108→        self.api.get_candles_ws(asset, index, int(end_from_time), offset, period)
+  1109→        try:
+  1110→            history_data = await self.api.event_registry.wait_event(f'candles_ready_{asset}', timeout=timeout)
+  1111→        except Exception:
+  1112→            return None
+  1113→        if history_data is None: return None
+  1114→        candles = self.prepare_candles(asset, period, history_data)
+  1115→        if progressive: return self.api.historical_candles.get("data", {})
+  1116→        return candles
+  1117→
+  1118→    async def _fetch_historical_batch(self, asset, fetch_time, offset, period, index, timeout):
+  1119→        if self.api is None: return None
+  1120→        payload = {"asset": asset, "index": index, "time": fetch_time, "offset": offset, "period": period}
+  1121→        ws_msg = f'42["history/load",{json.dumps(payload)}]'
+  1122→        event_name = f'candles_ready_{asset}_{index}'
+  1123→        await self.api.event_registry.clear_event(event_name)
+  1124→        self.api.send_websocket_request(ws_msg)
+  1125→        try:
+  1126→            return await self.api.event_registry.wait_event(event_name, timeout=timeout)
+  1127→        except Exception:
+  1128→            return None
+  1129→
+  1130→    def _parse_historical_candles(self, raw_data):
+  1131→        if raw_data is None: return []
+  1132→        raw_candles = raw_data.get("data", []) or raw_data.get("candles", [])
+  1133→        if not raw_candles: return []
+  1134→        parsed = []
+  1135→        for c in raw_candles:
+  1136→            if isinstance(c, list) and len(c) >= 5:
+  1137→                parsed.append({"time": int(c[0]), "open": float(c[1]), "close": float(c[2]), "high": float(c[3]), "low": float(c[4])})
+  1138→            elif isinstance(c, dict) and "time" in c:
+  1139→                parsed.append(c)
+  1140→        return parsed
+  1141→
+  1142→    async def get_historical_candles(self, asset, amount_of_seconds, period, timeout=30, max_workers=5, progress_callback=None):
+  1143→        # ===== FIX 7: (5 workers + chunk=200) =====
+  1144→        # .
+  1145→        # (keepalive + watchdog ).
+  1146→        max_workers = max_workers or 1
+  1147→        chunk_seconds = period * FETCH_CHUNK_SIZE  # period * 200 = 12000s batch
+  1148→        all_candles = {}
+  1149→        current_time = int(time.time())
+  1150→        target_start_time = current_time - amount_of_seconds
+  1151→        block_size = amount_of_seconds // max_workers
+  1152→        semaphore = asyncio.Semaphore(max_workers)
+  1153→
+  1154→        async def worker(start_t, end_t, worker_id):
+  1155→            worker_candles = {}
+  1156→            async with semaphore:
+  1157→                oldest_t = start_t
+  1158→                consecutive_failures_in_worker = 0
+  1159→                while oldest_t > end_t:
+  1160→                    # ===== FIX 3: batch =====
+  1161→                    if not self.api or not getattr(self.api.state, 'check_accepted_connection', False):
+  1162→                        # —
+  1163→                        break
+  1164→                    index = next(_request_counter)
+  1165→                    batch_data = await self._fetch_historical_batch(asset, oldest_t, chunk_seconds, period, index, timeout)
+  1166→                    if not batch_data:
+  1167→                        oldest_t -= chunk_seconds
+  1168→                        consecutive_failures_in_worker += 1
+  1169→                        if consecutive_failures_in_worker >= 3:
+  1170→                            # 3 consecutive failures = connection dead — exit
+  1171→                            break
+  1172→                        # backoff
+  1173→                        await asyncio.sleep(FETCH_BATCH_DELAY * 2)
+  1174→                        continue
+  1175→                    consecutive_failures_in_worker = 0
+  1176→                    new_batch = self._parse_historical_candles(batch_data)
+  1177→                    if not new_batch: oldest_t -= chunk_seconds; continue
+  1178→                    batch_times = []
+  1179→                    for c in new_batch:
+  1180→                        ts = c['time']
+  1181→                        if ts >= end_t and ts <= start_t:
+  1182→                            worker_candles[ts] = c
+  1183→                            batch_times.append(ts)
+  1184→                    if not batch_times: oldest_t -= chunk_seconds; continue
+  1185→                    batch_times.sort()
+  1186→                    new_oldest = batch_times[0]
+  1187→                    if progress_callback: progress_callback(start_t - new_oldest, start_t - end_t, len(worker_candles), f"Worker-{worker_id}")
+  1188→                    oldest_t = new_oldest if new_oldest < oldest_t else oldest_t - chunk_seconds
+  1189→                    # batches (0.1s — )
+  1190→                    await asyncio.sleep(FETCH_BATCH_DELAY)
+  1191→            return list(worker_candles.values())
+  1192→
+  1193→        await self.start_candles_stream(asset, period)
+  1194→        tasks = []
+  1195→        for i in range(max_workers):
+  1196→            s = current_time - (i * block_size)
+  1197→            e = max(target_start_time, s - block_size)
+  1198→            tasks.append(worker(s, e, i))
+  1199→        results = await asyncio.gather(*tasks)
+  1200→        for batch in results:
+  1201→            for c in batch: all_candles[c['time']] = c
+  1202→        return sorted(all_candles.values(), key=lambda x: x['time'])
+  1203→
+  1204→    def prepare_candles(self, asset, period, history=None):
+  1205→        if self.api is None: return []
+  1206→        history_data = history if history is not None else self.api.candles.candles_data
+  1207→        if history_data is None: return []
+  1208→        if isinstance(history_data, dict):
+  1209→            candles_list = history_data.get("candles") or history_data.get("data") or history_data.get("history") or []
+  1210→        else:
+  1211→            candles_list = history_data
+  1212→        if not candles_list: return []
+  1213→        # ===== FIX A: _parse_raw_candles calculate_candles =====
+  1214→        # calculate_candles tick [time, price]
+  1215→        # tick[1] open/high/low/close — (open == high ==
+  1216→        # low == close) history/load
+  1217→        # [time, open, close, high, low]. _parse_raw_candles
+  1218→        # .
+  1219→        candles_data = _parse_raw_candles(candles_list)
+  1220→        # grill period ( )
+  1221→        for c in candles_data:
+  1222→            c['time'] = (int(c['time']) // period) * period
+  1223→        candles_v2_data = process_candles_v2(self.api.candle_v2_data, asset, candles_data)
+  1224→        return merge_candles(candles_v2_data)
+  1225→
+  1226→    async def close(self):
+  1227→        if self.api: return await self.api.close()
+  1228→        return True
+  1229→
+  1230→# ==============================================================================
+  1231→# SECTION 8: MT4 WRITER & ASSETS (COMPLETE)
+  1232→# ==============================================================================
+  1233→os.environ['SSL_CERT_FILE'] = cert_path
+  1234→os.environ['WEBSOCKET_CLIENT_CA_BUNDLE'] = cert_path
+  1235→
+  1236→DEBUG_LOGS = False
+  1237→def dbg(msg: str):
+  1238→    if DEBUG_LOGS: print(f"  \033[2m   [debug] {msg}\033[0m")
+  1239→
+  1240→LOG_FILE = Path("qxchart.log")
+  1241→def _log_to_file(line: str):
+  1242→    try:
+  1243→        with open(LOG_FILE, "a", encoding="utf-8") as f: f.write(line + "\n")
+  1244→    except Exception: pass
+  1245→
+  1246→def logmsg(msg: str):
+  1247→    ts = datetime.now().strftime("%H:%M:%S")
+  1248→    line = f"[{ts}] {msg}"
+  1249→    _log_to_file(line)
+  1250→    # If live table is active, queue the message instead of printing directly
+  1251→    # to avoid corrupting the redrawn table
+  1252→    if '_STATUS_MESSAGES_QUEUE' in globals() and globals()['_STATUS_MESSAGES_QUEUE'] is not None:
+  1253→        try:
+  1254→            globals()['_STATUS_MESSAGES_QUEUE'].append(line)
+  1255→            # keep last 5 messages
+  1256→            if len(globals()['_STATUS_MESSAGES_QUEUE']) > 5:
+  1257→                globals()['_STATUS_MESSAGES_QUEUE'] = globals()['_STATUS_MESSAGES_QUEUE'][-5:]
+  1258→        except Exception:
+  1259→            pass
+  1260→    else:
+  1261→        print(f"  \033[2m[{ts}]\033[0m {msg}")
+  1262→
+  1263→def log_exception(context: str, exc: BaseException):
+  1264→    ts = datetime.now().strftime("%H:%M:%S")
+  1265→    tb_text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+  1266→    print(f"  \033[91m[{ts}] FATAL in {context}: {exc}\033[0m")
+  1267→    _log_to_file(f"[{ts}] FATAL in {context}: {exc}\n{tb_text}")
+  1268→
+  1269→def _thread_excepthook(args):
+  1270→    log_exception(f"thread '{args.thread.name}'", args.exc_value)
+  1271→threading.excepthook = _thread_excepthook
+  1272→
+  1273→def _main_excepthook(exc_type, exc_value, exc_tb):
+  1274→    if issubclass(exc_type, KeyboardInterrupt): sys.__excepthook__(exc_type, exc_value, exc_tb); return
+  1275→    log_exception("main thread (top level)", exc_value)
+  1276→sys.excepthook = _main_excepthook
+  1277→
+  1278→class _NullHandler(logging.Handler):
+  1279→    def emit(self, record): pass
+  1280→
+  1281→@contextlib.contextmanager
+  1282→def suppress_terminal_output():
+  1283→    _loggers = [logging.getLogger(), logging.getLogger("pyquotex"), logging.getLogger("Quotex"), logging.getLogger("websockets"), logging.getLogger("websocket"), logging.getLogger("asyncio")]
+  1284→    _old_levels = [(l, l.level, l.disabled) for l in _loggers]
+  1285→    _old_handlers = [(l, list(l.handlers)) for l in _loggers]
+  1286→    for l in _loggers:
+  1287→        l.handlers = [_NullHandler()]; l.setLevel(logging.CRITICAL + 1); l.disabled = True
+  1288→    with open(os.devnull, 'w') as devnull:
+  1289→        old_stdout, old_stderr = sys.stdout, sys.stderr
+  1290→        sys.stdout, sys.stderr = devnull, devnull
+  1291→        try: yield
+  1292→        finally:
+  1293→            sys.stdout, sys.stderr = old_stdout, old_stderr
+  1294→            for l, lvl, dis in _old_levels: l.setLevel(lvl); l.disabled = dis
+  1295→            for l, hs in _old_handlers: l.handlers = hs
+  1296→
+  1297→WINAPI_AVAILABLE = False
+  1298→if platform.system() == "Windows":
+  1299→    try:
+  1300→        import ctypes
+  1301→        from ctypes import wintypes
+  1302→        user32 = ctypes.windll.user32
+  1303→        WM_COMMAND = 0x0111
+  1304→        MT4_REFRESH_CHART = 33324
+  1305→        GA_ROOT = 2
+  1306→        user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+  1307→        user32.PostMessageW.restype = wintypes.BOOL
+  1308→        user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+  1309→        user32.GetAncestor.restype = wintypes.HWND
+  1310→        user32.IsWindowVisible.argtypes = [wintypes.HWND]
+  1311→        user32.IsWindowVisible.restype = wintypes.BOOL
+  1312→        user32.IsWindow.argtypes = [wintypes.HWND]
+  1313→        user32.IsWindow.restype = wintypes.BOOL
+  1314→        user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, wintypes.INT]
+  1315→        user32.GetWindowTextW.restype = wintypes.INT
+  1316→        user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+  1317→        user32.GetWindowTextLengthW.restype = wintypes.INT
+  1318→        WINAPI_AVAILABLE = True
+  1319→    except Exception: pass
+  1320→
+  1321→_MT4_HWND = None
+  1322→_MT4_HWND_LAST_SEARCH = 0
+  1323→_LAST_GLOBAL_REFRESH = 0
+  1324→_ENUM_PROC_REF = None
+  1325→
+  1326→def find_mt4_window():
+  1327→    global _MT4_HWND, _MT4_HWND_LAST_SEARCH, _ENUM_PROC_REF
+  1328→    if not WINAPI_AVAILABLE: return None
+  1329→    now = time.time()
+  1330→    if _MT4_HWND and (now - _MT4_HWND_LAST_SEARCH < 30):
+  1331→        if user32.IsWindow(_MT4_HWND): return _MT4_HWND
+  1332→    _MT4_HWND = None
+  1333→    _MT4_HWND_LAST_SEARCH = now
+  1334→    found = []
+  1335→    @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+  1336→    def enum_callback(hwnd, lparam):
+  1337→        if user32.IsWindowVisible(hwnd):
+  1338→            length = user32.GetWindowTextLengthW(hwnd)
+  1339→            if length > 0:
+  1340→                buf = ctypes.create_unicode_buffer(length + 1)
+  1341→                user32.GetWindowTextW(hwnd, buf, length + 1)
+  1342→                if "MetaTrader 4" in buf.value or "MetaTrader4" in buf.value: found.append(hwnd)
+  1343→                return False
+  1344→        return True
+  1345→    _ENUM_PROC_REF = enum_callback
+  1346→    user32.EnumWindows(enum_callback, 0)
+  1347→    _MT4_HWND = found[0] if found else None
+  1348→    return _MT4_HWND
+  1349→
+  1350→REFRESH_INTERVAL = 1.0
+  1351→def refresh_mt4():
+  1352→    global _LAST_GLOBAL_REFRESH
+  1353→    if not WINAPI_AVAILABLE: return False
+  1354→    now = time.time()
+  1355→    if now - _LAST_GLOBAL_REFRESH < REFRESH_INTERVAL: return False
+  1356→    _LAST_GLOBAL_REFRESH = now
+  1357→    hwnd = find_mt4_window()
+  1358→    if not hwnd: return False
+  1359→    root = user32.GetAncestor(hwnd, GA_ROOT)
+  1360→    target = root if root else hwnd
+  1361→    user32.PostMessageW(target, WM_COMMAND, MT4_REFRESH_CHART, 0)
+  1362→    return True
+  1363→
+  1364→class Colors:
+  1365→    GREEN = '\033[92m'; RED = '\033[91m'; BLUE = '\033[94m'; YELLOW = '\033[93m'
+  1366→    CYAN = '\033[96m'; BOLD = '\033[1m'; DIM = '\033[2m'; RESET = '\033[0m'; CLEAR_LINE = '\033[K'
+  1367→    # ===== ألوان إضافية مطلوبة للواجهة الجديدة (v3 UI) =====
+  1368→    WHITE = '\033[97m'      # أبيض ساطع
+  1369→    MAGENTA = '\033[95m'    # بنفسجي ساطع
+  1370→    GRAY = '\033[90m'       # رمادي
+  1371→
+  1372→def _current_period_label() -> str:
+  1373→    # Subsecond labels
+  1374→    if IS_SUBSECOND and SUBSECOND_LABEL:
+  1375→        return SUBSECOND_LABEL
+  1376→    if PERIOD >= 1440 and PERIOD % 1440 == 0:
+  1377→        d = PERIOD // 1440
+  1378→        return f"D{d}" if d > 1 else "D1"
+  1379→    if PERIOD >= 60 and PERIOD % 60 == 0:
+  1380→        h = PERIOD // 60
+  1381→        return f"H{h}" if h > 1 else "H1"
+  1382→    return f"M{PERIOD}"
+  1383→
+  1384→def pretty_asset_name(symbol: str, period_label: str = None) -> str:
+  1385→    if period_label is None:
+  1386→        period_label = _current_period_label()
+  1387→    base = symbol
+  1388→    suffix = ""
+  1389→    if base.upper().endswith("_OTC"):
+  1390→        base = base[:-4]
+  1391→        suffix = " · OTC"
+  1392→    if len(base) == 6 and base.isalpha():
+  1393→        pretty = f"{base[:3].upper()}/{base[3:].upper()}{suffix}"
+  1394→    else:
+  1395→        pretty = f"{base.upper()}{suffix}"
+  1396→    return f"({pretty}),{period_label}"
+  1397→
+  1398→user_home = os.path.expanduser('~')
+  1399→MT4_CONFIG_FILE = Path("mt4_config.json")
+  1400→# ===== FIX J: digits — =====
+  1401→# : " " —
+  1402→# .
+  1403→# mt4_digits.json:
+  1404→# {
+  1405→# "global_digits": null, // null = ; ( 5)
+  1406→# "overrides": {
+  1407→# "USDIDR-OTC": 4,
+  1408→# "USDPKR-OTC": 5
+  1409→# }
+  1410→# }
+  1411→DIGITS_CONFIG_FILE = Path("mt4_digits.json")
+  1412→_digits_config_cache = None
+  1413→_digits_config_loaded = False
+  1414→
+  1415→def load_digits_config() -> dict:
+  1416→    """ mt4_digits.json . ."""
+  1417→    global _digits_config_cache, _digits_config_loaded
+  1418→    try:
+  1419→        if DIGITS_CONFIG_FILE.exists():
+  1420→            mtime = DIGITS_CONFIG_FILE.stat().st_mtime
+  1421→            if not _digits_config_loaded or _digits_config_cache.get('_mtime', 0) < mtime:
+  1422→                _digits_config_cache = json.loads(DIGITS_CONFIG_FILE.read_text())
+  1423→                _digits_config_cache['_mtime'] = mtime
+  1424→                _digits_config_loaded = True
+  1425→        elif _digits_config_loaded:
+  1426→            # —
+  1427→            _digits_config_cache = None
+  1428→            _digits_config_loaded = False
+  1429→    except Exception:
+  1430→        return {}
+  1431→    return _digits_config_cache if _digits_config_cache else {}
+  1432→
+  1433→def _resolve_digits(symbol: str, price: float = 0.0) -> int:
+  1434→    """ .
+  1435→ 
+  1436→ :
+  1437→ 1) per-asset mt4_digits.json ("overrides")
+  1438→ 2) mt4_digits.json ("global_digits")
+  1439→ 3) ( )
+  1440→ 
+  1441→ (FIX J):
+  1442→ - JPY: 3 ()
+  1443→ - < 0.5: 6 (was 6) — BRLUSD
+  1444→ - < 1: 5 (was 5)
+  1445→ - < 5: 5 (was 5)
+  1446→ - < 10: 4 (was 4)
+  1447→ - < 50: 4 (was 4)
+  1448→ - < 100: 3 (was 3)
+  1449→ - < 1000: 3 (was 2) ← FIX J: 100-1000
+  1450→ - < 10000: 3 (was 2) ← FIX J
+  1451→ - >= 10000: 3 (was 2) ← FIX J
+  1452→ : >= 100 digits=2 (min grid 0.01) — .
+  1453→ : >= 100 digits=3 (min grid 0.001) — 
+  1454→ mt4_digits.json.
+  1455→ """
+  1456→    sym_upper = symbol.upper()
+  1457→    # 1) per-asset override
+  1458→    cfg = load_digits_config()
+  1459→    if cfg:
+  1460→        overrides = cfg.get('overrides', {}) or {}
+  1461→        if sym_upper in overrides:
+  1462→            try:
+  1463→                d = int(overrides[sym_upper])
+  1464→                if 0 <= d <= 8:
+  1465→                    return d
+  1466→            except (TypeError, ValueError):
+  1467→                pass
+  1468→        # 2) global override
+  1469→        global_d = cfg.get('global_digits', None)
+  1470→        if global_d is not None:
+  1471→            try:
+  1472→                d = int(global_d)
+  1473→                if 0 <= d <= 8:
+  1474→                    return d
+  1475→            except (TypeError, ValueError):
+  1476→                pass
+  1477→    # 3) auto calculation (improved FIX J defaults)
+  1478→    if "JPY" in sym_upper: return 3
+  1479→    if price and price > 0:
+  1480→        if price < 0.5:  return 6
+  1481→        if price < 1:    return 5
+  1482→        if price < 5:    return 5
+  1483→        if price < 10:   return 4
+  1484→        if price < 50:   return 4
+  1485→        if price < 100:  return 3
+  1486→        # FIX J: >= 100 digits=3 ( 2)
+  1487→        # → (0.001 0.01)
+  1488→        return 3
+  1489→    # fallback when no price
+  1490→    if any(x in sym_upper for x in ["IDR", "COP", "ARS", "NGN", "PKR", "DZD", "EGP", "MXN", "PHP", "INR", "BDT", "ZAR", "BRL"]):
+  1491→        return 3  # FIX J: was 2
+  1492→    return 5
+  1493→SYSTEM_FOLDERS = {"default", "downloads", "mailbox", "signals", "symbolsets", "deleted", "templates", "profiles", "mql4", "logs", "config", "history_backup"}
+  1494→
+  1495→def _validate_mt4_path(path: str) -> bool:
+  1496→    if not path or not os.path.exists(path): return False
+  1497→    try:
+  1498→        test_file = os.path.join(path, ".write_test.tmp")
+  1499→        with open(test_file, 'w') as f: f.write("test")
+  1500→        os.remove(test_file)
+  1501→        return True
+  1502→    except Exception: return False
+  1503→
+  1504→def _save_mt4_path(path: str):
+  1505→    try:
+  1506→        config = json.loads(MT4_CONFIG_FILE.read_text()) if MT4_CONFIG_FILE.exists() else {}
+  1507→        config["mt4_history_path"] = path
+  1508→        config["saved_at"] = int(time.time())
+  1509→        MT4_CONFIG_FILE.write_text(json.dumps(config, indent=2))
+  1510→    except Exception: pass
+  1511→
+  1512→def find_mt4_history_path() -> str:
+  1513→    appdata = os.environ.get('APPDATA', '') or os.environ.get('HOME', '')
+  1514→    common_path = os.path.join(appdata, 'MetaQuotes', 'Terminal', 'Common', 'Files', 'qx_hst')
+  1515→    try:
+  1516→        os.makedirs(common_path, exist_ok=True)
+  1517→        return common_path
+  1518→    except Exception:
+  1519→        pass
+  1520→    
+  1521→    base_terminal = os.path.join(user_home, "AppData", "Roaming", "MetaQuotes", "Terminal")
+  1522→    if not os.path.exists(base_terminal): return ""
+  1523→    all_servers = []
+  1524→    try:
+  1525→        for terminal_id in os.listdir(base_terminal):
+  1526→            history_path = os.path.join(base_terminal, terminal_id, "history")
+  1527→            if not os.path.exists(history_path): continue
+  1528→            for server_name in os.listdir(history_path):
+  1529→                server_lower = server_name.lower()
+  1530→                if server_lower in SYSTEM_FOLDERS or server_lower.startswith(".") or server_lower.startswith("_"): continue
+  1531→                server_path = os.path.join(history_path, server_name)
+  1532→                if not os.path.isdir(server_path): continue
+  1533→                try:
+  1534→                    hst_files = [f for f in os.listdir(server_path) if f.endswith('.hst')]
+  1535→                    all_servers.append({"terminal_id": terminal_id, "server_name": server_name, "full_path": server_path, "has_hst": len(hst_files) > 0, "hst_count": len(hst_files), "is_writable": _validate_mt4_path(server_path)})
+  1536→                except Exception: pass
+  1537→    except Exception: pass
+  1538→    if not all_servers: return ""
+  1539→    if MT4_CONFIG_FILE.exists():
+  1540→        try:
+  1541→            saved_path = json.loads(MT4_CONFIG_FILE.read_text()).get("mt4_history_path", "")
+  1542→            if saved_path and os.path.exists(saved_path):
+  1543→                for srv in all_servers:
+  1544→                    if srv["full_path"] == saved_path and srv["is_writable"]: return saved_path
+  1545→        except Exception: pass
+  1546→    writable_servers = [s for s in all_servers if s["is_writable"]]
+  1547→    if not writable_servers: return ""
+  1548→    servers_with_hst = [s for s in writable_servers if s["has_hst"]]
+  1549→    if servers_with_hst:
+  1550→        servers_with_hst.sort(key=lambda x: (-x["hst_count"], x["server_name"]))
+  1551→        chosen = servers_with_hst[0]
+  1552→        _save_mt4_path(chosen["full_path"])
+  1553→        return chosen["full_path"]
+  1554→    chosen = writable_servers[0]
+  1555→    _save_mt4_path(chosen["full_path"])
+  1556→    return chosen["full_path"]
+  1557→
+  1558→MT4_HISTORY_PATH = find_mt4_history_path()
+  1559→if not MT4_HISTORY_PATH:
+  1560→    MT4_HISTORY_PATH = os.path.join(user_home, "Desktop", "MT4_History_Fallback")
+  1561→    os.makedirs(MT4_HISTORY_PATH, exist_ok=True)
+  1562→
+  1563→SESSION_FILE = Path("session.json")
+  1564→SESSION_STATE_FILE = Path("session_state.json")
+  1565→EMAIL_FILE = Path("saved_email.txt")
+  1566→
+  1567→class SessionManager:
+  1568→    def __init__(self): self.state = self._load_state()
+  1569→    def _load_state(self) -> dict:
+  1570→        try:
+  1571→            if SESSION_STATE_FILE.exists(): return json.loads(SESSION_STATE_FILE.read_text())
+  1572→        except Exception: pass
+  1573→        return {"last_login": 0, "last_success": False, "failed_auth_count": 0, "email": "", "host": "qxbroker.com"}
+  1574→    def _save_state(self):
+  1575→        try: SESSION_STATE_FILE.write_text(json.dumps(self.state, indent=2))
+  1576→        except Exception: pass
+  1577→    def should_force_fresh(self) -> bool:
+  1578→        if not self.state.get("last_success", False): return True
+  1579→        if self.state.get("failed_auth_count", 0) >= 2: return True
+  1580→        if time.time() - self.state.get("last_login", 0) > 7 * 24 * 3600: return True
+  1581→        return False
+  1582→    def record_success(self, email: str, host: str = None):
+  1583→        # FIX K:
+  1584→        update_dict = {"last_login": time.time(), "last_success": True, "failed_auth_count": 0, "email": email}
+  1585→        if host: update_dict["host"] = host
+  1586→        self.state.update(update_dict)
+  1587→        self._save_state()
+  1588→        EMAIL_FILE.write_text(email)
+  1589→    def record_failure(self, error: str):
+  1590→        self.state["last_login"] = time.time()
+  1591→        self.state["last_success"] = False
+  1592→        self.state["failed_auth_count"] = self.state.get("failed_auth_count", 0) + 1
+  1593→        self._save_state()
+  1594→    def get_saved_email(self) -> str:
+  1595→        email = self.state.get("email", "")
+  1596→        return email if email else (EMAIL_FILE.read_text().strip() if EMAIL_FILE.exists() else "")
+  1597→
+  1598→    def get_saved_host(self) -> str:
+  1599→        # FIX K:
+  1600→        return self.state.get("host", "qxbroker.com")
+
+[showing lines 1-1600 of 6137; use offset=1601 with limit to continue reading]

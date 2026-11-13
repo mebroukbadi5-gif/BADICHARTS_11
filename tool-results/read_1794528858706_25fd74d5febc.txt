@@ -1,0 +1,1337 @@
+  4801→});
+  4802→
+  4803→// Current price line (dashed, colored by last candle direction)
+  4804→const priceLine = series.createPriceLine({
+  4805→  price: 0,
+  4806→  color: C.up,
+  4807→  lineWidth: 1,
+  4808→  lineStyle: LightweightCharts.LineStyle.Dashed,
+  4809→  axisLabelVisible: true,
+  4810→  title: ''
+  4811→});
+  4812→
+  4813→// ===== Helpers =====
+  4814→function fmtPrice(p){ return Number(p).toFixed(digits); }
+  4815→
+  4816→function updatePriceLine(){
+  4817→  if(candles.length === 0) return;
+  4818→  const last = candles[candles.length - 1];
+  4819→  const isUp = last.close >= last.open;
+  4820→  // Remove and recreate to update color (Lightweight Charts limitation)
+  4821→  series.removePriceLine(priceLine);
+  4822→  const newLine = series.createPriceLine({
+  4823→    price: last.close,
+  4824→    color: isUp ? C.up : C.down,
+  4825→    lineWidth: 1,
+  4826→    lineStyle: LightweightCharts.LineStyle.Dashed,
+  4827→    axisLabelVisible: true,
+  4828→    title: ''
+  4829→  });
+  4830→  // Replace reference (we re-declare via the variable name)
+  4831→  // Note: cannot reassign const, so we keep using a function-local approach below
+  4832→}
+  4833→
+  4834→function refreshPriceLine(){
+  4835→  if(candles.length === 0) return;
+  4836→  const last = candles[candles.length - 1];
+  4837→  const isUp = last.close >= last.open;
+  4838→  // Simpler: remove all price lines and add a new one each tick
+  4839→  // (Lightweight Charts does not allow updating an existing price line in place)
+  4840→  // We track it via a module-level variable
+  4841→  if(window._activePriceLine){
+  4842→    try { series.removePriceLine(window._activePriceLine); } catch(e){}
+  4843→  }
+  4844→  window._activePriceLine = series.createPriceLine({
+  4845→    price: last.close,
+  4846→    color: isUp ? C.up : C.down,
+  4847→    lineWidth: 1,
+  4848→    lineStyle: LightweightCharts.LineStyle.Dashed,
+  4849→    axisLabelVisible: true,
+  4850→    title: ''
+  4851→  });
+  4852→}
+  4853→
+  4854→function updatePriceHeader(){
+  4855→  if(!candles || candles.length === 0) return;
+  4856→  const last = candles[candles.length - 1];
+  4857→  const first = candles[0];
+  4858→  const priceEl = document.getElementById("currentPrice");
+  4859→  const changeEl = document.getElementById("priceChange");
+  4860→  const newP = Number(last.close).toFixed(digits);
+  4861→  if(priceEl){
+  4862→    if(priceEl.textContent !== newP && priceEl.textContent !== "---"){
+  4863→      priceEl.style.color = last.close >= last.open ? "#22c55e" : "#ef4444";
+  4864→      setTimeout(() => { priceEl.style.color = ""; }, 300);
+  4865→    }
+  4866→    priceEl.textContent = newP;
+  4867→  }
+  4868→  if(changeEl){
+  4869→    const change = last.close - first.open;
+  4870→    const pct = first.open > 0 ? (change / first.open * 100) : 0;
+  4871→    const sign = change >= 0 ? "+" : "";
+  4872→    changeEl.textContent = sign + change.toFixed(digits) + " (" + sign + pct.toFixed(2) + "%)";
+  4873→    changeEl.className = "price-change " + (change >= 0 ? "up" : "down");
+  4874→  }
+  4875→  refreshPriceLine();
+  4876→}
+  4877→
+  4878→// ===== Data fetching =====
+  4879→async function fetchFullCandles(){
+  4880→  try{
+  4881→    const r = await fetch("/api/candles?pair=" + encodeURIComponent(PAIR_NAME), {cache:"no-store"});
+  4882→    if(!r.ok) return;
+  4883→    const data = await r.json();
+  4884→    if(data.status === "OK" && data.candles && data.candles.length > 0){
+  4885→      digits = data.digits || 5;
+  4886→      // Update price format precision
+  4887→      series.applyOptions({ priceFormat: { type: 'price', precision: digits, minMove: Math.pow(10, -digits) } });
+  4888→      // Normalize: API sends {t, open, high, low, close}
+  4889→      // Lightweight Charts expects {time, open, high, low, close}
+  4890→      let raw = data.candles.map(c => ({
+  4891→        time: Number(c.t || c.time || 0),
+  4892→        open: Number(c.open), high: Number(c.high),
+  4893→        low: Number(c.low), close: Number(c.close)
+  4894→      })).filter(c => c.time > 0 && c.open > 0);
+  4895→      raw.sort((a,b) => a.time - b.time);
+  4896→      // Deduplicate by time (Lightweight Charts requires strictly ascending unique times)
+  4897→      const seen = new Set();
+  4898→      raw = raw.filter(c => { if(seen.has(c.time)) return false; seen.add(c.time); return true; });
+  4899→
+  4900→      candles = raw;
+  4901→      if(candles.length > 0){
+  4902→        lastBarTime = candles[candles.length - 1].time;
+  4903→      }
+  4904→
+  4905→      // Push to series
+  4906→      series.setData(candles);
+  4907→
+  4908→      // Hide loading overlay
+  4909→      const ol = document.getElementById("loadingOverlay");
+  4910→      if(ol && candles.length > 0) ol.style.display = "none";
+  4911→
+  4912→      // Fit content on first load, then keep the latest view
+  4913→      if(!initialized){
+  4914→        chart.timeScale().fitContent();
+  4915→        initialized = true;
+  4916→      }
+  4917→
+  4918→      updatePriceHeader();
+  4919→    }
+  4920→  } catch(e){ console.error("[Chart] fetch error:", e); }
+  4921→}
+  4922→
+  4923→async function fetchLiveTick(){
+  4924→  try{
+  4925→    const r = await fetch("/api/last-tick?pair=" + encodeURIComponent(PAIR_NAME), {cache:"no-store"});
+  4926→    if(!r.ok) return;
+  4927→    const d = await r.json();
+  4928→    if(d.status === "OK" && d.time && d.open){
+  4929→      const t = Number(d.time);
+  4930→      const tick = {
+  4931→        time: t, open: Number(d.open), high: Number(d.high),
+  4932→        low: Number(d.low), close: Number(d.close)
+  4933→      };
+  4934→      if(t > 0 && tick.open > 0 && candles.length > 0){
+  4935→        const last = candles[candles.length - 1];
+  4936→        if(t === last.time){
+  4937→          // Update current candle in place
+  4938→          last.high = Math.max(last.high, tick.high);
+  4939→          last.low = Math.min(last.low, tick.low);
+  4940→          last.close = tick.close;
+  4941→          series.update(last);
+  4942→        } else if(t > last.time){
+  4943→          candles.push(tick);
+  4944→          lastBarTime = t;
+  4945→          series.update(tick);
+  4946→        }
+  4947→        updatePriceHeader();
+  4948→      }
+  4949→    }
+  4950→  } catch(e){}
+  4951→}
+  4952→
+  4953→// Start
+  4954→fetchFullCandles();
+  4955→// v9.0: MAX-SPEED polling intervals.
+  4956→//   - fetchLiveTick: 300ms -> 50ms (20 ticks/sec, near-instant chart updates)
+  4957→//     This is the hot path: the dashboard polls /api/last-tick for the live price.
+  4958→//   - fetchFullCandles: 3000ms -> 500ms (rare full resync; the live tick path
+  4959→//     handles 99% of updates). 500ms is enough to catch missed candles without
+  4960→//     hammering the Flask server.
+  4961→// Note: these are CLIENT-side polls to the local Flask server. The Flask server
+  4962→// itself receives updates from realtime_stream at STREAM_POLL_INTERVAL=0.05s.
+  4963→setInterval(fetchFullCandles, 500);
+  4964→setInterval(fetchLiveTick, 50);
+  4965→</script>
+  4966→</body>
+  4967→</html>"""
+  4968→
+  4969→# == Flask Web Server ==========================================================
+  4970→def _build_web_flask_app():
+  4971→    """Build and return Flask app for the embedded web server."""
+  4972→    if not HAS_FLASK:
+  4973→        return None
+  4974→
+  4975→    web_app = Flask(__name__)
+  4976→
+  4977→    @web_app.route("/")
+  4978→    def web_home():
+  4979→        html = _WEB_HOME_HTML.replace("CSS_HERE", _WEB_SHARED_CSS)
+  4980→        return Response(html, content_type="text/html; charset=utf-8",
+  4981→                        headers={"Cache-Control": "no-store, no-cache"})
+  4982→
+  4983→    @web_app.route("/pairs=<path:pair_name>")
+  4984→    def web_pair_chart(pair_name):
+  4985→        pair_name = pair_name.strip()
+  4986→        display = pair_name.replace("-OTCq", " (OTC)").replace("-OTC", " (OTC)")
+  4987→        html = _WEB_CHART_HTML.replace("PAIR_NAME_RAW", pair_name)
+  4988→        html = html.replace("PAIR_DISPLAY", display)
+  4989→        html = html.replace("CSS_HERE", _WEB_SHARED_CSS)
+  4990→        return Response(html, content_type="text/html; charset=utf-8",
+  4991→                        headers={"Cache-Control": "no-store, no-cache"})
+  4992→
+  4993→    @web_app.route("/api/pairs")
+  4994→    def web_api_pairs():
+  4995→        with _web_candle_lock:
+  4996→            pairs_data = []
+  4997→            for name, data in sorted(_web_candle_store.items()):
+  4998→                pairs_data.append({
+  4999→                    "pair": name,
+  5000→                    "lastUpdate": data.get("lastUpdate", 0),
+  5001→                    "candleCount": len(data.get("candles", [])),
+  5002→                })
+  5003→        last_push = _web_push_stats.get("last_push_time", 0)
+  5004→        is_live = last_push > 0 and (int(time.time() * 1000) - last_push) < 10000
+  5005→        result = {
+  5006→            "status": "OK",
+  5007→            "pair_count": len(pairs_data),
+  5008→            "pairs": pairs_data,
+  5009→            "stats": {
+  5010→                "totalPushes": _web_push_stats.get("total_pushes", 0),
+  5011→                "lastPushTime": last_push,
+  5012→                "isLive": is_live,
+  5013→            },
+  5014→        }
+  5015→        resp = Response(json.dumps(result, separators=(",", ":")),
+  5016→                        content_type="application/json")
+  5017→        resp.headers["Cache-Control"] = "no-cache"
+  5018→        resp.headers["Access-Control-Allow-Origin"] = "*"
+  5019→        return resp
+  5020→
+  5021→    @web_app.route("/api/candles")
+  5022→    def web_api_candles():
+  5023→        pair = flask_request.args.get("pair", "").strip()
+  5024→        if not pair:
+  5025→            return Response(json.dumps({"status": "ERROR", "error": "Missing pair", "candles": []}),
+  5026→                            content_type="application/json", status=400)
+  5027→        with _web_candle_lock:
+  5028→            data = _web_candle_store.get(pair)
+  5029→            if data is None:
+  5030→                pair_lower = pair.lower()
+  5031→                for k, v in _web_candle_store.items():
+  5032→                    if k.lower() == pair_lower:
+  5033→                        data = v
+  5034→                        break
+  5035→        if data is None:
+  5036→            return Response(json.dumps({"status": "ERROR", "error": f"No data for {pair}", "candles": []}),
+  5037→                            content_type="application/json", status=404)
+  5038→        candles = data.get("candles", [])
+  5039→        chart_candles = [{"t": int(c["time"]), "open": c["open"], "high": c["high"],
+  5040→                          "low": c["low"], "close": c["close"]} for c in candles]
+  5041→        result = {
+  5042→            "status": "OK",
+  5043→            "pair": pair,
+  5044→            "digits": data.get("digits", 5),
+  5045→            "candle_count": len(chart_candles),
+  5046→            "candles": chart_candles,
+  5047→        }
+  5048→        resp = Response(json.dumps(result, separators=(",", ":")), content_type="application/json")
+  5049→        resp.headers["Cache-Control"] = "no-cache"
+  5050→        resp.headers["Access-Control-Allow-Origin"] = "*"
+  5051→        return resp
+  5052→
+  5053→    @web_app.route("/api/last-tick")
+  5054→    def web_api_last_tick():
+  5055→        """Returns only the latest tick for a pair (very lightweight, for real-time updates)."""
+  5056→        pair = flask_request.args.get("pair", "").strip()
+  5057→        if not pair:
+  5058→            return Response(json.dumps({"status": "ERROR", "error": "Missing pair"}),
+  5059→                            content_type="application/json", status=400)
+  5060→        with _web_candle_lock:
+  5061→            tick = _web_latest_tick.get(pair)
+  5062→            if tick is None:
+  5063→                pair_lower = pair.lower()
+  5064→                for k, v in _web_latest_tick.items():
+  5065→                    if k.lower() == pair_lower:
+  5066→                        tick = v
+  5067→                        break
+  5068→        if tick is None:
+  5069→            return Response(json.dumps({"status": "WAIT"}),
+  5070→                            content_type="application/json", status=200)
+  5071→        result = {"status": "OK", "pair": pair, **tick}
+  5072→        resp = Response(json.dumps(result, separators=(",", ":")), content_type="application/json")
+  5073→        resp.headers["Cache-Control"] = "no-cache"
+  5074→        resp.headers["Access-Control-Allow-Origin"] = "*"
+  5075→        return resp
+  5076→
+  5077→    @web_app.route("/api/health")
+  5078→    def web_health():
+  5079→        with _web_candle_lock:
+  5080→            pair_count = len(_web_candle_store)
+  5081→        return Response(json.dumps({"status": "OK", "pairs": pair_count,
+  5082→                                    "uptime": int(time.time() - _web_push_stats["start_time"])}),
+  5083→                        content_type="application/json")
+  5084→
+  5085→    import logging as _logging
+  5086→    _logging.getLogger("werkzeug").setLevel(_logging.ERROR)
+  5087→    return web_app
+  5088→
+  5089→
+  5090→def _start_web_server():
+  5091→    """Start the Flask web server in a daemon thread."""
+  5092→    if not HAS_FLASK:
+  5093→        print(f"\n{Colors.DIM}[WebServer] Flask not installed -- no dashboard."
+  5094→              f"  pip install flask{Colors.RESET}")
+  5095→        return
+  5096→    web_app = _build_web_flask_app()
+  5097→    if web_app is None:
+  5098→        return
+  5099→
+  5100→    def _run():
+  5101→        try:
+  5102→            web_app.run(host=WEB_SERVER_HOST, port=WEB_SERVER_PORT,
+  5103→                        debug=False, use_reloader=False, threaded=True)
+  5104→        except OSError as e:
+  5105→            if "Address already in use" in str(e) or "10048" in str(e):
+  5106→                logmsg(f"[WebServer] Port {WEB_SERVER_PORT} already in use -- skipping dashboard")
+  5107→            else:
+  5108→                logmsg(f"[WebServer] Failed to start: {e}")
+  5109→        except Exception as e:
+  5110→            logmsg(f"[WebServer] Error: {e}")
+  5111→
+  5112→    t = threading.Thread(target=_run, name="WebDashboard", daemon=True)
+  5113→    t.start()
+  5114→    time.sleep(0.6)
+  5115→    print(f"\n{Colors.GREEN}{'='*60}{Colors.RESET}")
+  5116→    print(f"{Colors.GREEN}  [WebServer] Dashboard running at:{Colors.RESET}")
+  5117→    print(f"{Colors.BOLD}  http://{WEB_SERVER_HOST}:{WEB_SERVER_PORT}/{Colors.RESET}")
+  5118→    print(f"{Colors.DIM}  Click any pair card to view its live chart{Colors.RESET}")
+  5119→    print(f"{Colors.GREEN}{'='*60}{Colors.RESET}\n")
+  5120→
+  5121→
+  5122→if __name__ == "__main__":
+  5123→    # ════════════════════════════════════════════════════════════════════
+  5124→    # STAGE 1: Select Pairs — choose specific pairs or all pairs
+  5125→    # ════════════════════════════════════════════════════════════════════
+  5126→    _ALL_PAIRS = list(ASSET_LIST)  # full default list
+  5127→    _PAIR_COLS = 3
+  5128→    print()
+  5129→    print(f"{Colors.BOLD}  Select Pairs to Stream{Colors.RESET}")
+  5130→    print(f"  {Colors.DIM}{'═' * 68}{Colors.RESET}")
+  5131→    _col_w = 22
+  5132→    for _pi in range(0, len(_ALL_PAIRS), _PAIR_COLS):
+  5133→        _row_parts = []
+  5134→        for _pj in range(_PAIR_COLS):
+  5135→            _pidx = _pi + _pj
+  5136→            if _pidx < len(_ALL_PAIRS):
+  5137→                _sym = _ALL_PAIRS[_pidx]
+  5138→                _label = _sym.replace("_otc", "(OTC)").upper()
+  5139→                _row_parts.append(f"{Colors.CYAN}{_pidx+1:>3}{Colors.RESET}. {_label:<{_col_w}}")
+  5140→        print("  " + "  ".join(_row_parts))
+  5141→    print(f"  {Colors.DIM}{'═' * 68}{Colors.RESET}")
+  5142→    print(f"  {Colors.DIM}Options:{Colors.RESET}")
+  5143→    print(f"  {Colors.CYAN}[Enter]{Colors.RESET}         -> Stream ALL {len(_ALL_PAIRS)} pairs")
+  5144→    print(f"  {Colors.CYAN}1,5,12{Colors.RESET}          -> Stream by number (comma-separated)")
+  5145→    print(f"  {Colors.CYAN}EURUSD,GBPUSD{Colors.RESET}   -> Stream by name (partial match OK)")
+  5146→    print(f"  {Colors.DIM}{'═' * 68}{Colors.RESET}")
+  5147→    while True:
+  5148→        try:
+  5149→            _pair_input = input(f"{Colors.CYAN}  Your choice: {Colors.RESET}").strip()
+  5150→        except (KeyboardInterrupt, EOFError):
+  5151→            _pair_input = ""
+  5152→        if not _pair_input:
+  5153→            ASSET_LIST = list(_ALL_PAIRS)
+  5154→            print(f"{Colors.GREEN}  -> Streaming ALL {len(ASSET_LIST)} pairs{Colors.RESET}\n")
+  5155→            break
+  5156→        _selected = []
+  5157→        _tokens = [t.strip() for t in _pair_input.replace(';', ',').split(',') if t.strip()]
+  5158→        _numeric_mode = all(t.isdigit() for t in _tokens)
+  5159→        if _numeric_mode:
+  5160→            for _t in _tokens:
+  5161→                _idx = int(_t) - 1
+  5162→                if 0 <= _idx < len(_ALL_PAIRS):
+  5163→                    if _ALL_PAIRS[_idx] not in _selected:
+  5164→                        _selected.append(_ALL_PAIRS[_idx])
+  5165→                else:
+  5166→                    print(f"{Colors.RED}  Invalid number: {_t} (valid: 1-{len(_ALL_PAIRS)}){Colors.RESET}")
+  5167→        else:
+  5168→            for _token in _tokens:
+  5169→                _token_search = _token.upper().replace("-OTC","").replace("_OTC","")
+  5170→                _matches = [p for p in _ALL_PAIRS if
+  5171→                            _token_search in p.upper() or
+  5172→                            p.lower().startswith(_token.lower())]
+  5173→                if _matches:
+  5174→                    for _m in _matches:
+  5175→                        if _m not in _selected:
+  5176→                            _selected.append(_m)
+  5177→                else:
+  5178→                    print(f"{Colors.RED}  No pair found matching: {_token}{Colors.RESET}")
+  5179→        if _selected:
+  5180→            ASSET_LIST = _selected
+  5181→            print(f"{Colors.GREEN}  -> Selected {len(ASSET_LIST)} pair(s):{Colors.RESET}")
+  5182→            for _s in ASSET_LIST:
+  5183→                print(f"    {Colors.CYAN}.{Colors.RESET} {_s.replace('_otc','').upper()} (OTC)")
+  5184→            print()
+  5185→            break
+  5186→        else:
+  5187→            print(f"{Colors.RED}  No valid pairs selected. Try again.{Colors.RESET}")
+  5188→
+  5189→    # ════════════════════════════════════════════════════════════════════
+  5190→    # STAGE 2: Select Timeframe — 3 أعمدة × 5 صفوف (بدون خطوط زرقاء كثيرة)
+  5191→    # ════════════════════════════════════════════════════════════════════
+  5192→    # ترتيب الفريمات حسب الطلب:
+  5193→    # العمود الأول (1-5): M1, M2, M3, M5, M10
+  5194→    # العمود الثاني (6-10): M15, M30, H1, H4, D1
+  5195→    # العمود الثالث (11-14): S5, S10, S15, S30
+  5196→    _TF_DISPLAY_ORDER = [
+  5197→        # (idx, mt4_period, seconds, short_label, full_label)
+  5198→        (1,  1,    60,    "M1",  "1 minute"),
+  5199→        (2,  2,    120,   "M2",  "2 minutes"),
+  5200→        (3,  3,    180,   "M3",  "3 minutes"),
+  5201→        (4,  5,    300,   "M5",  "5 minutes"),
+  5202→        (5,  10,   600,   "M10", "10 minutes"),
+  5203→        (6,  15,   900,   "M15", "15 minutes"),
+  5204→        (7,  30,   1800,  "M30", "30 minutes"),
+  5205→        (8,  60,   3600,  "H1",  "1 hour"),
+  5206→        (9,  240,  14400, "H4",  "4 hours"),
+  5207→        (10, 1440, 86400, "D1",  "1 day"),
+  5208→        (11, 1,    5,     "S5",  "5 seconds"),
+  5209→        (12, 1,    10,    "S10", "10 seconds"),
+  5210→        (13, 1,    15,    "S15", "15 seconds"),
+  5211→        (14, 1,    30,    "S30", "30 seconds"),
+  5212→    ]
+  5213→    # خريطة (idx → is_subsecond)
+  5214→    _TF_SUBSEC = {11: True, 12: True, 13: True, 14: True}
+  5215→
+  5216→    print()
+  5217→    print(f"{Colors.BOLD}  Select Timeframe{Colors.RESET}")
+  5218→    print(f"  {Colors.DIM}{'═' * 55}{Colors.RESET}")
+  5219→    # عرض القائمة في 3 أعمدة × 5 صفوف
+  5220→    # صف 0: idx 1,6,11 | صف 1: 2,7,12 | صف 2: 3,8,13 | صف 3: 4,9,14 | صف 4: 5,10,—
+  5221→    _ROWS = [
+  5222→        (1, 6, 11),   # M1   M15   S5
+  5223→        (2, 7, 12),   # M2   M30   S10
+  5224→        (3, 8, 13),   # M3   H1    S15
+  5225→        (4, 9, 14),   # M5   H4    S30
+  5226→        (5, 10, None),# M10  D1    —
+  5227→    ]
+  5228→    _tf_lookup = {row[0]: row for row in _TF_DISPLAY_ORDER}
+  5229→    # ثوابت المحاذاة: كل عمود 17 حرف ظاهر، فجوة 2 حرف بين الأعمدة
+  5230→    # → كل صف = 2 (indent) + 17*3 + 2*2 = 57 حرف (مطابق لخط ═ 55 + 2 indent)
+  5231→    # الصيغة: "XX - XXXXX - XXX" = 2 + 3 + 5 + 3 + 4 = 17 حرف ظاهر لكل خلية
+  5232→    _TF_COL_WIDTH = 17
+  5233→    _TF_GAP = "  "  # فجوة صغيرة بين الأعمدة (قرّب الأعمدة من بعضها)
+  5234→    for row in _ROWS:
+  5235→        cells = []
+  5236→        for idx in row:
+  5237→            if idx is None:
+  5238→                # ملء بمسافات بنفس عرض العمود (يحافظ على تساوي طول الصف)
+  5239→                cells.append(" " * _TF_COL_WIDTH)
+  5240→                continue
+  5241→            entry = _tf_lookup[idx]
+  5242→            sec = entry[2]      # seconds (int)
+  5243→            label = entry[3]    # short_label (M1, S30, ...)
+  5244→            # التنسيق: idx(يمين 2) + " - " + sec(يسار 5) + " - " + label(يسار 4) = 17 حرف
+  5245→            # Cyan = لون الشعار (بدل Yellow)
+  5246→            cells.append(f"{Colors.CYAN}{idx:>2}{Colors.RESET} - {sec:<5} - {label:<4}")
+  5247→        print(f"  {cells[0]}{_TF_GAP}{cells[1]}{_TF_GAP}{cells[2]}")
+  5248→    print(f"  {Colors.DIM}{'═' * 55}{Colors.RESET}")
+  5249→    while True:
+  5250→        try:
+  5251→            tf_choice = input(f"{Colors.CYAN}  Choose 1-14 (default=1 for M1): {Colors.RESET}").strip()
+  5252→            if not tf_choice:
+  5253→                _chosen_idx = 1
+  5254→            else:
+  5255→                _chosen_idx = int(tf_choice)
+  5256→                if not (1 <= _chosen_idx <= 14):
+  5257→                    print(f"{Colors.RED}  Invalid choice (1-14).{Colors.RESET}")
+  5258→                    continue
+  5259→            break
+  5260→        except (ValueError, KeyboardInterrupt):
+  5261→            print(f"{Colors.RED}  Invalid input.{Colors.RESET}")
+  5262→        except EOFError:
+  5263→            _chosen_idx = 1
+  5264→            break
+  5265→    _tf_entry = _tf_lookup[_chosen_idx]
+  5266→    PERIOD, PERIOD_SECONDS = _tf_entry[1], _tf_entry[2]
+  5267→    _tf_short = _tf_entry[2]
+  5268→    _tf_full = _tf_entry[3]
+  5269→    _is_subsecond = _TF_SUBSEC.get(_chosen_idx, False)
+  5270→    globals()['PERIOD'] = PERIOD
+  5271→    globals()['PERIOD_SECONDS'] = PERIOD_SECONDS
+  5272→    if PERIOD_SECONDS < 60:
+  5273→        globals()['IS_SUBSECOND'] = True
+  5274→        globals()['SUBSECOND_SECONDS'] = PERIOD_SECONDS
+  5275→        _subsec_label = f"{PERIOD_SECONDS}S"
+  5276→        globals()['SUBSECOND_LABEL'] = _subsec_label
+  5277→        print(f"{Colors.GREEN}  Using timeframe: {_tf_short} - {_tf_full}{Colors.RESET}")
+  5278→        print(f"{Colors.DIM}  Sub-minute: fetches period=1 history + aggregates locally{Colors.RESET}\n")
+  5279→    else:
+  5280→        globals()['IS_SUBSECOND'] = False
+  5281→        globals()['SUBSECOND_SECONDS'] = 0
+  5282→        globals()['SUBSECOND_LABEL'] = ""
+  5283→        print(f"{Colors.GREEN}  Using timeframe: {_tf_short} - {_tf_full}{Colors.RESET}\n")
+  5284→
+  5285→    # ════════════════════════════════════════════════════════════════════
+  5286→    # STAGE 3: Select History Size
+  5287→    # للفريمات الفرعية (subsecond) نستخدم قيمة ثابتة ولا نسأل المستخدم
+  5288→    # لأن النظام يجلب period=1 ويُجمّع محلياً — عدد الأيام غير ذي معنى هنا
+  5289→    # ════════════════════════════════════════════════════════════════════
+  5290→    if PERIOD_SECONDS < 60:
+  5291→        # الفريمات الفرعية (5S/10S/15S/30S): قيمة ثابتة بدون سؤال
+  5292→        INITIAL_CANDLES = SUBSECOND_HISTORY_CANDLES
+  5293→        HISTORY_DAYS = (INITIAL_CANDLES * PERIOD_SECONDS) / 86400.0 * 1.15
+  5294→        FETCH_DURATION_SECONDS = int(86400 * HISTORY_DAYS)
+  5295→        globals()['INITIAL_CANDLES'] = INITIAL_CANDLES
+  5296→        globals()['HISTORY_DAYS'] = HISTORY_DAYS
+  5297→        globals()['FETCH_DURATION_SECONDS'] = FETCH_DURATION_SECONDS
+  5298→        # رسالة قصيرة بدل قائمة كاملة
+  5299→        print(f"{Colors.DIM}  Sub-second timeframe: auto history ({INITIAL_CANDLES} candles, {HISTORY_DAYS:.2f} days){Colors.RESET}\n")
+  5300→    else:
+  5301→        # الفريمات 60s+: نسأل المستخدم عن عدد الأيام
+  5302→        _default_days = (1000 * PERIOD_SECONDS) / 86400.0 * 1.15  # +15% margin
+  5303→        print(f"{Colors.BOLD}  Select History Size{Colors.RESET}")
+  5304→        print(f"  {Colors.DIM}Default: 1000 candles ({_default_days:.2f} days). Or enter days manually.{Colors.RESET}")
+  5305→        while True:
+  5306→            try:
+  5307→                days_input = input(f"{Colors.CYAN}  Days (default={_default_days:.2f}): {Colors.RESET}").strip()
+  5308→                if not days_input:
+  5309→                    INITIAL_CANDLES = 1000
+  5310→                    HISTORY_DAYS = _default_days
+  5311→                else:
+  5312→                    days_val = float(days_input)
+  5313→                    if days_val <= 0:
+  5314→                        print(f"{Colors.RED}  Must be positive.{Colors.RESET}")
+  5315→                        continue
+  5316→                    HISTORY_DAYS = days_val * 1.15
+  5317→                    INITIAL_CANDLES = max(int((days_val * 86400) / PERIOD_SECONDS), 100)
+  5318→                FETCH_DURATION_SECONDS = int(86400 * HISTORY_DAYS)
+  5319→                globals()['INITIAL_CANDLES'] = INITIAL_CANDLES
+  5320→                globals()['HISTORY_DAYS'] = HISTORY_DAYS
+  5321→                globals()['FETCH_DURATION_SECONDS'] = FETCH_DURATION_SECONDS
+  5322→                break
+  5323→            except (ValueError, KeyboardInterrupt):
+  5324→                print(f"{Colors.RED}  Invalid input.{Colors.RESET}")
+  5325→            except EOFError:
+  5326→                INITIAL_CANDLES = 1000
+  5327→                HISTORY_DAYS = _default_days
+  5328→                FETCH_DURATION_SECONDS = int(86400 * HISTORY_DAYS)
+  5329→                globals()['INITIAL_CANDLES'] = INITIAL_CANDLES
+  5330→                globals()['HISTORY_DAYS'] = HISTORY_DAYS
+  5331→                globals()['FETCH_DURATION_SECONDS'] = FETCH_DURATION_SECONDS
+  5332→                break
+  5333→        print(f"{Colors.GREEN}  Using history: {HISTORY_DAYS:.2f} days = {INITIAL_CANDLES} candles{Colors.RESET}\n")
+  5334→
+  5335→    # (تم حذف كتلة Dashboard بناءً على طلب المستخدم — الترحيب + القوائم كافية)
+  5336→
+  5337→    # ════════════════════════════════════════════════════════════════════
+  5338→    # STAGE 4: Select Domain — عنوان + قائمة مختصرة + سطر إدخال
+  5339→    # ════════════════════════════════════════════════════════════════════
+  5340→    saved_host = session_manager.get_saved_host()
+  5341→    print()
+  5342→    print(f"{Colors.BOLD}  Select Domain{Colors.RESET}")
+  5343→    for i, (host, label) in enumerate(DOMAINS, 1):
+  5344→        marker = f" {Colors.GREEN}(saved){Colors.RESET}" if host == saved_host else ""
+  5345→        print(f"  {Colors.CYAN}{i}{Colors.RESET} - {label}{marker}")
+  5346→    _saved_idx = next((i for i, (h, l) in enumerate(DOMAINS) if h == saved_host), 0)
+  5347→    _default_choice = str(_saved_idx + 1)
+  5348→    while True:
+  5349→        try:
+  5350→            choice = input(f"{Colors.CYAN}  Choose 1-{len(DOMAINS)} (default={_default_choice}): {Colors.RESET}").strip()
+  5351→            if not choice:
+  5352→                QX_HOST = saved_host if saved_host else DOMAINS[0][0]
+  5353→            else:
+  5354→                idx = int(choice) - 1
+  5355→                if 0 <= idx < len(DOMAINS):
+  5356→                    QX_HOST = DOMAINS[idx][0]
+  5357→                else:
+  5358→                    print(f"{Colors.RED}  Invalid choice.{Colors.RESET}")
+  5359→                    continue
+  5360→            break
+  5361→        except (ValueError, KeyboardInterrupt):
+  5362→            print(f"{Colors.RED}  Invalid input.{Colors.RESET}")
+  5363→        except EOFError:
+  5364→            QX_HOST = saved_host if saved_host else DOMAINS[0][0]
+  5365→            break
+  5366→    globals()['QX_HOST'] = QX_HOST
+  5367→    print(f"{Colors.GREEN}  Using domain: {QX_HOST}{Colors.RESET}\n")
+  5368→
+  5369→    # ════════════════════════════════════════════════════════════════════
+  5370→    # STAGE 5: تسجيل دخول Quotex
+  5371→    # ════════════════════════════════════════════════════════════════════
+  5372→    should_force = session_manager.should_force_fresh()
+  5373→    saved_email = session_manager.get_saved_email()
+  5374→    success = False
+  5375→    if saved_email and not should_force:
+  5376→        print(f"{Colors.GREEN}Found saved email: {saved_email}{Colors.RESET}")
+  5377→        PASSWORD_INPUT = input(f"{Colors.CYAN} Password: {Colors.RESET}").strip()
+  5378→        fut = asyncio.run_coroutine_threadsafe(connect_quotex(saved_email, PASSWORD_INPUT, force_fresh=False, max_attempts=3), ASYNC_LOOP)
+  5379→        success = fut.result(timeout=180)
+  5380→    if not success:
+  5381→        print()
+  5382→        EMAIL_INPUT = input(f"{Colors.CYAN}Email: {Colors.RESET}").strip()
+  5383→        PASSWORD_INPUT = input(f"{Colors.CYAN}Password: {Colors.RESET}").strip()
+  5384→        fut = asyncio.run_coroutine_threadsafe(connect_quotex(EMAIL_INPUT, PASSWORD_INPUT, force_fresh=True, max_attempts=3), ASYNC_LOOP)
+  5385→        success = fut.result(timeout=300)
+  5386→    if not success:
+  5387→        print(f"\n{Colors.RED}[FAILED] Could not connect after all attempts.{Colors.RESET}")
+  5388→        sys.exit(1)
+  5389→        
+  5390→    # (FIX D) "Connected successfully!" —
+  5391→    if WINAPI_AVAILABLE:
+  5392→        time.sleep(1)
+  5393→        find_mt4_window()
+  5394→
+  5395→    # (FIX D) HST —
+  5396→    try:
+  5397→        os.makedirs(MT4_HISTORY_PATH, exist_ok=True)
+  5398→    except Exception:
+  5399→        pass
+  5400→
+  5401→    total_assets = len(ASSET_LIST)
+  5402→
+  5403→    # === Start embedded web dashboard ===
+  5404→    _start_web_server()
+  5405→
+  5406→    # ===== FIX 8: 1 — =====
+  5407→    print(f"\n{Colors.CYAN}{'═'*60}{Colors.RESET}")
+  5408→    print(f"{Colors.BOLD}  SECTION 1: CANDLE FETCHING ({total_assets} assets, {INITIAL_CANDLES} candles each){Colors.RESET}")
+  5409→    print(f"{Colors.CYAN}{'═'*60}{Colors.RESET}\n")
+  5410→
+  5411→    all_assets = []
+  5412→    total_loaded = 0
+  5413→    consecutive_disconnects = 0
+  5414→    # v8.3: track consecutive zero-candle assets in subsecond mode.
+  5415→    # If the server is throttling us, candle counts drop to 0 for several
+  5416→    # assets in a row. Rather than burning 8 * 30s = 240s in reconnect
+  5417→    # attempts at the top of the loop, break cleanly after 3 zero-candle
+  5418→    # assets in a row.
+  5419→    _subsecond_zero_streak = 0
+  5420→    for idx, symbol in enumerate(ASSET_LIST, 1):
+  5421→        # ===== FIX 3: =====
+  5422→        # auto_reconnect .
+  5423→        # ASYNC_LOOP run_coroutine_threadsafe
+  5424→        # main async.
+  5425→        if not CONNECTION_ALIVE or CLIENT is None or CLIENT.api is None:
+  5426→            logmsg(f"[fetch_loop] connection dead before asset {idx}/{total_assets}; waiting for reconnect...")
+  5427→            async def _wait_reconnect(timeout=30.0):
+  5428→                try:
+  5429→                    await wait_until(
+  5430→                        lambda: CONNECTION_ALIVE and CLIENT is not None and CLIENT.api is not None,
+  5431→                        timeout=timeout,
+  5432→                        poll_interval=0.5,
+  5433→                    )
+  5434→                    return True
+  5435→                except asyncio.TimeoutError:
+  5436→                    return False
+  5437→            reconnected = asyncio.run_coroutine_threadsafe(_wait_reconnect(30.0), ASYNC_LOOP).result(timeout=35)
+  5438→            if reconnected:
+  5439→                consecutive_disconnects = 0
+  5440→            else:
+  5441→                consecutive_disconnects += 1
+  5442→                logmsg(f"[fetch_loop] reconnect failed within 30s (streak={consecutive_disconnects})")
+  5443→                if consecutive_disconnects >= MAX_RECONNECTS_DURING_FETCH:
+  5444→                    logmsg(f"[fetch_loop] giving up after {consecutive_disconnects} failed reconnects")
+  5445→                    break
+  5446→                continue
+  5447→        asset = Asset(symbol)
+  5448→        display = pretty_asset_name(symbol)
+  5449→        all_assets.append(asset)
+  5450→        ALL_STREAMING_ASSETS.append(asset)
+  5451→        start_time = time.time()
+  5452→        # v8.3/v8.11: Use SUBSECOND_ASSET_DELAY (2.0s) for subsecond mode,
+  5453→        # M1_ASSET_DELAY (1.0s) for M1 bridge mode, 0.1s (FETCH_ASSET_DELAY)
+  5454→        # for other 60s+ timeframes (normal speed).
+  5455→        if IS_SUBSECOND:
+  5456→            _asset_delay = SUBSECOND_ASSET_DELAY
+  5457→        elif PERIOD_SECONDS == 60 and M1_USE_1S_BRIDGE:
+  5458→            _asset_delay = M1_ASSET_DELAY  # v8.11: 1.0s between assets in M1 bridge mode
+  5459→        else:
+  5460→            _asset_delay = FETCH_ASSET_DELAY
+  5461→        # v8.1: dispatch to the correct stream function based on IS_SUBSECOND.
+  5462→        _stream_fn = subsecond_stream if IS_SUBSECOND else realtime_stream
+  5463→        # Start stream FIRST (before historical fetch). For subsecond mode,
+  5464→        # subsecond_stream() will schedule fetch_subsecond_history in the
+  5465→        # background. For normal mode, realtime_stream() just collects ticks.
+  5466→        #
+  5467→        # v8.9: start realtime_stream in ALL modes, including TEST MODE.
+  5468→        # In TEST MODE, realtime_stream will use stream_period=1 (see Patch 2
+  5469→        # in realtime_stream's body) -- it subscribes to 1s ticks (NOT 1m
+  5470→        # snapshots), so no 199-candle pollution. update_candle buckets the
+  5471→        # 1s ticks into 1m candles, updating the last candle for live price.
+  5472→        asset.stream_task = asyncio.run_coroutine_threadsafe(_stream_fn(asset), ASYNC_LOOP)
+  5473→        # Small delay to let stream subscribe before fetch
+  5474→        time.sleep(0.1)
+  5475→        # v8.1: In subsecond mode, subsecond_stream() already triggers the
+  5476→        # background history fetch via fetch_subsecond_history(asset). Calling
+  5477→        # fetch_candles_with_retry on top of that would conflict. So we skip
+  5478→        # the normal historical fetch path here.
+  5479→        if IS_SUBSECOND:
+  5480→            # v8.2: DO NOT call fetch_subsecond_history explicitly here --
+  5481→            # subsecond_stream() already scheduled it as a background task.
+  5482→            # Poll asset.candles length and the asset._bg_tasks set, exit as
+  5483→            # soon as the background fetch completes (success or failure) OR
+  5484→            # the target candle count is reached. Hard cap = 15s.
+  5485→            _subsecond_wait_deadline = time.time() + 15.0  # v8.3: was 45s -- reduced to lower WebSocket pressure
+  5486→            while time.time() < _subsecond_wait_deadline:
+  5487→                # If the background task set is empty, the fetch has finished
+  5488→                _bg_tasks = getattr(asset, '_bg_tasks', None)
+  5489→                if _bg_tasks is not None and len(_bg_tasks) == 0:
+  5490→                    break
+  5491→                # If we already have enough candles, no need to wait further
+  5492→                if len(getattr(asset, 'candles', [])) >= SUBSECOND_HISTORY_CANDLES:
+  5493→                    break
+  5494→                # Bail out early if the connection died
+  5495→                if not CONNECTION_ALIVE:
+  5496→                    break
+  5497→                time.sleep(0.5)
+  5498→            candles_count = len(getattr(asset, 'candles', []))
+  5499→            elapsed = time.time() - start_time
+  5500→            if candles_count >= MIN_CANDLES_THRESHOLD:
+  5501→                total_loaded += candles_count
+  5502→                consecutive_disconnects = 0
+  5503→                # v8.3: reset the zero-candle streak -- we got data, server is healthy
+  5504→                _subsecond_zero_streak = 0
+  5505→                _warn = "" if candles_count >= SUBSECOND_HISTORY_CANDLES else f" {Colors.YELLOW}(target {SUBSECOND_HISTORY_CANDLES}){Colors.RESET}"
+  5506→                print(f"\r{Colors.CLEAR_LINE}  {Colors.CYAN}{display:<25}{Colors.RESET} {Colors.GREEN}{candles_count} {SUBSECOND_LABEL} candles in {elapsed:.1f}s{Colors.RESET}{_warn} Streaming")
+  5507→                # Push to web dashboard immediately after successful fetch
+  5508→                try:
+  5509→                    _web_update_asset(asset, full_resync=True)
+  5510→                except Exception:
+  5511→                    pass
+  5512→            else:
+  5513→                print(f"\r{Colors.CLEAR_LINE}  {Colors.CYAN}{display:<25}{Colors.RESET} {Colors.RED}Only {candles_count} {SUBSECOND_LABEL} candles{Colors.RESET} Streaming")
+  5514→                try:
+  5515→                    _web_update_asset(asset, full_resync=True)
+  5516→                except Exception:
+  5517→                    pass
+  5518→                # v8.3: increment zero-candle streak. If the server has throttled us
+  5519→                # into oblivion (3 zero-candle assets in a row), break the loop cleanly
+  5520→                if candles_count == 0:
+  5521→                    _subsecond_zero_streak += 1
+  5522→                    logmsg(
+  5523→                        f"[fetch_loop] zero-candle streak: {_subsecond_zero_streak}/"
+  5524→                        f"{SUBSECOND_MAX_ZERO_STREAK} (WebSocket likely throttled)"
+  5525→                    )
+  5526→                    if _subsecond_zero_streak >= SUBSECOND_MAX_ZERO_STREAK:
+  5527→                        logmsg(
+  5528→                            f"[fetch_loop] giving up after {_subsecond_zero_streak} "
+  5529→                            f"consecutive zero-candle assets (server throttled)"
+  5530→                        )
+  5531→                        break
+  5532→                else:
+  5533→                    # Got some candles (just below threshold) -- reset streak
+  5534→                    _subsecond_zero_streak = 0
+  5535→        else:
+  5536→            # Normal mode (60s+ timeframes): fetch historical candles in parallel
+  5537→            # while realtime_stream collects live ticks.
+  5538→            #
+  5539→            # v8.4/v8.6: For M1 (PERIOD_SECONDS == 60) and when M1_USE_1S_BRIDGE is True,
+  5540→            # run the new advanced flow:
+  5541→            #   a) fetch 1s candles + aggregate to 1m  -> bridge_1m_candles
+  5542→            #      (1s is the most granular -- 60 consecutive 1s = 1 perfect 1m candle,
+  5543→            #      NO gaps as long as the 1s data is continuous)
+  5544→            #   b) fetch 1000 historical 1m candles (disabling the old bridge fetch
+  5545→            #      for this asset -- we have a better 1s->1m bridge already)
+  5546→            #   c) merge: [historical] + [bridge (where ts > last historical ts)]
+  5547→            #   d) write HST + update MT4_WRITER.sync_state
+  5548→            #   e) print summary: "N historical + M bridge (from K 1s) = total"
+  5549→            _is_m1_with_1s_bridge = (PERIOD_SECONDS == 60 and M1_USE_1S_BRIDGE)
+  5550→            bridge_1m_candles = []
+  5551→            if _is_m1_with_1s_bridge:
+  5552→                # Step (a): fetch 1s -> aggregate to 1m.
+  5553→                # v8.5/v8.6: fetch_1s_and_aggregate_to_1m returns (candles_1m, n_1s).
+  5554→                # It also prints its own console line showing the 1s fetch result
+  5555→                # (the user explicitly asked "must print the loading of those candles
+  5556→                # before loading 1-minute candles"). This print fires BEFORE the
+  5557→                # historical 1m fetch begins.
+  5558→                _n_1s_fetched = 0
+  5559→                try:
+  5560→                    # v8.4 fix: this is in the main SYNC thread -- no 'await'.
+  5561→                    # asyncio.run_coroutine_threadsafe(...).result(timeout=N) bridges sync->async.
+  5562→                    bridge_1m_candles, _n_1s_fetched = asyncio.run_coroutine_threadsafe(
+  5563→                        fetch_1s_and_aggregate_to_1m(asset, idx=idx, total=total_assets),
+  5564→                        ASYNC_LOOP,
+  5565→                    ).result(timeout=M1_BRIDGE_TIMEOUT + 5)
+  5566→                except Exception as e:
+  5567→                    logmsg(f"[fetch_loop:{display}] 1s->1m bridge failed (non-fatal): {e}")
+  5568→                    bridge_1m_candles = []
+  5569→                    _n_1s_fetched = 0
+  5570→                logmsg(
+  5571→                    f"[fetch_loop:{display}] 1s->1m bridge: {_n_1s_fetched} 1s -> {len(bridge_1m_candles)} 1m ready"
+  5572→                )
+  5573→                # v8.7: TEST MODE -- if M1_TEST_1S_ONLY is True, skip the 1000
+  5574→                # historical 1m fetch entirely and use ONLY the 1s->1m aggregated
+  5575→                # candles. This lets us verify the aggregation produces valid 1m
+  5576→                # candles that MT4 can render.
+  5577→                if M1_TEST_1S_ONLY:
+  5578→                    # Use ONLY the 1s->1m aggregated candles as the base for asset.candles.
+  5579→                    asset.candles = list(bridge_1m_candles) if bridge_1m_candles else []
+  5580→                    # Replace any sync_state that realtime_stream might have auto-created
+  5581→                    if asset.symbol in MT4_WRITER.sync_state:
+  5582→                        del MT4_WRITER.sync_state[asset.symbol]
+  5583→                    if asset.candles:
+  5584→                        asset.price = asset.candles[-1]['close']
+  5585→                    asset.write(force=True)
+  5586→                    MT4_WRITER.sync_state[asset.symbol] = {
+  5587→                        'period': PERIOD,
+  5588→                        'candles': list(asset.candles),
+  5589→                        'last_write': 0,
+  5590→                        'last_price': float(asset.candles[-1]['close']) if asset.candles else 0.0,
+  5591→                    }
+  5592→                    candles_count = len(asset.candles)
+  5593→                    elapsed = time.time() - start_time
+  5594→                    # Print with a clear TEST MODE indicator so the user knows
+  5595→                    # they're in the verification flow.
+  5596→                    if candles_count > 0:
+  5597→                        total_loaded += candles_count
+  5598→                        consecutive_disconnects = 0
+  5599→                        print(
+  5600→                            f"\r{Colors.CLEAR_LINE}  {Colors.CYAN}{display:<25}{Colors.RESET} "
+  5601→                            f"{Colors.YELLOW}TEST MODE{Colors.RESET} {Colors.GREEN}{candles_count} 1m candles "
+  5602→                            f"(from {_n_1s_fetched} 1s) in {elapsed:.1f}s{Colors.RESET} Streaming"
+  5603→                        )
+  5604→                    else:
+  5605→                        print(
+  5606→                            f"\r{Colors.CLEAR_LINE}  {Colors.CYAN}{display:<25}{Colors.RESET} "
+  5607→                            f"{Colors.RED}TEST MODE: 0 1m candles (1s fetch failed){Colors.RESET}"
+  5608→                        )
+  5609→                    # Push to web dashboard
+  5610→                    try:
+  5611→                        _web_update_asset(asset, full_resync=True)
+  5612→                    except Exception:
+  5613→                        pass
+  5614→                else:
+  5615→                    # v8.11: intra-asset delay between the 1s fetch and the 1000
+  5616→                    # historical fetch. User explicitly asked: "مهلة ثم يجلب
+  5617→                    # 1000 شمعة" (a delay then fetch 1000 candles).
+  5618→                    time.sleep(M1_INTRA_ASSET_DELAY)
+  5619→                    # Normal flow (M1_TEST_1S_ONLY = False): fetch 1000 historical
+  5620→                    # 1m candles + merge with the 1s->1m bridge.
+  5621→                    # Step (b): fetch 1000 historical 1m candles. Temporarily disable
+  5622→                    # the old _bridge_fetch_recent_candles for this asset -- we already
+  5623→                    # have a more granular 1s->1m bridge that we'll merge in step (c).
+  5624→                    _saved_bridge_flag = BRIDGE_FETCH_ENABLED
+  5625→                    globals()['BRIDGE_FETCH_ENABLED'] = False
+  5626→                    try:
+  5627→                        fut = asyncio.run_coroutine_threadsafe(fetch_candles_with_retry(asset, max_retries=MAX_FETCH_RETRIES, idx=idx, total=total_assets), ASYNC_LOOP)
+  5628→                        candles_count, attempts = fut.result(timeout=180)
+  5629→                    finally:
+  5630→                        globals()['BRIDGE_FETCH_ENABLED'] = _saved_bridge_flag
+  5631→                    # Step (c): merge historical + bridge.
+  5632→                    # v8.12: REPLACE matching historical candles with bridge candles
+  5633→                    # (not just APPEND new ones). User explicitly asked:
+  5634→                    #   "شموع 6 او 8 شموع الاولى من الشموع التاريخية يجب ان
+  5635→                    #    يتم استبدالها ب شموع 1 ثانية التي جمعناها لكي نتخلص
+  5636→                    #    من الثغرات"
+  5637→                    #   (The first 6-8 historical candles should be REPLACED by the
+  5638→                    #    1s-aggregated candles to eliminate gaps.)
+  5639→                    #
+  5640→                    # Logic (same as _bridge_fetch_recent_candles):
+  5641→                    #   1. Walk the historical candles.
+  5642→                    #   2. For each historical candle whose timestamp matches a
+  5643→                    #      bridge candle, REPLACE it with the bridge candle
+  5644→                    #      (more accurate, NO GAPS -- built from 60 raw 1s candles).
+  5645→                    #   3. APPEND any remaining bridge candles (those whose
+  5646→                    #      timestamps are newer than the last historical).
+  5647→                    #   4. Sort + dedup by time.
+  5648→                    if bridge_1m_candles and asset.candles:
+  5649→                        # v8.13: cap the bridge to the NEWEST M1_BRIDGE_REPLACE_COUNT
+  5650→                        # candles (default 6). The server returns a variable count
+  5651→                        # (8/12/13), but we only need the last 6 to cover the max
+  5652→                        # 5-candle gap. Using more would just replace historical
+  5653→                        # candles unnecessarily; using fewer might leave a gap.
+  5654→                        bridge_for_merge = bridge_1m_candles[-M1_BRIDGE_REPLACE_COUNT:]
+  5655→                        bridge_by_time = {c['time']: c for c in bridge_for_merge}
+  5656→                        merged_list = []
+  5657→                        _replaced_count = 0
+  5658→                        for c in asset.candles:
+  5659→                            if c['time'] in bridge_by_time:
+  5660→                                # REPLACE: bridge candle is more accurate (no gaps)
+  5661→                                merged_list.append(bridge_by_time.pop(c['time']))
+  5662→                                _replaced_count += 1
+  5663→                            else:
+  5664→                                merged_list.append(c)
+  5665→                        # APPEND remaining bridge candles (newer than last historical)
+  5666→                        _appended_count = len(bridge_by_time)
+  5667→                        merged_list.extend(bridge_by_time.values())
+  5668→                        # Sort + dedup by time
+  5669→                        seen = set()
+  5670→                        deduped = []
+  5671→                        for c in sorted(merged_list, key=lambda x: x['time']):
+  5672→                            if c['time'] not in seen:
+  5673→                                seen.add(c['time'])
+  5674→                                deduped.append(c)
+  5675→                        asset.candles = deduped
+  5676→                        # Step (d): write merged HST + update sync_state
+  5677→                        if asset.candles:
+  5678→                            asset.price = asset.candles[-1]['close']
+  5679→                        asset.write(force=True)
+  5680→                        MT4_WRITER.sync_state[asset.symbol] = {
+  5681→                            'period': PERIOD,
+  5682→                            'candles': list(asset.candles),
+  5683→                            'last_write': 0,
+  5684→                            'last_price': float(asset.candles[-1]['close']) if asset.candles else 0.0,
+  5685→                        }
+  5686→                        candles_count = len(asset.candles)
+  5687→                        logmsg(
+  5688→                            f"[fetch_loop:{display}] merged: REPLACED {_replaced_count} historical "
+  5689→                            f"+ APPENDED {_appended_count} new bridge = {candles_count} total "
+  5690→                            f"(used {len(bridge_for_merge)} of {len(bridge_1m_candles)} bridge candles, "
+  5691→                            f"source: {_n_1s_fetched} 1s)"
+  5692→                        )
+  5693→                    # Step (e): print summary -- v8.5/v8.6: include the 1s source count
+  5694→                    # v8.13: show the actual capped count used for replacement,
+  5695→                    # plus the full bridge count from the server, plus the 1s source.
+  5696→                    elapsed = time.time() - start_time
+  5697→                    if candles_count >= MIN_CANDLES_THRESHOLD:
+  5698→                        total_loaded += candles_count
+  5699→                        consecutive_disconnects = 0
+  5700→                        if bridge_1m_candles and _n_1s_fetched > 0:
+  5701→                            _full_bridge = len(bridge_1m_candles)
+  5702→                            _used_bridge = min(_full_bridge, M1_BRIDGE_REPLACE_COUNT)
+  5703→                            if _full_bridge > _used_bridge:
+  5704→                                _bridge_str = f" + {_used_bridge} bridge (capped from {_full_bridge}, from {_n_1s_fetched} 1s)"
+  5705→                            else:
+  5706→                                _bridge_str = f" + {_used_bridge} bridge (from {_n_1s_fetched} 1s)"
+  5707→                        elif bridge_1m_candles:
+  5708→                            _bridge_str = f" + {len(bridge_1m_candles)} bridge"
+  5709→                        else:
+  5710→                            _bridge_str = ""
+  5711→                        print(f"\r{Colors.CLEAR_LINE}  {Colors.CYAN}{display:<25}{Colors.RESET} {Colors.GREEN}{candles_count} candles{_bridge_str} in {elapsed:.1f}s{Colors.RESET} Streaming")
+  5712→                        # Push to web dashboard
+  5713→                        try:
+  5714→                            _web_update_asset(asset, full_resync=True)
+  5715→                        except Exception:
+  5716→                            pass
+  5717→                    else:
+  5718→                        print(f"\r{Colors.CLEAR_LINE}  {Colors.CYAN}{display:<25}{Colors.RESET} {Colors.RED}Only {candles_count} candles{Colors.RESET} Streaming")
+  5719→                        try:
+  5720→                            _web_update_asset(asset, full_resync=True)
+  5721→                        except Exception:
+  5722→                            pass
+  5723→            else:
+  5724→                # Non-M1 60s+ timeframes: keep the original behavior
+  5725→                fut = asyncio.run_coroutine_threadsafe(fetch_candles_with_retry(asset, max_retries=MAX_FETCH_RETRIES, idx=idx, total=total_assets), ASYNC_LOOP)
+  5726→                try:
+  5727→                    candles_count, attempts = fut.result(timeout=180)
+  5728→                    elapsed = time.time() - start_time
+  5729→                    if candles_count >= MIN_CANDLES_THRESHOLD:
+  5730→                        total_loaded += candles_count
+  5731→                        consecutive_disconnects = 0
+  5732→                        attempts_str = "" if attempts == 1 else f" ({attempts} attempts)"
+  5733→                        print(f"\r{Colors.CLEAR_LINE}  {Colors.CYAN}{display:<25}{Colors.RESET} {Colors.GREEN}{candles_count} candles in {elapsed:.1f}s{attempts_str}{Colors.RESET} Streaming")
+  5734→                        # Push to web dashboard immediately after successful fetch
+  5735→                        try:
+  5736→                            _web_update_asset(asset, full_resync=True)
+  5737→                        except Exception:
+  5738→                            pass
+  5739→                    else:
+  5740→                        print(f"\r{Colors.CLEAR_LINE}  {Colors.CYAN}{display:<25}{Colors.RESET} {Colors.RED}Only {candles_count} candles{Colors.RESET} Streaming")
+  5741→                        try:
+  5742→                            _web_update_asset(asset, full_resync=True)
+  5743→                        except Exception:
+  5744→                            pass
+  5745→                except Exception as e:
+  5746→                    print(f"\r{Colors.CLEAR_LINE}  {Colors.CYAN}{display:<25}{Colors.RESET} {Colors.RED}Error: {str(e)[:30]}{Colors.RESET}")
+  5747→                    if "Connection" in str(e) or "closed" in str(e).lower():
+  5748→                        consecutive_disconnects += 1
+  5749→                        if consecutive_disconnects >= MAX_RECONNECTS_DURING_FETCH:
+  5750→                            logmsg(f"[fetch_loop] too many disconnects ({consecutive_disconnects}); aborting fetch")
+  5751→                            break
+  5752→        # Merge: any live ticks collected during fetch are already in asset.candles
+  5753→        # fetch_candles_with_retry overwrites asset.candles with historical only.
+  5754→        # To preserve live ticks, merge them back after fetch.
+  5755→        # (handled inside realtime_stream which appends to asset.candles)
+  5756→        # ===== FIX 7: cooldown — =====
+  5757→        # . keepalive_loop .
+  5758→        if FETCH_COOLDOWN_EVERY > 0 and idx > 0 and idx % FETCH_COOLDOWN_EVERY == 0 and idx < total_assets:
+  5759→            logmsg(f"[fetch_loop] cooldown {FETCH_COOLDOWN_DURATION}s after {idx}/{total_assets} assets")
+  5760→            time.sleep(FETCH_COOLDOWN_DURATION)
+  5761→        else:
+  5762→            # Use 1.0s for sub-minute (server sensitive to period=1), 0.1s for 60s+
+  5763→            time.sleep(_asset_delay)
+  5764→
+  5765→    # NOTE: gap filler runs automatically on its interval (every GAP_FILL_REFRESH_INTERVAL).
+  5766→    # First cycle waits 60s, then runs periodically. Not forced at startup.
+  5767→    # Gap fill respects the user's chosen timeframe via dynamic _align_time/_fill_missing_slots.
+  5768→
+  5769→    asyncio.run_coroutine_threadsafe(health_monitor(), ASYNC_LOOP)
+  5770→    asyncio.run_coroutine_threadsafe(auto_reconnect(), ASYNC_LOOP)
+  5771→    asyncio.run_coroutine_threadsafe(keepalive_loop(), ASYNC_LOOP)
+  5772→    asyncio.run_coroutine_threadsafe(stale_message_watchdog(), ASYNC_LOOP)
+  5773→    # v9.0: DISABLED background refetchers per user request:
+  5774→    #   - mt4_gap_filler(): re-filled candle gaps every GAP_FILL_REFRESH_INTERVAL (300s).
+  5775→    #     The user wants the bridge/gap-filling to happen DURING the initial fetch only
+  5776→    #     (already handled by the M1_USE_1S_BRIDGE flow), not after.
+  5777→    #   - web_candle_refresher(): re-pushed full candle history to the web dashboard
+  5778→    #     every WEB_PUSH_INTERVAL (30s). The user wants the chart to use only live ticks
+  5779→    #     after the initial load (faster, less server load).
+  5780→    # Live updates are now driven by realtime_stream -> _web_update_asset() per tick.
+  5781→    # asyncio.run_coroutine_threadsafe(mt4_gap_filler(), ASYNC_LOOP)
+  5782→    # asyncio.run_coroutine_threadsafe(web_candle_refresher(), ASYNC_LOOP)
+  5783→    
+  5784→    # ===== FIX 8: dashboard — 3 =====
+  5785→    # 1: ( )
+  5786→    # 2: ( status line )
+  5787→    # 3: ( mt4_gap_filler)
+  5788→    print(f"\n{Colors.GREEN}{'═'*60}{Colors.RESET}")
+  5789→    print(f"{Colors.BOLD}  All assets loaded and streaming!{Colors.RESET}")
+  5790→    print(f"  Total: {total_loaded} candles for {len(all_assets)} assets")
+  5791→    print(f"  History window: {HISTORY_DAYS} day (optimized, fast fetch)")
+  5792→    print(f"  HST Files: {'ENABLED (every %ss)' % WRITE_INTERVAL if WRITE_HST_FILES_ENABLED else 'DISABLED — web dashboard only'}")
+  5793→    print(f"  Refresh: BATCHED (every {REFRESH_INTERVAL}s)")
+  5794→    print(f"  Stream Poll: {STREAM_POLL_INTERVAL}s  (v9.0: max-speed live ticks)")
+  5795→    print(f"  Health Monitor: ACTIVE (Lenient: ignores websocket flickers)")
+  5796→    print(f"  Keepalive Ping: ACTIVE (every {KEEPALIVE_PING_INTERVAL}s, multi-type)")
+  5797→    print(f"  Stale Watchdog: ACTIVE (recycles if silent > {STALE_MESSAGE_TIMEOUT}s)")
+  5798→    print(f"  Auto-Reconnect: instant detect + exponential backoff (never gives up)")
+  5799→    print(f"  Internal Watchdog: ACTIVE (recycles stale connections > 90s)")
+  5800→    print(f"  Fetch: {FETCH_MAX_WORKERS} workers, {FETCH_CHUNK_SIZE}c/batch, {FETCH_BATCH_DELAY}s delay, {FETCH_ASSET_DELAY}s between assets")
+  5801→    print(f"  Retry: {MAX_FETCH_RETRIES} attempts, backoff {RETRY_BACKOFF_BASE}-{RETRY_BACKOFF_MAX}s")
+  5802→    print(f"  {Colors.CYAN}Web Updates: LIVE per-tick (no background refetch){Colors.RESET}")
+  5803→    if PERIOD_SECONDS == 60 and M1_USE_1S_BRIDGE:
+  5804→        print(f"  {Colors.CYAN}M1 Bridge: 1s->1m active during initial fetch{Colors.RESET}")
+  5805→    print(f"{Colors.GREEN}{'═'*60}{Colors.RESET}\n")
+  5806→
+  5807→    # ===== FIX E/F/G: — =====
+  5808→    # FIX E: ( 6)
+  5809→    # FIX F: ( print() )
+  5810→    # FIX G: ( / ) +
+  5811→    # FIX H: (columns/rows) —
+  5812→
+  5813→    import shutil as _shutil
+  5814→    def _get_term_size():
+  5815→        try:
+  5816→            s = _shutil.get_terminal_size((80, 24))
+  5817→            return s.columns, s.lines
+  5818→        except Exception:
+  5819→            return 80, 24
+  5820→
+  5821→    def _fmt_price(p):
+  5822→        if p <= 0: return "—"
+  5823→        if p >= 1000: return f"{p:.3f}"
+  5824→        if p >= 100:  return f"{p:.3f}"
+  5825→        if p >= 1:    return f"{p:.5f}"
+  5826→        return f"{p:.5f}"
+  5827→
+  5828→    def _draw_live_table(first_draw=False):
+  5829→        cols, rows = _get_term_size()
+  5830→        # ===== FIX H: — =====
+  5831→        # : 25 chars (name=12 + price=10 + )
+  5832→        # : 50 chars (name=25 + price=15 + status=8 + )
+  5833→        cols = max(25, cols)
+  5834→        if cols >= 55:
+  5835→            name_w, price_w = 25, 15
+  5836→            show_status = True
+  5837→        elif cols >= 40:
+  5838→            name_w, price_w = 20, 12
+  5839→            show_status = True
+  5840→        elif cols >= 30:
+  5841→            name_w, price_w = 15, 10
+  5842→            show_status = False
+  5843→        else:
+  5844→            name_w, price_w = 12, 8
+  5845→            show_status = False
+  5846→        bar_w = max(20, min(70, cols - 2))
+  5847→        # ( )
+  5848→        header_lines = 3
+  5849→        data_lines = len(all_assets) + 1  # +1
+  5850→        gap_lines = 0
+  5851→        if GAP_FILL_SUMMARY:
+  5852→            gap_lines = 3  # ===, summary, ===
+  5853→        # status messages lines (queued log messages)
+  5854→        msg_lines_count = min(len(_STATUS_MESSAGES_QUEUE), 3)
+  5855→        msg_lines = msg_lines_count + (1 if msg_lines_count > 0 else 0)  # +1 for separator
+  5856→        total_lines = header_lines + data_lines + gap_lines + msg_lines
+  5857→        if not first_draw:
+  5858→            sys.stdout.write(f"\033[{total_lines}A")
+  5859→        # ===== =====
+  5860→        sys.stdout.write(f"\033[2K{Colors.CYAN}{'═'*bar_w}{Colors.RESET}\n")
+  5861→        sys.stdout.write(f"\033[2K{Colors.BOLD}  LIVE PRICES{Colors.RESET}\n")
+  5862→        sys.stdout.write(f"\033[2K{Colors.CYAN}{'═'*bar_w}{Colors.RESET}\n")
+  5863→        # ===== =====
+  5864→        for asset in all_assets:
+  5865→            display = pretty_asset_name(asset.api_symbol)
+  5866→            # name_w
+  5867→            if len(display) > name_w:
+  5868→                display = display[:name_w-1] + "~"
+  5869→            # FIX G:
+  5870→            name_visible = f"{display:<{name_w}}"
+  5871→            name_colored = f"{Colors.BLUE}{name_visible}{Colors.RESET}"
+  5872→            # FIX G: ( / )
+  5873→            price_str = _fmt_price(asset.price)
+  5874→            if asset.previous_price > 0 and asset.price > 0:
+  5875→                if asset.price > asset.previous_price:
+  5876→                    price_colored = f"{Colors.GREEN}{price_str:<{price_w}}{Colors.RESET}"
+  5877→                elif asset.price < asset.previous_price:
+  5878→                    price_colored = f"{Colors.RED}{price_str:<{price_w}}{Colors.RESET}"
+  5879→                else:
+  5880→                    price_colored = f"{price_str:<{price_w}}"
+  5881→            else:
+  5882→                price_colored = f"{price_str:<{price_w}}"
+  5883→
+  5884→            if show_status:
+  5885→                if asset.updates > 0:
+  5886→                    status_str = f"{Colors.GREEN}LIVE{Colors.RESET}"
+  5887→                else:
+  5888→                    status_str = f"{Colors.RED}WAIT{Colors.RESET}"
+  5889→                sys.stdout.write(f"\033[2K  {name_colored} {price_colored} {status_str}\n")
+  5890→            else:
+  5891→                sys.stdout.write(f"\033[2K  {name_colored} {price_colored}\n")
+  5892→
+  5893→        if CONNECTION_ALIVE:
+  5894→            conn_status = f"{Colors.GREEN}CONNECTED{Colors.RESET}"
+  5895→        else:
+  5896→            conn_status = f"{Colors.RED}RECONNECTING...{Colors.RESET}"
+  5897→        if show_status:
+  5898→            sys.stdout.write(f"\033[2K  {Colors.BLUE}{'Connection':<{name_w}}{Colors.RESET} {'':<{price_w}} {conn_status}\n")
+  5899→        else:
+  5900→            sys.stdout.write(f"\033[2K  {Colors.BLUE}{'Connection':<{name_w}}{Colors.RESET} {conn_status}\n")
+  5901→        # ===== FIX F: ( ) =====
+  5902→        if GAP_FILL_SUMMARY:
+  5903→            summary = GAP_FILL_SUMMARY
+  5904→            # bar_w-4
+  5905→            max_len = bar_w - 4
+  5906→            if len(summary) > max_len:
+  5907→                summary = summary[:max_len-3] + "..."
+  5908→            # color by content:
+  5909→            if "ABORTED" in GAP_FILL_SUMMARY or ("Failed:" in GAP_FILL_SUMMARY and "0 failed" not in GAP_FILL_SUMMARY):
+  5910→                summary_colored = f"{Colors.RED}{summary}{Colors.RESET}"
+  5911→            elif "COMPLETE" in GAP_FILL_SUMMARY or ("pushed" in GAP_FILL_SUMMARY and "ABORTED" not in GAP_FILL_SUMMARY):
+  5912→                summary_colored = f"{Colors.GREEN}{summary}{Colors.RESET}"
+  5913→            elif "refreshing" in GAP_FILL_SUMMARY or GAP_FILL_ACTIVE:
+  5914→                summary_colored = f"{Colors.CYAN}{summary}{Colors.RESET}"
+  5915→            else:
+  5916→                summary_colored = summary
+  5917→            sys.stdout.write(f"\033[2K{Colors.CYAN}{'═'*bar_w}{Colors.RESET}\n")
+  5918→            sys.stdout.write(f"\033[2K  {summary_colored}\n")
+  5919→            sys.stdout.write(f"\033[2K{Colors.CYAN}{'═'*bar_w}{Colors.RESET}\n")
+  5920→        # Display queued log messages (last 3)
+  5921→        if _STATUS_MESSAGES_QUEUE:
+  5922→            sys.stdout.write(f"\033[2K{Colors.DIM}{'─'*bar_w}{Colors.RESET}\n")
+  5923→            for msg in _STATUS_MESSAGES_QUEUE[-3:]:
+  5924→                # truncate to bar_w-4
+  5925→                if len(msg) > bar_w - 4:
+  5926→                    msg = msg[:bar_w-7] + "..."
+  5927→                sys.stdout.write(f"\033[2K  {Colors.DIM}{msg}{Colors.RESET}\n")
+  5928→        sys.stdout.flush()
+  5929→
+  5930→    # Initial draw
+  5931→    _draw_live_table(first_draw=True)
+  5932→    print()
+  5933→    print(f"{Colors.CYAN}Live streaming active. Press Enter for menu, Ctrl+C to stop.{Colors.RESET}")
+  5934→    print()
+  5935→
+  5936→    # Interactive menu state
+  5937→    stop_requested = False
+  5938→    reinit_requested = False
+  5939→    _enter_pressed = threading.Event()
+  5940→
+  5941→    def _stdin_listener():
+  5942→        while not stop_requested and not reinit_requested:
+  5943→            try:
+  5944→                line = sys.stdin.readline()
+  5945→                if line == '' or line is None:
+  5946→                    time.sleep(0.5)
+  5947→                    continue
+  5948→                _enter_pressed.set()
+  5949→                while _enter_pressed.is_set() and not stop_requested and not reinit_requested:
+  5950→                    time.sleep(0.1)
+  5951→            except (KeyboardInterrupt, EOFError):
+  5952→                time.sleep(0.5)
+  5953→            except Exception:
+  5954→                time.sleep(0.5)
+  5955→
+  5956→    _stdin_thread = threading.Thread(target=_stdin_listener, daemon=True, name="StdinListener")
+  5957→    _stdin_thread.start()
+  5958→
+  5959→    def _show_interactive_menu():
+  5960→        print()
+  5961→        print(f"{Colors.CYAN}{'═'*70}{Colors.RESET}")
+  5962→        print(f"{Colors.BOLD}  MENU{Colors.RESET}")
+  5963→        print(f"{Colors.CYAN}{'═'*70}{Colors.RESET}")
+  5964→        print(f"  {Colors.CYAN}1{Colors.RESET} - Change Timeframe (current: {_current_period_label()})")
+  5965→        print(f"  {Colors.CYAN}2{Colors.RESET} - Change History days (current: {HISTORY_DAYS:.2f}d = {INITIAL_CANDLES} candles)")
+  5966→        print(f"  {Colors.CYAN}3{Colors.RESET} - Change both timeframe and history days")
+  5967→        print(f"  {Colors.CYAN}4{Colors.RESET} - Resume streaming (continue)")
+  5968→        print(f"  {Colors.CYAN}5{Colors.RESET} - Exit program")
+  5969→        print(f"{Colors.CYAN}{'═'*70}{Colors.RESET}")
+  5970→        while True:
+  5971→            try:
+  5972→                c = input(f"{Colors.CYAN}Choose 1-5: {Colors.RESET}").strip()
+  5973→                if c in ('1', '2', '3', '4', '5'):
+  5974→                    return int(c)
+  5975→                print(f"{Colors.RED}Invalid choice.{Colors.RESET}")
+  5976→            except (ValueError, KeyboardInterrupt):
+  5977→                print(f"{Colors.RED}Invalid input.{Colors.RESET}")
+  5978→            except EOFError:
+  5979→                return 4
+  5980→
+  5981→    def _choose_timeframe():
+  5982→        # نفس تنسيق القائمة الأولية: 3 أعمدة × 5 صفوف (مع علامة Current)
+  5983→        print()
+  5984→        print(f"{Colors.BOLD}  Select Timeframe{Colors.RESET}")
+  5985→        print(f"  {Colors.DIM}{'═' * 55}{Colors.RESET}")
+  5986→        _ROWS_LOCAL = [
+  5987→            (1, 6, 11), (2, 7, 12), (3, 8, 13), (4, 9, 14), (5, 10, None),
+  5988→        ]
+  5989→        _TF_COL_WIDTH = 17
+  5990→        _TF_GAP = "  "
+  5991→        for row in _ROWS_LOCAL:
+  5992→            cells = []
+  5993→            for idx in row:
+  5994→                if idx is None:
+  5995→                    cells.append(" " * _TF_COL_WIDTH)
+  5996→                    continue
+  5997→                tf_tuple = TIMEFRAMES[idx - 1]
+  5998→                mt4_p = tf_tuple[0]
+  5999→                secs = tf_tuple[1]
+  6000→                label = tf_tuple[2]
+  6001→                is_current = (mt4_p == PERIOD and secs == PERIOD_SECONDS)
+  6002→                # إضافة علامة (*) إذا كان الفريم الحالي
+  6003→                marker = "*" if is_current else " "
+  6004→                # التنسيق: "XX*SSSSS-LABEL" (17 حرف ظاهر) — علامة * بديل (current)
+  6005→                cells.append(f"{Colors.CYAN}{idx:>2}{marker}{Colors.RESET}{secs:<5}- {label:<4}")
+  6006→            print(f"  {cells[0]}{_TF_GAP}{cells[1]}{_TF_GAP}{cells[2]}")
+  6007→        print(f"  {Colors.DIM}{'═' * 55}{Colors.RESET}")
+  6008→        print(f"  {Colors.DIM}(* = current){Colors.RESET}")
+  6009→        while True:
+  6010→            try:
+  6011→                tf_choice = input(f"{Colors.CYAN}  Choose 1-14 (default=1 for M1): {Colors.RESET}").strip()
+  6012→                if not tf_choice:
+  6013→                    return TIMEFRAMES[0]
+  6014→                tf_idx = int(tf_choice) - 1
+  6015→                if 0 <= tf_idx < len(TIMEFRAMES):
+  6016→                    return TIMEFRAMES[tf_idx]
+  6017→                print(f"{Colors.RED}  Invalid choice (1-14).{Colors.RESET}")
+  6018→            except (ValueError, KeyboardInterrupt):
+  6019→                print(f"{Colors.RED}  Invalid input.{Colors.RESET}")
+  6020→            except EOFError:
+  6021→                return TIMEFRAMES[0]
+  6022→
+  6023→    def _choose_history_days():
+  6024→        # للفريمات الفرعية: لا نسأل، نُرجع قيمة ثابتة (نفس سلوك Initial Setup)
+  6025→        if PERIOD_SECONDS < 60:
+  6026→            _auto_days = (SUBSECOND_HISTORY_CANDLES * PERIOD_SECONDS) / 86400.0 * 1.15
+  6027→            print(f"{Colors.DIM}  Sub-second timeframe: auto history ({SUBSECOND_HISTORY_CANDLES} candles){Colors.RESET}")
+  6028→            return _auto_days, SUBSECOND_HISTORY_CANDLES
+  6029→        # للفريمات 60s+: نسأل المستخدم
+  6030→        print(f"{Colors.CYAN}{'═'*70}{Colors.RESET}")
+  6031→        print(f"{Colors.BOLD}  Select History Size:{Colors.RESET}")
+  6032→        print(f"{Colors.CYAN}{'═'*70}{Colors.RESET}")
+  6033→        _default_days_local = (1000 * PERIOD_SECONDS) / 86400.0 * 1.15  # +15% margin
+  6034→        print(f"  {Colors.CYAN}Enter number of days (e.g., 1, 2, 3, 4...)")
+  6035→        print(f"   Or press Enter for default 1000 candles ({_default_days_local:.2f} days){Colors.RESET}")
+  6036→        print(f"{Colors.CYAN}{'═'*70}{Colors.RESET}")
+  6037→        while True:
+  6038→            try:
+  6039→                days_input = input(f"{Colors.CYAN}Days: {Colors.RESET}").strip()
+  6040→                if not days_input:
+  6041→                    return _default_days_local, 1000
+  6042→                days_val = float(days_input)
+  6043→                if days_val <= 0:
+  6044→                    print(f"{Colors.RED}Must be positive.{Colors.RESET}")
+  6045→                    continue
+  6046→                # Apply 15% margin to user-specified days too
+  6047→                days_with_margin = days_val * 1.15
+  6048→                candles = max(int((days_val * 86400) / PERIOD_SECONDS), 100)
+  6049→                return days_with_margin, candles
+  6050→            except (ValueError, KeyboardInterrupt):
+  6051→                print(f"{Colors.RED}Invalid input.{Colors.RESET}")
+  6052→            except EOFError:
+  6053→                return _default_days_local, 1000
+  6054→
+  6055→    # status update loop with interactive menu support
+  6056→    while not stop_requested:
+  6057→        try:
+  6058→            while True:
+  6059→                if _enter_pressed.is_set() or stop_requested or reinit_requested:
+  6060→                    break
+  6061→                _draw_live_table(first_draw=False)
+  6062→                time.sleep(STATUS_REFRESH_INTERVAL)
+  6063→            if stop_requested:
+  6064→                break
+  6065→            if reinit_requested:
+  6066→                break
+  6067→            action = _show_interactive_menu()
+  6068→            _enter_pressed.clear()
+  6069→            if action == 4:
+  6070→                _draw_live_table(first_draw=True)
+  6071→                continue
+  6072→            elif action == 5:
+  6073→                stop_requested = True
+  6074→                break
+  6075→            elif action in (1, 2, 3):
+  6076→                new_period = PERIOD
+  6077→                new_period_seconds = PERIOD_SECONDS
+  6078→                if action in (1, 3):
+  6079→                    _new_tf = _choose_timeframe()
+  6080→                    new_period = _new_tf[0]
+  6081→                    new_period_seconds = _new_tf[1]
+  6082→                    # set subsecond globals for the restart (based on period_seconds, not flag)
+  6083→                    if new_period_seconds < 60:
+  6084→                        globals()['IS_SUBSECOND'] = True
+  6085→                        globals()['SUBSECOND_SECONDS'] = new_period_seconds
+  6086→                        globals()['SUBSECOND_LABEL'] = f"{new_period_seconds}S"
+  6087→                    else:
+  6088→                        globals()['IS_SUBSECOND'] = False
+  6089→                        globals()['SUBSECOND_SECONDS'] = 0
+  6090→                        globals()['SUBSECOND_LABEL'] = ""
+  6091→                new_days = HISTORY_DAYS
+  6092→                new_candles = INITIAL_CANDLES
+  6093→                # للفريمات الفرعية: _choose_history_days يُرجع قيمة ثابتة تلقائياً
+  6094→                # للفريمات 60s+: يسأل المستخدم
+  6095→                if action in (2, 3):
+  6096→                    new_days, new_candles = _choose_history_days()
+  6097→                globals()['PERIOD'] = new_period
+  6098→                globals()['PERIOD_SECONDS'] = new_period_seconds
+  6099→                globals()['HISTORY_DAYS'] = new_days
+  6100→                globals()['INITIAL_CANDLES'] = new_candles
+  6101→                globals()['FETCH_DURATION_SECONDS'] = int(86400 * new_days) if new_days > 0 else 0
+  6102→                print(f"{Colors.GREEN}Reinitializing with {_current_period_label()}, {new_days:.2f} days = {new_candles} candles...{Colors.RESET}")
+  6103→                reinit_requested = True
+  6104→                break
+  6105→        except KeyboardInterrupt:
+  6106→            stop_requested = True
+  6107→            break
+  6108→        except Exception as e:
+  6109→            log_exception("main status loop", e)
+  6110→            try:
+  6111→                print(f"\n{Colors.CYAN}[main loop] recovered from error: {e}{Colors.RESET}", flush=True)
+  6112→            except Exception:
+  6113→                pass
+  6114→            time.sleep(1)
+  6115→
+  6116→    # If reinit was requested: نُعيد تشغيل البرنامج بشكل نظيف
+  6117→    # ملاحظة: هذا إعادة بناء كاملة (full re-init) لكنها أسرع من إغلاق الترمنال
+  6118→    # لأن البرنامج يبدأ مباشرة من نقطة الترخيص المحفوظ (لا يسأل المستخدم ثانية)
+  6119→    if reinit_requested:
+  6120→        print(f"\n{Colors.CYAN}Applying new timeframe settings...{Colors.RESET}")
+  6121→        sys.stdout.flush()
+  6122→        time.sleep(1.0)
+  6123→        # إعادة تنفيذ البرنامج بشكل نظيف
+  6124→        os.execv(sys.executable, [sys.executable] + sys.argv)
+  6125→
+  6126→    # graceful shutdown
+  6127→    cols, rows = _get_term_size()
+  6128→    gap_lines = 3 if GAP_FILL_SUMMARY else 0
+  6129→    total_lines_now = 3 + len(all_assets) + 1 + gap_lines
+  6130→    sys.stdout.write(f"\033[{total_lines_now}B\n")
+  6131→    sys.stdout.flush()
+  6132→    print(f"{Colors.RED}Stopped{Colors.RESET}")
+  6133→    print(f"{Colors.CYAN}Total updates: {sum(a.updates for a in all_assets):,}{Colors.RESET}")
+  6134→    print(f"{Colors.CYAN}Total candles stored: {sum(len(a.candles) for a in all_assets):,}{Colors.RESET}")
+  6135→    print()
+  6136→    writer_thread.running = False
+  6137→

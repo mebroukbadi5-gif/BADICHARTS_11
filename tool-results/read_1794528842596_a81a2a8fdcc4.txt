@@ -1,0 +1,1602 @@
+  3201→                    ts = int(candle.get("time", candle.get("timestamp", time.time())))
+  3202→                    price = float(candle.get("price", candle.get("close", 0)))
+  3203→                else:
+  3204→                    await asyncio.sleep(STREAM_POLL_INTERVAL)
+  3205→                    continue
+  3206→                if price > 0 and ts > 0:
+  3207→                    # Align to subsecond window
+  3208→                    window_start = _subsecond_align(ts)
+  3209→                    if asset.candles:
+  3210→                        last_candle = asset.candles[-1]
+  3211→                        if window_start < last_candle['time']:
+  3212→                            # stale tick — ignore
+  3213→                            pass
+  3214→                        elif window_start == last_candle['time']:
+  3215→                            # update current candle
+  3216→                            last_candle['high'] = max(last_candle['high'], price)
+  3217→                            last_candle['low'] = min(last_candle['low'], price)
+  3218→                            last_candle['close'] = price
+  3219→                            last_candle['volume'] += 1
+  3220→                        else:
+  3221→                            # new window — append
+  3222→                            asset.candles.append({
+  3223→                                'time': window_start, 'open': price, 'high': price,
+  3224→                                'low': price, 'close': price, 'volume': 1
+  3225→                            })
+  3226→                    else:
+  3227→                        asset.candles.append({
+  3228→                            'time': window_start, 'open': price, 'high': price,
+  3229→                            'low': price, 'close': price, 'volume': 1
+  3230→                        })
+  3231→                    # keep last SUBSECOND_MAX_CANDLES
+  3232→                    if len(asset.candles) > SUBSECOND_MAX_CANDLES:
+  3233→                        asset.candles = asset.candles[-SUBSECOND_MAX_CANDLES:]
+  3234→                    # update price display
+  3235→                    if asset.price != price:
+  3236→                        asset.previous_price = asset.price
+  3237→                    asset.price = price
+  3238→                    asset.updates += 1
+  3239→                    asset.last_update_time = time.time()
+  3240→                    # write HST every 0.5s
+  3241→                    now = time.time()
+  3242→                    if now - last_write > 0.5:
+  3243→                        _subsecond_write_hst(asset.symbol, asset.candles)
+  3244→                        last_write = now
+  3245→            await asyncio.sleep(STREAM_POLL_INTERVAL)
+  3246→        except asyncio.CancelledError:
+  3247→            asset.streaming = False
+  3248→            raise
+  3249→        except asyncio.TimeoutError:
+  3250→            continue
+  3251→        except Exception as e:
+  3252→            consecutive_errors += 1
+  3253→            if consecutive_errors >= 10:
+  3254→                logmsg(f"[substream:{internal}] too many consecutive errors, stopping")
+  3255→                asset.streaming = False
+  3256→                return
+  3257→            await asyncio.sleep(0.2)
+  3258→    asset.streaming = False
+  3259→
+  3260→
+  3261→async def realtime_stream(asset: Asset):
+  3262→    internal = asset.api_symbol
+  3263→    try:
+  3264→        # ===== EVENT-DRIVEN FIX =====
+  3265→        # :
+  3266→        # while CONNECTION_ALIVE and CLIENT is None: await asyncio.sleep(0.5)
+  3267→        # timeout 200ms .
+  3268→        try:
+  3269→            await wait_until(
+  3270→                lambda: not (CONNECTION_ALIVE and CLIENT is None),
+  3271→                timeout=10.0,
+  3272→                poll_interval=0.2,
+  3273→            )
+  3274→        except asyncio.TimeoutError:
+  3275→            pass
+  3276→        if not CONNECTION_ALIVE or CLIENT is None:
+  3277→            asset.streaming = False
+  3278→            return
+  3279→        # For sub-minute timeframes, subscribe to period=1 (1s candles, always supported)
+  3280→        # _align_time then buckets ticks into PERIOD_SECONDS (5s, 10s, 15s, 30s)
+  3281→        #
+  3282→        # v8.10: when M1_USE_1S_BRIDGE is True (which includes both TEST MODE
+  3283→        # and the full flow), FORCE stream_period=1 even though PERIOD_SECONDS
+  3284→        # == 60. This subscribes to 1s ticks (NOT 1m snapshots), so the server
+  3285→        # doesn't send the 199-candle initial 1m burst. The 1s ticks are
+  3286→        # bucketed into 1m candles by update_candle via _align_time, updating
+  3287→        # the last candle for live price every second.
+  3288→        if PERIOD_SECONDS == 60 and M1_USE_1S_BRIDGE:
+  3289→            stream_period = 1  # 1s ticks, aggregate to 1m locally
+  3290→        else:
+  3291→            stream_period = 1 if PERIOD_SECONDS < 60 else PERIOD_SECONDS
+  3292→        await CLIENT.start_candles_stream(internal, stream_period)
+  3293→        await asyncio.sleep(0.3)  # reduced from 1.5s to minimize gap with historical fetch
+  3294→        asset.streaming = True
+  3295→        # ===== FIX 12: MT4_WRITER.sync_state 1000 =====
+  3296→        # : MT4_WRITER.update_candle sync_state
+  3297→        # => ~19 (1KB) 1000 (44KB)
+  3298→        # : asset.candles (1000 ) sync_state[derived_symbol]
+  3299→        # realtime_stream update_candle
+  3300→        # sync_state 1000 .
+  3301→        if asset.candles and asset.symbol not in MT4_WRITER.sync_state:
+  3302→            MT4_WRITER.sync_state[asset.symbol] = {
+  3303→                'period': PERIOD,
+  3304→                'candles': list(asset.candles),  # 1000
+  3305→                'last_write': 0,
+  3306→                'last_price': float(asset.candles[-1]['close']) if asset.candles else 0.0,
+  3307→            }
+  3308→    except Exception as e:
+  3309→        logmsg(f"[stream:{internal}] failed to start stream: {e}")
+  3310→        asset.streaming = False
+  3311→        return
+  3312→    consecutive_errors = 0
+  3313→    while CONNECTION_ALIVE:
+  3314→        try:
+  3315→            if CLIENT is None or not getattr(getattr(CLIENT, 'api', None), 'state', None) or getattr(CLIENT.api.state, 'status', None) != 1:
+  3316→                # ===== EVENT-DRIVEN FIX =====
+  3317→                # await asyncio.sleep(1) — polling (200ms)
+  3318→                await asyncio.sleep(0.2)
+  3319→                continue
+  3320→            candle = None
+  3321→            if not candle and hasattr(CLIENT, 'api') and CLIENT.api:
+  3322→                candle = CLIENT.api.realtime_candles.get(internal)
+  3323→            if candle:
+  3324→                consecutive_errors = 0
+  3325→                if isinstance(candle, list) and len(candle) >= 3:
+  3326→                    ts, price = int(candle[1]), float(candle[2])
+  3327→                elif isinstance(candle, dict):
+  3328→                    ts = int(candle.get("time", candle.get("timestamp", time.time())))
+  3329→                    price = float(candle.get("price", candle.get("close", 0)))
+  3330→                else:
+  3331→                    await asyncio.sleep(STREAM_POLL_INTERVAL)
+  3332→                    continue
+  3333→                if price > 0 and ts > 0:
+  3334→                    # ===== FIX 10: MT4_WRITER.update_candle asset.mark_dirty =====
+  3335→                    # HST MT4Writer.write_to_file ( )
+  3336→                    # MT4_WRITER.update_candle sync_state[derived_symbol] + HST 200ms
+  3337→                    try:
+  3338→                        MT4_WRITER.update_candle(asset.symbol, PERIOD, {'time': ts, 'price': price})
+  3339→                    except Exception:
+  3340→                        pass
+  3341→                    # asset.candles ( )
+  3342→                    # FIX L5: _align_time ( tz_offset) asset.candles
+  3343→                    # sync_state HST. (ts // 60 * 60)
+  3344→                    # tz_offset => 1+ HST.
+  3345→                    aligned_time = _align_time(ts)
+  3346→                    # FIX STALE-CANDLE v2: same logic as update_candle
+  3347→                    _is_new_candle = False
+  3348→                    if asset.candles:
+  3349→                        last_candle = asset.candles[-1]
+  3350→                        if aligned_time < last_candle['time']:
+  3351→                            pass  # tick for closed minute - ignore
+  3352→                        elif last_candle['time'] == aligned_time:
+  3353→                            last_candle['high'] = max(last_candle['high'], price)
+  3354→                            last_candle['low'] = min(last_candle['low'], price)
+  3355→                            last_candle['close'] = price
+  3356→                        else:
+  3357→                            # new candle - fill gap with flat candles first
+  3358→                            _is_new_candle = True
+  3359→                            period_secs = PERIOD_SECONDS if PERIOD_SECONDS > 0 else 60
+  3360→                            gap = (aligned_time - last_candle['time']) // period_secs
+  3361→                            if gap > 1:
+  3362→                                last_close = last_candle['close']
+  3363→                                fill_time = last_candle['time'] + period_secs
+  3364→                                while fill_time < aligned_time:
+  3365→                                    asset.candles.append({
+  3366→                                        'time': fill_time,
+  3367→                                        'open': last_close, 'high': last_close,
+  3368→                                        'low': last_close, 'close': last_close, 'volume': 0,
+  3369→                                    })
+  3370→                                    fill_time += period_secs
+  3371→                            asset.candles.append({'time': aligned_time, 'open': price, 'high': price, 'low': price, 'close': price, 'volume': 1})
+  3372→                    else:
+  3373→                        _is_new_candle = True
+  3374→                        asset.candles.append({'time': aligned_time, 'open': price, 'high': price, 'low': price, 'close': price, 'volume': 1})
+  3375→                    if len(asset.candles) > INITIAL_CANDLES: asset.candles = asset.candles[-INITIAL_CANDLES:]
+  3376→                    # FIX G: ( )
+  3377→                    if asset.price != price:
+  3378→                        asset.previous_price = asset.price
+  3379→                    asset.price = price
+  3380→                    asset.updates += 1
+  3381→                    asset.last_update_time = time.time()
+  3382→                    # v9.0: Update web dashboard on every live tick.
+  3383→                    # - Default path (full_resync=False): O(1) tick cache update.
+  3384→                    #   This is what the chart polls at 50ms — extremely fast.
+  3385→                    # - On new candle close (full_resync=True): refreshes the full
+  3386→                    #   candle list so the chart sees the new bar.
+  3387→                    try:
+  3388→                        _web_update_asset(asset, full_resync=_is_new_candle)
+  3389→                    except Exception:
+  3390→                        pass
+  3391→                    # asset.mark_dirty() — MT4_WRITER.update_candle
+  3392→            await asyncio.sleep(STREAM_POLL_INTERVAL)
+  3393→        except asyncio.CancelledError:
+  3394→            asset.streaming = False
+  3395→            raise
+  3396→        except asyncio.TimeoutError: continue
+  3397→        except Exception as e:
+  3398→            consecutive_errors += 1
+  3399→            if consecutive_errors >= 10:
+  3400→                logmsg(f"[stream:{internal}] too many consecutive errors, stopping stream")
+  3401→                asset.streaming = False
+  3402→                return
+  3403→            # ===== EVENT-DRIVEN FIX =====
+  3404→            # await asyncio.sleep(1) — polling (200ms)
+  3405→            await asyncio.sleep(0.2)
+  3406→    asset.streaming = False
+  3407→
+  3408→
+  3409→# ===== FIX B: (> ) =====
+  3410→# : " ".
+  3411→# auto_reconnect
+  3412→# LONG_DISCONNECT_THRESHOLD. 1000
+  3413→# HST streams —
+  3414→# .
+  3415→async def refetch_all_candles():
+  3416→    """ .
+  3417→
+  3418→ :
+  3419→ 1. streams caches 
+  3420→ 2. sync_state MT4_WRITER ( HST)
+  3421→ 3. fetch_candles_with_retry ( 1000 )
+  3422→ 4. realtime_stream 
+  3423→ 5. mt4_gap_filler 
+  3424→ """
+  3425→    if not ALL_STREAMING_ASSETS:
+  3426→        logmsg("[refetch_all] no assets to re-fetch")
+  3427→        return
+  3428→    print(f"\n{Colors.CYAN}{'═'*60}{Colors.RESET}")
+  3429→    print(f"{Colors.BOLD}  FULL RE-FETCH: long disconnect detected — refreshing all candles{Colors.RESET}")
+  3430→    print(f"  • Assets: {len(ALL_STREAMING_ASSETS)}")
+  3431→    print(f"  • Target per asset: {INITIAL_CANDLES} candles")
+  3432→    print(f"{Colors.CYAN}{'═'*60}{Colors.RESET}")
+  3433→    # 1) streams
+  3434→    for asset in ALL_STREAMING_ASSETS:
+  3435→        try:
+  3436→            if asset.stream_task and not asset.stream_task.done():
+  3437→                asset.stream_task.cancel()
+  3438→        except Exception:
+  3439→            pass
+  3440→        asset.streaming = False
+  3441→        asset.stream_task = None
+  3442→        asset.candles = []
+  3443→        asset.last_saved_close = 0.0
+  3444→        asset.last_saved_candle_time = 0
+  3445→        asset.last_saved_candle_count = 0
+  3446→        asset.dirty = True
+  3447→        asset._gap_filled = False
+  3448→        asset.updates = 0
+  3449→        asset.last_update_time = 0
+  3450→        # sync_state MT4_WRITER
+  3451→        if asset.symbol in MT4_WRITER.sync_state:
+  3452→            try: del MT4_WRITER.sync_state[asset.symbol]
+  3453→            except Exception: pass
+  3454→        if asset.symbol in MT4_WRITER._gap_filled:
+  3455→            MT4_WRITER._gap_filled[asset.symbol] = False
+  3456→        # Clear the SQLite-side gap_state flag too so fill_gap_once will run
+  3457→        # again for this asset after the full re-fetch.
+  3458→        try:
+  3459→            MT4_WRITER.candle_store.clear_symbol(asset.symbol)
+  3460→        except Exception:
+  3461→            pass
+  3462→    # 2)
+  3463→    total_loaded = 0
+  3464→    total_assets = len(ALL_STREAMING_ASSETS)
+  3465→    consecutive_disconnects = 0
+  3466→    for idx, asset in enumerate(ALL_STREAMING_ASSETS, 1):
+  3467→
+  3468→        if not CONNECTION_ALIVE or CLIENT is None or CLIENT.api is None:
+  3469→            logmsg(f"[refetch_all] connection lost again at asset {idx}/{total_assets}; aborting re-fetch")
+  3470→            break
+  3471→        display = pretty_asset_name(asset.api_symbol)
+  3472→        start_time = time.time()
+  3473→        if IS_SUBSECOND:
+  3474→            # Subsecond mode: no history to re-fetch, just restart stream
+  3475→            print(f"\r{Colors.CLEAR_LINE}  {Colors.CYAN}{display:<25}{Colors.RESET} {Colors.CYAN}subsecond — no history to refetch{Colors.RESET}")
+  3476→        else:
+  3477→            try:
+  3478→                candles_count, attempts = await fetch_candles_with_retry(
+  3479→                    asset, max_retries=MAX_FETCH_RETRIES, idx=idx, total=total_assets
+  3480→                )
+  3481→                elapsed = time.time() - start_time
+  3482→                if candles_count >= MIN_CANDLES_THRESHOLD:
+  3483→                    total_loaded += candles_count
+  3484→                    consecutive_disconnects = 0
+  3485→                    attempts_str = "" if attempts == 1 else f" ({attempts} attempts)"
+  3486→                    print(f"\r{Colors.CLEAR_LINE}  {Colors.CYAN}{display:<25}{Colors.RESET} {Colors.GREEN}{candles_count} candles in {elapsed:.1f}s{attempts_str}{Colors.RESET}")
+  3487→                else:
+  3488→                    print(f"\r{Colors.CLEAR_LINE}  {Colors.CYAN}{display:<25}{Colors.RESET} {Colors.RED}Only {candles_count} candles{Colors.RESET}")
+  3489→            except Exception as e:
+  3490→                print(f"\r{Colors.CLEAR_LINE}  {Colors.CYAN}{display:<25}{Colors.RESET} {Colors.RED}Error: {str(e)[:30]}{Colors.RESET}")
+  3491→                if "Connection" in str(e) or "closed" in str(e).lower():
+  3492→                    consecutive_disconnects += 1
+  3493→                    if consecutive_disconnects >= MAX_RECONNECTS_DURING_FETCH:
+  3494→                        logmsg(f"[refetch_all] too many disconnects ({consecutive_disconnects}); aborting")
+  3495→                        break
+  3496→        # 3) restart stream
+  3497→        try:
+  3498→            asset.stream_task = asyncio.run_coroutine_threadsafe(subsecond_stream(asset) if IS_SUBSECOND else realtime_stream(asset), ASYNC_LOOP)
+  3499→        except Exception as e:
+  3500→            logmsg(f"[refetch_all] failed to restart stream for {asset.symbol}: {e}")
+  3501→        await asyncio.sleep(FETCH_ASSET_DELAY)
+  3502→    # 4)
+  3503→    if CONNECTION_ALIVE and CLIENT is not None and CLIENT.api is not None:
+  3504→        try:
+  3505→            asyncio.run_coroutine_threadsafe(mt4_gap_filler(), ASYNC_LOOP)
+  3506→        except Exception as e:
+  3507→            logmsg(f"[refetch_all] failed to schedule gap filler: {e}")
+  3508→    print(f"{Colors.CYAN}{'═'*60}{Colors.RESET}")
+  3509→    print(f"{Colors.GREEN}  Full re-fetch complete: {total_loaded} candles across {total_assets} assets{Colors.RESET}")
+  3510→    print(f"{Colors.CYAN}{'═'*60}{Colors.RESET}\n")
+  3511→
+  3512→# ==============================================================================
+  3513→# SECTION 9: MT4 SYNC ENGINE ( — )
+  3514→# ==============================================================================
+  3515→
+  3516→# ------------------------------------------------------------------------------
+  3517→# CandleStore: SQLite-backed persistent candle storage.
+  3518→# ------------------------------------------------------------------------------
+  3519→# Why SQLite instead of JSON files:
+  3520→#   - JSON is slow: full file rewrite on every save, full file load on every
+  3521→#     read, no indexing. For ~1000 candles per asset across many assets this
+  3522→#     wastes I/O and risks corruption if the process is killed mid-write.
+  3523→#   - SQLite is transactional, atomic, indexed by (symbol, time), and
+  3524→#     supports efficient range queries ("give me all candles for symbol X
+  3525→#     from time A to time B") without loading the whole table into memory.
+  3526→#   - Concurrent reads + a single writer are safe out of the box.
+  3527→#
+  3528→# Schema:
+  3529→#   candles(symbol TEXT, time INTEGER, open REAL, high REAL, low REAL,
+  3530→#           close REAL, volume INTEGER, PRIMARY KEY(symbol, time))
+  3531→#   gap_state(symbol TEXT PRIMARY KEY, filled INTEGER, last_fill_at REAL)
+  3532→#       - 'filled' is 0/1 and tracks whether fill_gap_once has already
+  3533→#         succeeded for this asset. Once it is 1, MT4Writer.fill_gap_once
+  3534→#         stops touching closed candles for this asset entirely.
+  3535→# ------------------------------------------------------------------------------
+  3536→import sqlite3 as _sqlite3
+  3537→import threading as _threading
+  3538→
+  3539→class CandleStore:
+  3540→    """Thread-safe SQLite-backed candle persistence layer.
+  3541→
+  3542→    All public methods are safe to call from any thread. A single write
+  3543→    connection (guarded by a lock) serializes writes; reads use a short-lived
+  3544→    read-only connection per call.
+  3545→    """
+  3546→    def __init__(self, db_path: str):
+  3547→        self.db_path = db_path
+  3548→        self._write_lock = _threading.Lock()
+  3549→        self._write_conn: Optional[_sqlite3.Connection] = None
+  3550→        # Make sure parent dir exists
+  3551→        try:
+  3552→            parent = os.path.dirname(db_path)
+  3553→            if parent:
+  3554→                os.makedirs(parent, exist_ok=True)
+  3555→        except Exception as e:
+  3556→            pass  # silenced - non-essential diagnostic
+  3557→        # Init schema on a short-lived connection
+  3558→        self._init_schema()
+  3559→
+  3560→    def _init_schema(self):
+  3561→        try:
+  3562→            conn = _sqlite3.connect(self.db_path, timeout=10.0, isolation_level=None)
+  3563→            try:
+  3564→                conn.execute("PRAGMA journal_mode=WAL;")    # crash-safe, fast writes
+  3565→                conn.execute("PRAGMA synchronous=NORMAL;")  # safe + fast
+  3566→                conn.execute("""
+  3567→                    CREATE TABLE IF NOT EXISTS candles (
+  3568→                        symbol TEXT NOT NULL,
+  3569→                        time   INTEGER NOT NULL,
+  3570→                        open   REAL NOT NULL,
+  3571→                        high   REAL NOT NULL,
+  3572→                        low    REAL NOT NULL,
+  3573→                        close  REAL NOT NULL,
+  3574→                        volume INTEGER NOT NULL DEFAULT 0,
+  3575→                        PRIMARY KEY (symbol, time)
+  3576→                    )
+  3577→                """)
+  3578→                conn.execute("""
+  3579→                    CREATE INDEX IF NOT EXISTS idx_candles_symbol_time
+  3580→                    ON candles(symbol, time)
+  3581→                """)
+  3582→                conn.execute("""
+  3583→                    CREATE TABLE IF NOT EXISTS gap_state (
+  3584→                        symbol        TEXT PRIMARY KEY,
+  3585→                        filled        INTEGER NOT NULL DEFAULT 0,
+  3586→                        last_fill_at  REAL NOT NULL DEFAULT 0
+  3587→                    )
+  3588→                """)
+  3589→            finally:
+  3590→                conn.close()
+  3591→        except Exception as e:
+  3592→            pass  # silenced - non-essential diagnostic
+  3593→
+  3594→    # ------------------------------------------------------------------ writes
+  3595→    def _get_write_conn(self) -> _sqlite3.Connection:
+  3596→        if self._write_conn is None:
+  3597→            self._write_conn = _sqlite3.connect(self.db_path, timeout=10.0, isolation_level=None)
+  3598→            self._write_conn.execute("PRAGMA journal_mode=WAL;")
+  3599→            self._write_conn.execute("PRAGMA synchronous=NORMAL;")
+  3600→        return self._write_conn
+  3601→
+  3602→    def upsert_candles(self, symbol: str, candles: list) -> int:
+  3603→        """Insert-or-replace a batch of candles for the given symbol.
+  3604→        Returns the number of rows written."""
+  3605→        if not candles:
+  3606→            return 0
+  3607→        with self._write_lock:
+  3608→            conn = self._get_write_conn()
+  3609→            rows = 0
+  3610→            try:
+  3611→                conn.execute("BEGIN IMMEDIATE;")
+  3612→                for c in candles:
+  3613→                    conn.execute(
+  3614→                        "INSERT OR REPLACE INTO candles(symbol, time, open, high, low, close, volume) "
+  3615→                        "VALUES (?, ?, ?, ?, ?, ?, ?);",
+  3616→                        (symbol, int(c['time']), float(c['open']), float(c['high']),
+  3617→                         float(c['low']), float(c['close']), int(c.get('volume', 0)))
+  3618→                    )
+  3619→                    rows += 1
+  3620→                conn.execute("COMMIT;")
+  3621→            except Exception:
+  3622→                try: conn.execute("ROLLBACK;")
+  3623→                except Exception: pass
+  3624→                pass  # silenced - non-essential diagnostic
+  3625→                return 0
+  3626→            return rows
+  3627→
+  3628→    def append_new_candles(self, symbol: str, candles: list, after_time: int = 0) -> int:
+  3629→        """Append candles whose time > after_time. Existing candles with time
+  3630→        <= after_time are left untouched (frozen). Returns number of rows
+  3631→        actually inserted (not the number replaced)."""
+  3632→        if not candles:
+  3633→            return 0
+  3634→        with self._write_lock:
+  3635→            conn = self._get_write_conn()
+  3636→            inserted = 0
+  3637→            try:
+  3638→                conn.execute("BEGIN IMMEDIATE;")
+  3639→                for c in candles:
+  3640→                    t = int(c['time'])
+  3641→                    if t <= after_time:
+  3642→                        continue    # frozen - skip
+  3643→                    cur = conn.execute(
+  3644→                        "INSERT OR IGNORE INTO candles(symbol, time, open, high, low, close, volume) "
+  3645→                        "VALUES (?, ?, ?, ?, ?, ?, ?);",
+  3646→                        (symbol, t, float(c['open']), float(c['high']),
+  3647→                         float(c['low']), float(c['close']), int(c.get('volume', 0)))
+  3648→                    )
+  3649→                    if cur.rowcount > 0:
+  3650→                        inserted += 1
+  3651→                conn.execute("COMMIT;")
+  3652→            except Exception:
+  3653→                try: conn.execute("ROLLBACK;")
+  3654→                except Exception: pass
+  3655→                pass  # silenced - non-essential diagnostic
+  3656→                return 0
+  3657→            return inserted
+  3658→
+  3659→    def set_gap_filled(self, symbol: str, filled: bool = True, at_ts: float = None):
+  3660→        if at_ts is None:
+  3661→            at_ts = time.time()
+  3662→        with self._write_lock:
+  3663→            conn = self._get_write_conn()
+  3664→            try:
+  3665→                conn.execute("BEGIN IMMEDIATE;")
+  3666→                conn.execute(
+  3667→                    "INSERT INTO gap_state(symbol, filled, last_fill_at) VALUES (?, ?, ?) "
+  3668→                    "ON CONFLICT(symbol) DO UPDATE SET filled=excluded.filled, last_fill_at=excluded.last_fill_at;",
+  3669→                    (symbol, 1 if filled else 0, float(at_ts))
+  3670→                )
+  3671→                conn.execute("COMMIT;")
+  3672→            except Exception:
+  3673→                try: conn.execute("ROLLBACK;")
+  3674→                except Exception: pass
+  3675→
+  3676→    def is_gap_filled(self, symbol: str) -> Tuple[bool, float]:
+  3677→        """Returns (filled, last_fill_at)."""
+  3678→        try:
+  3679→            conn = _sqlite3.connect(self.db_path, timeout=10.0, isolation_level=None)
+  3680→            try:
+  3681→                cur = conn.execute(
+  3682→                    "SELECT filled, last_fill_at FROM gap_state WHERE symbol=?;",
+  3683→                    (symbol,)
+  3684→                )
+  3685→                row = cur.fetchone()
+  3686→                if row is None:
+  3687→                    return (False, 0.0)
+  3688→                return (bool(row[0]), float(row[1]))
+  3689→            finally:
+  3690→                conn.close()
+  3691→        except Exception as e:
+  3692→            pass  # silenced - non-essential diagnostic
+  3693→            return (False, 0.0)
+  3694→
+  3695→    # ------------------------------------------------------------------- reads
+  3696→    def get_candles(self, symbol: str, limit: Optional[int] = None) -> list:
+  3697→        """Return all candles for the symbol, sorted by time ascending.
+  3698→        If limit is given, return only the last `limit` candles."""
+  3699→        try:
+  3700→            conn = _sqlite3.connect(self.db_path, timeout=10.0, isolation_level=None)
+  3701→            try:
+  3702→                if limit is None:
+  3703→                    cur = conn.execute(
+  3704→                        "SELECT time, open, high, low, close, volume FROM candles "
+  3705→                        "WHERE symbol=? ORDER BY time ASC;",
+  3706→                        (symbol,)
+  3707→                    )
+  3708→                else:
+  3709→                    # Use a subselect to get the last N rows by time, then sort ascending.
+  3710→                    cur = conn.execute(
+  3711→                        "SELECT time, open, high, low, close, volume FROM candles "
+  3712→                        "WHERE symbol=? ORDER BY time DESC LIMIT ?;",
+  3713→                        (symbol, int(limit))
+  3714→                    )
+  3715→                    rows = cur.fetchall()
+  3716→                    rows.reverse()
+  3717→                    return [{
+  3718→                        'time': r[0], 'open': r[1], 'high': r[2],
+  3719→                        'low': r[3], 'close': r[4], 'volume': r[5]
+  3720→                    } for r in rows]
+  3721→                rows = cur.fetchall()
+  3722→                return [{
+  3723→                    'time': r[0], 'open': r[1], 'high': r[2],
+  3724→                    'low': r[3], 'close': r[4], 'volume': r[5]
+  3725→                } for r in rows]
+  3726→            finally:
+  3727→                conn.close()
+  3728→        except Exception as e:
+  3729→            pass  # silenced - non-essential diagnostic
+  3730→            return []
+  3731→
+  3732→    def get_max_time(self, symbol: str) -> int:
+  3733→        """Return the largest candle timestamp stored for the symbol, or 0."""
+  3734→        try:
+  3735→            conn = _sqlite3.connect(self.db_path, timeout=10.0, isolation_level=None)
+  3736→            try:
+  3737→                cur = conn.execute(
+  3738→                    "SELECT MAX(time) FROM candles WHERE symbol=?;",
+  3739→                    (symbol,)
+  3740→                )
+  3741→                row = cur.fetchone()
+  3742→                return int(row[0]) if row and row[0] is not None else 0
+  3743→            finally:
+  3744→                conn.close()
+  3745→        except Exception as e:
+  3746→            pass  # silenced - non-essential diagnostic
+  3747→            return 0
+  3748→
+  3749→    def count(self, symbol: str) -> int:
+  3750→        try:
+  3751→            conn = _sqlite3.connect(self.db_path, timeout=10.0, isolation_level=None)
+  3752→            try:
+  3753→                cur = conn.execute(
+  3754→                    "SELECT COUNT(*) FROM candles WHERE symbol=?;",
+  3755→                    (symbol,)
+  3756→                )
+  3757→                row = cur.fetchone()
+  3758→                return int(row[0]) if row else 0
+  3759→            finally:
+  3760→                conn.close()
+  3761→        except Exception as e:
+  3762→            pass  # silenced - non-essential diagnostic
+  3763→            return 0
+  3764→
+  3765→    def clear_symbol(self, symbol: str) -> int:
+  3766→        """Delete all candles + gap_state for a symbol (used by full re-fetch)."""
+  3767→        with self._write_lock:
+  3768→            conn = self._get_write_conn()
+  3769→            try:
+  3770→                conn.execute("BEGIN IMMEDIATE;")
+  3771→                cur = conn.execute("DELETE FROM candles WHERE symbol=?;", (symbol,))
+  3772→                deleted = cur.rowcount
+  3773→                conn.execute("DELETE FROM gap_state WHERE symbol=?;", (symbol,))
+  3774→                conn.execute("COMMIT;")
+  3775→                return deleted
+  3776→            except Exception:
+  3777→                try: conn.execute("ROLLBACK;")
+  3778→                except Exception: pass
+  3779→                return 0
+  3780→
+  3781→
+  3782→# Module-level singleton (created lazily so the path can be picked once
+  3783→# after APPDATA is available at runtime).
+  3784→_CANDLE_STORE: Optional[CandleStore] = None
+  3785→_CANDLE_STORE_LOCK = _threading.Lock()
+  3786→
+  3787→def get_candle_store() -> CandleStore:
+  3788→    """Lazy-init the global CandleStore.
+  3789→
+  3790→    The DB lives NEXT TO THE SCRIPT / EXE (not in APPDATA) so it is easy to
+  3791→    bundle with a PyInstaller exe and easy for the user to find / back up.
+  3792→    - When run as a script: candles.db is created in the script's directory.
+  3793→    - When frozen with PyInstaller (one-file): candles.db is created in the
+  3794→      directory the exe runs from (sys.executable's parent).
+  3795→    """
+  3796→    global _CANDLE_STORE
+  3797→    if _CANDLE_STORE is not None:
+  3798→        return _CANDLE_STORE
+  3799→    with _CANDLE_STORE_LOCK:
+  3800→        if _CANDLE_STORE is None:
+  3801→            # Resolve the directory the script / exe lives in.
+  3802→            # When frozen with PyInstaller, sys.executable points to the exe
+  3803→            # and we want the DB next to it (not inside the temp _MEIPASS dir).
+  3804→            if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+  3805→                base_dir = os.path.dirname(os.path.abspath(sys.executable))
+  3806→            else:
+  3807→                base_dir = os.path.dirname(os.path.abspath(__file__))
+  3808→            db_path = os.path.join(base_dir, 'candles.db')
+  3809→            _CANDLE_STORE = CandleStore(db_path)
+  3810→        return _CANDLE_STORE
+  3811→
+  3812→
+  3813→# ==============================================================================
+  3814→# SECTION 9.1: MT4 WRITER (uses CandleStore instead of JSON snapshots)
+  3815→# ==============================================================================
+  3816→class MT4Writer:
+  3817→    """ MT4 .
+  3818→ 
+  3819→ :
+  3820→ - sync_state[asset] {period, candles, last_write, last_price}
+  3821→ - seed_history: + HST 
+  3822→ - update_candle: + HST 200ms
+  3823→ - fill_gap_once: 20 + HST
+  3824→ 
+  3825→ :
+  3826→ - derived_symbol (AUDJPY-OTC) api_symbol 
+  3827→ - PERIOD=1 (M1) 60 (H1) => AUDJPY-OTC1.hst
+  3828→ - makedirs + retry + silent errors ( FIX 4/8)
+  3829→ """
+  3830→    def __init__(self):
+  3831→        appdata = os.environ.get('APPDATA', '') or os.environ.get('HOME', '')
+  3832→        self.mt4_history_path = os.path.join(appdata, 'MetaQuotes', 'Terminal', 'Common', 'Files', 'qx_hst')
+  3833→        try:
+  3834→            os.makedirs(self.mt4_history_path, exist_ok=True)
+  3835→        except Exception as e:
+  3836→            logmsg(f"Cannot create MT4 folder: {e}")
+  3837→        # ===== FIX 10: sync_state derived_symbol ( AUDJPY-OTC) =====
+  3838→        # seed_history + update_candle + fill_gap_once
+  3839→        # => (AUDJPY-OTC1.hst)
+  3840→        self.sync_state: Dict[str, Any] = {}
+  3841→        self._writing_queue = set()
+  3842→        self._gap_filled = {}
+  3843→        # ===== FIX L8: =====
+  3844→        # GAP_FILL_REFRESH_INTERVAL ( )
+  3845→        # => .
+  3846→        self._gap_filled_at: Dict[str, float] = {}
+  3847→        # ---- PERSISTENT STORAGE: SQLite-backed candle store ----------------
+  3848→        # CandleStore replaces the previous JSON snapshot approach. SQLite is
+  3849→        # transactional, atomic, indexed by (symbol, time), and far faster than
+  3850→        # writing/loading a 30 KB JSON file on every cycle. The DB lives at:
+  3851→        #   %APPDATA%\MetaQuotes\Terminal\Common\Files\qx_hst_snapshots\candles.db
+  3852→        # See SECTION 9 above for the CandleStore class definition.
+  3853→        self._candle_store: Optional[CandleStore] = None   # lazy via get_candle_store()
+  3854→
+  3855→    @property
+  3856→    def candle_store(self) -> "CandleStore":
+  3857→        """Lazy accessor so the DB connection is created after APPDATA is set."""
+  3858→        if self._candle_store is None:
+  3859→            self._candle_store = get_candle_store()
+  3860→        return self._candle_store
+  3861→
+  3862→    def load_snapshot(self, derived_symbol: str) -> Optional[list]:
+  3863→        """Load candles for an asset from the SQLite store.
+  3864→        Returns None if no candles exist (so seed_history falls back to the API).
+  3865→        Also refreshes the in-memory gap_state from the DB."""
+  3866→        try:
+  3867→            stored = self.candle_store.get_candles(derived_symbol, limit=INITIAL_CANDLES)
+  3868→            if not stored:
+  3869→                return None
+  3870→            # refresh in-memory gap_state from DB
+  3871→            filled, last_at = self.candle_store.is_gap_filled(derived_symbol)
+  3872→            self._gap_filled[derived_symbol] = filled
+  3873→            self._gap_filled_at[derived_symbol] = last_at
+  3874→            return stored
+  3875→        except Exception as e:
+  3876→            pass  # silenced - non-essential diagnostic
+  3877→            return None
+  3878→
+  3879→    def save_snapshot(self, derived_symbol: str, candles: list) -> None:
+  3880→        """Persist the current candle list to the SQLite store.
+  3881→        Called after seed_history + after each successful fill_gap_once."""
+  3882→        try:
+  3883→            self.candle_store.upsert_candles(derived_symbol, candles)
+  3884→        except Exception as e:
+  3885→            pass  # silenced - non-essential diagnostic
+  3886→
+  3887→    def get_digits(self, symbol: str, price: float = 0.0) -> int:
+  3888→        # FIX J: _resolve_digits ( mt4_digits.json)
+  3889→        return _resolve_digits(symbol, price)
+  3890→
+  3891→    def generate_hst_buffer(self, symbol: str, period: int, candles: list) -> bytes:
+  3892→        # For sub-minute timeframes, write period=1 (M1) in the HST header
+  3893→        # so MT4 opens it as a normal M1 file. The candles inside have actual
+  3894→        # 5s/10s/15s/30s timestamps. For 60s+ timeframes, store the MT4 period int.
+  3895→        header_period = 1 if PERIOD_SECONDS < 60 else period
+  3896→        header = bytearray(148)
+  3897→        struct.pack_into('<I', header, 0, 400)
+  3898→        struct.pack_into('64s', header, 4, b'MetaQuotes Software Corp.'.ljust(64, b'\x00'))
+  3899→        struct.pack_into('12s', header, 68, symbol[:12].encode('ascii').ljust(12, b'\x00'))
+  3900→        struct.pack_into('<I', header, 80, header_period)
+  3901→        first_price = candles[0]['close'] if candles else 0.0
+  3902→        digits = self.get_digits(symbol, first_price)
+  3903→        struct.pack_into('<I', header, 84, digits)
+  3904→        struct.pack_into('<I', header, 88, 0)
+  3905→        struct.pack_into('<I', header, 92, 0)
+  3906→        body_size = len(candles) * 44
+  3907→        buffer = bytearray(148 + body_size)
+  3908→        buffer[:148] = header
+  3909→        offset = 148
+  3910→        for c in candles:
+  3911→            struct.pack_into('<I', buffer, offset, int(c['time']))
+  3912→            struct.pack_into('<d', buffer, offset + 4, float(c['open']))
+  3913→            struct.pack_into('<d', buffer, offset + 12, float(c['low']))
+  3914→            struct.pack_into('<d', buffer, offset + 20, float(c['high']))
+  3915→            struct.pack_into('<d', buffer, offset + 28, float(c['close']))
+  3916→            struct.pack_into('<Q', buffer, offset + 36, int(c.get('volume', 0)))
+  3917→            offset += 44
+  3918→        return bytes(buffer)
+  3919→
+  3920→    def update_candle(self, asset: str, period: int, tick: dict):
+  3921→        """ + HST 200ms ( ).
+  3922→
+  3923→ Args:
+  3924→ asset: derived_symbol ( "AUDJPY-OTC") — 
+  3925→ period: MT4 timeframe (PERIOD=1 for M1) — 
+  3926→ tick: {'time': int, 'price': float}
+  3927→ """
+  3928→        if asset not in self.sync_state:
+  3929→            self.sync_state[asset] = {'period': period, 'candles': [], 'last_write': 0, 'last_price': 0.0}
+  3930→        state = self.sync_state[asset]
+  3931→        # ===== FIX L6: _align_time ( tz_offset + ) =====
+  3932→        # —
+  3933→        # seed_history fill_gap_once fetch_candles_once.
+  3934→        aligned_time = _align_time(tick['time'])
+  3935→
+  3936→        # FIX STALE-CANDLE v2: only the last candle (current/open) can be updated.
+  3937→        # All candles before it are closed and must never be touched.
+  3938→        if state['candles']:
+  3939→            last_time = state['candles'][-1]['time']
+  3940→            if aligned_time < last_time:
+  3941→                # tick for a closed minute - ignore (protect closed candles)
+  3942→                return
+  3943→            elif aligned_time == last_time:
+  3944→                last = state['candles'][-1]
+  3945→                if tick['price'] == state['last_price']: return
+  3946→                last['high'] = max(last['high'], tick['price'])
+  3947→                last['low'] = min(last['low'], tick['price'])
+  3948→                last['close'] = tick['price']
+  3949→                last['volume'] += 1
+  3950→            else:
+  3951→                # new candle - check if there's a gap and fill it with flat candles
+  3952→                period_secs = PERIOD_SECONDS if PERIOD_SECONDS > 0 else 60
+  3953→                gap = (aligned_time - last_time) // period_secs
+  3954→                if gap > 1:
+  3955→                    # Fill gap with flat candles (use last close as price)
+  3956→                    last_close = state['candles'][-1]['close']
+  3957→                    fill_time = last_time + period_secs
+  3958→                    while fill_time < aligned_time:
+  3959→                        state['candles'].append({
+  3960→                            'time': fill_time,
+  3961→                            'open': last_close,
+  3962→                            'high': last_close,
+  3963→                            'low': last_close,
+  3964→                            'close': last_close,
+  3965→                            'volume': 0,
+  3966→                        })
+  3967→                        fill_time += period_secs
+  3968→                # Now append the new candle (becomes the last)
+  3969→                state['candles'].append({
+  3970→                    'time': aligned_time, 'open': tick['price'], 'high': tick['price'],
+  3971→                    'low': tick['price'], 'close': tick['price'], 'volume': 1,
+  3972→                })
+  3973→        else:
+  3974→            state['candles'].append({
+  3975→                'time': aligned_time, 'open': tick['price'], 'high': tick['price'],
+  3976→                'low': tick['price'], 'close': tick['price'], 'volume': 1,
+  3977→            })
+  3978→        if len(state['candles']) > 1000:
+  3979→            state['candles'] = state['candles'][-1000:]
+  3980→        state['last_price'] = tick['price']
+  3981→        now = time.time()
+  3982→        if now - state['last_write'] > 0.2:
+  3983→            self.write_to_file(asset, period, state['candles'])
+  3984→            state['last_write'] = now
+  3985→
+  3986→    def write_to_file(self, asset: str, period: int, candles: list):
+  3987→        """ HST {asset}{period}.hst ( AUDJPY-OTC1.hst).
+  3988→
+  3989→ Args:
+  3990→ asset: derived_symbol ( "AUDJPY-OTC")
+  3991→ period: MT4 timeframe (PERIOD=1 for M1)
+  3992→"""
+  3993→        # DISABLED: server no longer writes HST files (user request).
+  3994→        # The web dashboard (Flask) is now the ONLY output — no disk writes.
+  3995→        if not WRITE_HST_FILES_ENABLED:
+  3996→            return
+  3997→        if asset in self._writing_queue: return
+  3998→        self._writing_queue.add(asset)
+  3999→        file_name = f"{asset}{period}.hst"
+  4000→        file_path = os.path.join(self.mt4_history_path, file_name)
+  4001→        temp_path = file_path + '.tmp'
+  4002→        # / +
+  4003→        def _is_silent_error(err_str):
+  4004→            err_str = err_str.lower()
+  4005→            return any(x in err_str for x in [
+  4006→                'winerror 2', 'winerror 5', 'winerror 32', 'winerror 13',
+  4007→                'introuvable', 'refusé', 'acces refusé', 'access denied',
+  4008→                'permission', 'used by another', 'ebusy', 'eperm',
+  4009→                'no such file', 'not found', 'does not exist'
+  4010→            ])
+  4011→        # ( WinError 2)
+  4012→        try:
+  4013→            os.makedirs(self.mt4_history_path, exist_ok=True)
+  4014→        except Exception:
+  4015→            pass
+  4016→        try:
+  4017→            buffer = self.generate_hst_buffer(asset, period, candles)
+  4018→            with open(temp_path, 'wb') as f:
+  4019→                f.write(buffer)
+  4020→            # retry WinError 5 + 32
+  4021→            replaced = False
+  4022→            for attempt in range(8):
+  4023→                try:
+  4024→                    os.replace(temp_path, file_path)
+  4025→                    replaced = True
+  4026→                    break
+  4027→                except (PermissionError, OSError) as e:
+  4028→                    if _is_silent_error(str(e)):
+  4029→                        time.sleep(0.05 + 0.05 * attempt)
+  4030→                        continue
+  4031→                    raise
+  4032→            if not replaced:
+  4033→                # fallback —
+  4034→                try:
+  4035→                    with open(file_path, 'wb') as f:
+  4036→                        f.write(buffer)
+  4037→                    replaced = True
+  4038→                except Exception as fallback_err:
+  4039→                    if not _is_silent_error(str(fallback_err)):
+  4040→                        logmsg(f"MT4 Write Error for {asset} (fallback): {fallback_err}")
+  4041→        except OSError as e:
+  4042→            if not _is_silent_error(str(e)):
+  4043→                logmsg(f"MT4 Write Error for {asset}: {e}")
+  4044→        except Exception as e:
+  4045→            if not _is_silent_error(str(e)):
+  4046→                logmsg(f"MT4 Write Error for {asset}: {e}")
+  4047→        finally:
+  4048→            self._writing_queue.discard(asset)
+  4049→            if os.path.exists(temp_path):
+  4050→                try: os.remove(temp_path)
+  4051→                except Exception: pass
+  4052→
+  4053→    async def seed_history(self, client, asset_obj, period: int, days: float = 0.75):
+  4054→        """ + HST ( ).
+  4055→ 
+  4056→ Args:
+  4057→ client: Quotex
+  4058→ asset_obj: Asset ( api_symbol symbol)
+  4059→ period: MT4 timeframe (PERIOD=1 for M1) — get_candles PERIOD_SECONDS
+  4060→ days: (default 0.75 = 18 )
+  4061→ 
+  4062→ Returns:
+  4063→ True False 
+  4064→ """
+  4065→        api_symbol = asset_obj.api_symbol
+  4066→        derived_symbol = asset_obj.symbol
+  4067→
+  4068→        # ---- SNAPSHOT FAST PATH ------------------------------------------------
+  4069→        # If we have a previously-saved snapshot for this asset, use it directly.
+  4070→        # This avoids re-fetching historical candles from the API on every restart
+  4071→        # and prevents the "candles flicker / disappear and reappear" symptom
+  4072→        # caused by the API returning slightly different candle data each call.
+  4073→        # The streaming update_candle() path will simply append new candles as
+  4074→        # they happen, and fill_gap_once() will only ADD new closed candles
+  4075→        # (never replace existing ones, since the snapshot marks them as frozen).
+  4076→        try:
+  4077→            snap = self.load_snapshot(derived_symbol)
+  4078→            if snap and len(snap) >= 2:
+  4079→                snap = sorted(snap, key=lambda x: x['time'])[-INITIAL_CANDLES:]
+  4080→                # populate sync_state from the snapshot
+  4081→                self.sync_state[derived_symbol] = {
+  4082→                    'period': period,
+  4083→                    'candles': list(snap),
+  4084→                    'last_write': 0,
+  4085→                    'last_price': float(snap[-1]['close']) if snap else 0.0,
+  4086→                }
+  4087→                # write HST so MT4 picks them up immediately
+  4088→                self.write_to_file(derived_symbol, period, snap)
+  4089→                asset_obj.candles = list(snap)
+  4090→                if snap:
+  4091→                    asset_obj.price = snap[-1]['close']
+  4092→                # gap is considered already filled (frozen) for the snapshot range
+  4093→                self._gap_filled[derived_symbol] = True
+  4094→                self._gap_filled_at[derived_symbol] = time.time()
+  4095→                pass  # silenced - non-essential diagnostic
+  4096→                return True
+  4097→        except Exception as _se:
+  4098→            pass  # silenced - non-essential diagnostic
+  4099→
+  4100→        try:
+  4101→            offset_seconds = int(days * 86400)
+  4102→            # ===== FIX 10: get_candles PERIOD_SECONDS (60s ) =====
+  4103→            # PERIOD (1 = M1 timeframe)
+  4104→            candles = await client.get_candles(api_symbol, time.time(), offset_seconds, PERIOD_SECONDS)
+  4105→            if candles and len(candles) > 0:
+  4106→                # ===== FIX L7: _align_time ( tz_offset + ) =====
+  4107→                # `t = int(c.get('time', ...)) + _tz_offset` —
+  4108→                # => API 22:36:30 22:36:30
+  4109→                # update_candle 22:36:00 => => .
+  4110→                # : _align_time tz_offset + => .
+  4111→                formatted = []
+  4112→                for c in candles:
+  4113→                    t = _align_time(int(c.get('time', c.get('timestamp', 0))))
+  4114→                    o = float(c.get('open', c.get('o', 0)) or 0)
+  4115→                    h = float(c.get('high', c.get('max', c.get('h', 0))) or 0)
+  4116→                    l = float(c.get('low', c.get('min', c.get('l', 0))) or 0)
+  4117→                    cl = float(c.get('close', c.get('c', 0)) or 0)
+  4118→                    if o > 0 and h > 0 and l > 0 and cl > 0:
+  4119→                        formatted.append({
+  4120→                            'time': t, 'open': o, 'high': h, 'low': l, 'close': cl, 'volume': 0,
+  4121→                        })
+  4122→                formatted.sort(key=lambda x: x['time'])
+  4123→                seen = set()
+  4124→                unique_candles = [c for c in formatted if not (c['time'] in seen or seen.add(c['time']))]
+  4125→                # ===== FIX 10: 1000 + =====
+  4126→                unique_candles = unique_candles[-INITIAL_CANDLES:]
+  4127→                # ===== FIX 10: sync_state derived_symbol ( AUDJPY-OTC) =====
+  4128→                self.sync_state[derived_symbol] = {
+  4129→                    'period': period, 'candles': unique_candles, 'last_write': 0, 'last_price': 0.0,
+  4130→                }
+  4131→                # ===== FIX 10: HST derived_symbol + period (AUDJPY-OTC1.hst) =====
+  4132→                self.write_to_file(derived_symbol, period, unique_candles)
+  4133→                # asset_obj.candles ( )
+  4134→                asset_obj.candles = unique_candles
+  4135→                if unique_candles:
+  4136→                    asset_obj.price = unique_candles[-1]['close']
+  4137→                self._gap_filled[derived_symbol] = False
+  4138→                # ---- Save the freshly-fetched candles as the snapshot so the next
+  4139→                # restart uses them as-is and never re-fetches this range. ----
+  4140→                self.save_snapshot(derived_symbol, unique_candles)
+  4141→                return True
+  4142→            return False
+  4143→        except Exception as e:
+  4144→            # ( spam)
+  4145→            err_str = str(e).lower()
+  4146→            if not any(x in err_str for x in ['winerror', 'permission', 'access', 'closed', 'connection']):
+  4147→                pass  # — main fetch loop
+  4148→            return False
+  4149→
+  4150→    async def fill_gap_once(self, client, asset_obj, period: int):
+  4151→        """ GAP_FILL_CANDLES + .
+  4152→
+  4153→ (FIX L9):
+  4154→ 1. _align_time tz_offset + => .
+  4155→ 2. GAP_FILL_REFRESH_INTERVAL => .
+  4156→ 3. _fill_missing_slots => .
+  4157→ 4. 0 (volume=0) => .
+  4158→
+  4159→ (NEW - FREEZE AFTER FIRST SUCCESS):
+  4160→ 5. The original fill_gap_once algorithm is left intact. The ONLY new thing
+  4161→    is a persistent freeze flag in the SQLite candle store (gap_state.filled).
+  4162→    Once a successful fill has run for an asset, the flag is set to 1 and
+  4163→    every subsequent call to fill_gap_once returns immediately without
+  4164→    touching the candles. This preserves the candles exactly as they were
+  4165→    after the first fill - no flicker, no replacement of closed candles.
+  4166→    A 'full re-fetch' command can clear the flag and force a new fill.
+  4167→
+  4168→ Args:
+  4169→ client: Quotex
+  4170→ asset_obj: Asset ( api_symbol symbol)
+  4171→ period: MT4 timeframe (PERIOD=1 for M1)
+  4172→ """
+  4173→        api_symbol = asset_obj.api_symbol
+  4174→        derived_symbol = asset_obj.symbol
+  4175→
+  4176→        # 0) FREEZE CHECK: if a successful fill already happened for this asset
+  4177→        # (gap_state.filled == 1 in the SQLite store), do NOT touch the candles
+  4178→        # at all. This is the entire fix for the 'candles flicker' symptom -
+  4179→        # the original algorithm is preserved 1:1, we only skip it after the
+  4180→        # first successful run.
+  4181→        try:
+  4182→            is_filled, _last_at = self.candle_store.is_gap_filled(derived_symbol)
+  4183→            if is_filled:
+  4184→                return    # frozen - keep candles exactly as they were
+  4185→        except Exception:
+  4186→            pass
+  4187→
+  4188→        # 1) skip if filled recently (within GAP_FILL_REFRESH_INTERVAL)
+  4189→        now_ts = time.time()
+  4190→        last_fill = self._gap_filled_at.get(derived_symbol, 0)
+  4191→        already_filled = self._gap_filled.get(derived_symbol, False)
+  4192→        if already_filled and (now_ts - last_fill) < GAP_FILL_REFRESH_INTERVAL:
+  4193→            return
+  4194→
+  4195→        # 2) sync_state asset_obj.candles
+  4196→        if derived_symbol not in self.sync_state:
+  4197→            if not asset_obj.candles:
+  4198→                # try to load from store first
+  4199→                snap = self.load_snapshot(derived_symbol)
+  4200→                if snap:
+  4201→                    asset_obj.candles = snap
+  4202→                else:
+  4203→                    return
+  4204→            self.sync_state[derived_symbol] = {
+  4205→                'period': period,
+  4206→                'candles': list(asset_obj.candles),
+  4207→                'last_write': 0,
+  4208→                'last_price': float(asset_obj.candles[-1]['close']) if asset_obj.candles else 0.0,
+  4209→            }
+  4210→        state = self.sync_state[derived_symbol]
+  4211→        if not state['candles']:
+  4212→            return
+  4213→
+  4214→        try:
+  4215→            # Fetch last GAP_FILL_CANDLES (10) recent candles to replace incomplete ones
+  4216→            small_days = (GAP_FILL_CANDLES * PERIOD_SECONDS) / 86400.0
+  4217→            candles = await client.get_candles(api_symbol, time.time(), int(small_days * 86400), PERIOD_SECONDS)
+  4218→            if not candles:
+  4219→                # Fill existing gaps even without new data
+  4220→                merged = sorted(state['candles'], key=lambda x: x['time'])[-INITIAL_CANDLES:]
+  4221→                merged = _fill_missing_slots(merged, PERIOD_SECONDS, max_gap=1440)
+  4222→                state['candles'] = merged
+  4223→                self.write_to_file(derived_symbol, period, merged)
+  4224→                asset_obj.candles = merged
+  4225→                self._gap_filled[derived_symbol] = True
+  4226→                self._gap_filled_at[derived_symbol] = now_ts
+  4227→                self.save_snapshot(derived_symbol, merged)
+  4228→                # mark as permanently filled in the DB so the next cycle skips
+  4229→                self.candle_store.set_gap_filled(derived_symbol, True, now_ts)
+  4230→                return
+  4231→
+  4232→            # Build candle_map: replace incomplete closed candles with real API data
+  4233→            # - Current streaming candle (time >= current_period_start): SKIP (streaming handles it)
+  4234→            # - Closed candles in the fetched range: REPLACE with real data (fixes small bodies)
+  4235→            # - Missing candles: ADD them
+  4236→            # - Synthetic candles (volume=0): REPLACE with real data
+  4237→            current_period_start = _align_time(int(time.time()))
+  4238→            candle_map: Dict[int, dict] = {}
+  4239→            for c in state['candles']:
+  4240→                candle_map[c['time']] = c
+  4241→            new_count = 0
+  4242→            replaced_count = 0
+  4243→            for c in candles:
+  4244→                t = _align_time(int(c.get('time', c.get('timestamp', 0))))
+  4245→                o = float(c.get('open', c.get('o', 0)) or 0)
+  4246→                h = float(c.get('high', c.get('max', c.get('h', 0))) or 0)
+  4247→                l = float(c.get('low', c.get('min', c.get('l', 0))) or 0)
+  4248→                cl = float(c.get('close', c.get('c', 0)) or 0)
+  4249→                v = int(c.get('volume', c.get('vol', 0)) or 0)
+  4250→                if o > 0 and h > 0 and l > 0 and cl > 0:
+  4251→                    existing = candle_map.get(t)
+  4252→                    if existing is None:
+  4253→                        # genuinely missing candle (real gap) - add it
+  4254→                        candle_map[t] = {
+  4255→                            'time': t, 'open': o, 'high': h, 'low': l, 'close': cl, 'volume': v,
+  4256→                        }
+  4257→                        new_count += 1
+  4258→                    elif t >= current_period_start:
+  4259→                        # current streaming candle - DON'T TOUCH (streaming handles it)
+  4260→                        continue
+  4261→                    else:
+  4262→                        # closed candle in the fetched range - REPLACE with real data
+  4263→                        # (fixes small/incomplete bodies from partial streaming)
+  4264→                        candle_map[t] = {
+  4265→                            'time': t, 'open': o, 'high': h, 'low': l, 'close': cl, 'volume': v,
+  4266→                        }
+  4267→                        replaced_count += 1
+  4268→
+  4269→            # sort + limit to INITIAL_CANDLES
+  4270→            merged = sorted(candle_map.values(), key=lambda x: x['time'])[-INITIAL_CANDLES:]
+  4271→            # fill remaining gaps with flat candles (max_gap=1440 = full day)
+  4272→            merged = _fill_missing_slots(merged, PERIOD_SECONDS, max_gap=1440)
+  4273→            state['candles'] = merged
+  4274→
+  4275→            # write HST
+  4276→            self.write_to_file(derived_symbol, period, merged)
+  4277→
+  4278→            # update asset_obj.candles (for live price display)
+  4279→            asset_obj.candles = merged
+  4280→            if merged:
+  4281→                asset_obj.price = merged[-1]['close']
+  4282→
+  4283→            # 9) mark gap as filled
+  4284→            self._gap_filled[derived_symbol] = True
+  4285→            self._gap_filled_at[derived_symbol] = now_ts
+  4286→            # 10) persist candles to the SQLite store (so the next restart
+  4287→            # loads them from the DB instead of re-fetching from the API).
+  4288→            self.save_snapshot(derived_symbol, merged)
+  4289→            # 11) set the permanent freeze flag - subsequent fill_gap_once
+  4290→            # calls for this asset will return immediately without touching
+  4291→            # the candles. This is the entire fix for the 'flicker' symptom.
+  4292→            self.candle_store.set_gap_filled(derived_symbol, True, now_ts)
+  4293→        except Exception as e:
+  4294→            err_str = str(e).lower()
+  4295→            if not any(x in err_str for x in ['winerror', 'permission', 'access', 'closed', 'connection']):
+  4296→                pass
+  4297→
+  4298→MT4_WRITER = MT4Writer()
+  4299→
+  4300→async def mt4_gap_filler():
+  4301→    global GAP_FILL_SUMMARY, GAP_FILL_ACTIVE
+  4302→    # Skip entirely for subsecond mode — no gap filler for 5s/10s/15s/30s
+  4303→    if IS_SUBSECOND:
+  4304→        GAP_FILL_SUMMARY = "GAP FILL: disabled (subsecond mode)"
+  4305→        GAP_FILL_ACTIVE = False
+  4306→        return
+  4307→    total = len(ALL_STREAMING_ASSETS)
+  4308→    GAP_FILL_SUMMARY = f"GAP FILL: waiting 60s before starting ({total} assets)..."
+  4309→    await asyncio.sleep(60)
+  4310→    cycle = 0
+  4311→    while True:
+  4312→        cycle += 1
+  4313→        if not ALL_STREAMING_ASSETS:
+  4314→            GAP_FILL_SUMMARY = "GAP FILL: no assets to fill"
+  4315→            GAP_FILL_ACTIVE = False
+  4316→            await asyncio.sleep(GAP_FILL_REFRESH_INTERVAL)
+  4317→            continue
+  4318→        GAP_FILL_ACTIVE = True
+  4319→        filled_count = 0
+  4320→        skipped_count = 0
+  4321→        failed_count = 0
+  4322→        failed_assets = []
+  4323→        t0 = time.time()
+  4324→        for i, asset in enumerate(ALL_STREAMING_ASSETS, 1):
+  4325→            if not CLIENT or not CLIENT.api:
+  4326→                GAP_FILL_SUMMARY = f"GAP FILL: ABORTED (connection lost) | {filled_count}/{total} filled | {skipped_count} skipped"
+  4327→                GAP_FILL_ACTIVE = False
+  4328→                await asyncio.sleep(5)
+  4329→                break
+  4330→            try:
+  4331→                await MT4_WRITER.fill_gap_once(CLIENT, asset, PERIOD)
+  4332→                if MT4_WRITER._gap_filled.get(asset.symbol, False):
+  4333→                    filled_count += 1
+  4334→                else:
+  4335→                    skipped_count += 1
+  4336→                await asyncio.sleep(0.3)
+  4337→            except Exception:
+  4338→                skipped_count += 1
+  4339→                failed_count += 1
+  4340→                failed_assets.append(asset.symbol)
+  4341→            # live progress update in banner
+  4342→            GAP_FILL_SUMMARY = (
+  4343→                f"GAP FILL c{cycle}: {i}/{total} done | {filled_count} filled | "
+  4344→                f"{skipped_count} skipped | {failed_count} failed | {time.time()-t0:.1f}s"
+  4345→            )
+  4346→        else:
+  4347→            # loop completed normally (no connection loss break)
+  4348→            elapsed = time.time() - t0
+  4349→            fail_str = f" | Failed: {', '.join(failed_assets[:5])}" if failed_assets else ""
+  4350→            GAP_FILL_SUMMARY = (
+  4351→                f"GAP FILL c{cycle}: COMPLETE in {elapsed:.1f}s | {filled_count}/{total} filled | "
+  4352→                f"{skipped_count} skipped{fail_str} | next in {GAP_FILL_REFRESH_INTERVAL}s"
+  4353→            )
+  4354→            GAP_FILL_ACTIVE = False
+  4355→            await asyncio.sleep(GAP_FILL_REFRESH_INTERVAL)
+  4356→            total = len(ALL_STREAMING_ASSETS)
+  4357→            continue
+  4358→        # reached here only on connection loss (break)
+  4359→        GAP_FILL_ACTIVE = False
+  4360→        await asyncio.sleep(GAP_FILL_REFRESH_INTERVAL)
+  4361→        total = len(ALL_STREAMING_ASSETS)
+  4362→
+  4363→
+  4364→WEB_PUSH_INTERVAL = 30  # seconds between full candle re-push to web dashboard
+  4365→
+  4366→async def web_candle_refresher():
+  4367→    """Every 30 seconds: re-fetch full candle history for ALL streaming assets
+  4368→    and push to the web dashboard so the chart always shows fresh, complete data.
+  4369→    Uses the same fetch_candles_with_retry path as the initial load.
+  4370→    Skips assets if connection is down (retries next cycle).
+  4371→    """
+  4372→    global GAP_FILL_SUMMARY
+  4373→    # Wait for initial load to complete before first push
+  4374→    await asyncio.sleep(35)
+  4375→    cycle = 0
+  4376→    while True:
+  4377→        cycle += 1
+  4378→        assets = list(ALL_STREAMING_ASSETS)
+  4379→        total = len(assets)
+  4380→        if total == 0 or not CONNECTION_ALIVE or CLIENT is None:
+  4381→            GAP_FILL_SUMMARY = f"WEB PUSH c{cycle}: waiting for connection... (next in {WEB_PUSH_INTERVAL}s)"
+  4382→            await asyncio.sleep(WEB_PUSH_INTERVAL)
+  4383→            continue
+  4384→
+  4385→        pushed = 0
+  4386→        skipped = 0
+  4387→        t0 = time.time()
+  4388→        GAP_FILL_SUMMARY = f"WEB PUSH c{cycle}: refreshing {total} assets..."
+  4389→
+  4390→        for asset in assets:
+  4391→            if not CONNECTION_ALIVE or CLIENT is None:
+  4392→                GAP_FILL_SUMMARY = f"WEB PUSH c{cycle}: ABORTED (connection lost) — {pushed}/{total} pushed"
+  4393→                skipped = total - pushed
+  4394→                break
+  4395→            try:
+  4396→                candles_count, _ = await fetch_candles_with_retry(
+  4397→                    asset, max_retries=3, idx=pushed+1, total=total
+  4398→                )
+  4399→                if candles_count > 0:
+  4400→                    try:
+  4401→                        _web_update_asset(asset, full_resync=True)
+  4402→                    except Exception:
+  4403→                        pass
+  4404→                    pushed += 1
+  4405→                else:
+  4406→                    skipped += 1
+  4407→            except Exception:
+  4408→                skipped += 1
+  4409→            # Small delay between assets to avoid hammering the server
+  4410→            await asyncio.sleep(0.2)
+  4411→
+  4412→        elapsed = time.time() - t0
+  4413→        GAP_FILL_SUMMARY = (
+  4414→            f"WEB PUSH c{cycle}: {pushed}/{total} pushed ({elapsed:.1f}s) | "
+  4415→            f"{skipped} skipped | next in {WEB_PUSH_INTERVAL}s"
+  4416→        )
+  4417→        await asyncio.sleep(WEB_PUSH_INTERVAL)
+  4418→
+  4419→def print_dashboard():
+  4420→    _tf_label = "Unknown"
+  4421→    for tf_tuple in TIMEFRAMES:
+  4422→        mt4_p, secs, label = tf_tuple[0], tf_tuple[1], tf_tuple[2]
+  4423→        if mt4_p == PERIOD and secs == PERIOD_SECONDS:
+  4424→            _tf_label = label
+  4425→            break
+  4426→    # تبسيط العنوان: سطر واحد فاصل بدل 3 خطوط زرقاء كثيفة
+  4427→    print(f"  {Colors.DIM}{'─'*68}{Colors.RESET}")
+  4428→    print(f"  {Colors.BOLD}QXChartMT4 Pro - v8.0  {Colors.DIM}|  @qxzero1  |  2026{Colors.RESET}")
+  4429→    print(f"  {Colors.DIM}{'─'*68}{Colors.RESET}")
+  4430→    print(f"  {Colors.CYAN}Timeframe  {Colors.RESET}: {_tf_label} ({PERIOD_SECONDS}s)")
+  4431→    print(f"  {Colors.CYAN}History    {Colors.RESET}: {HISTORY_DAYS:.2f} day = {INITIAL_CANDLES} candles")
+  4432→    # FIX L11: TZ offset display
+  4433→    _tz_sec = _get_tz_offset()
+  4434→    _tz_sign = '+' if _tz_sec >= 0 else '-'
+  4435→    _tz_h, _tz_m = divmod(abs(_tz_sec) // 60, 60)
+  4436→    _tz_src = "manual" if LOCAL_TZ_OFFSET_SECONDS is not None else "system"
+  4437→    print(f"  {Colors.CYAN}TZ offset  {Colors.RESET}: UTC{_tz_sign}{_tz_h:02d}:{_tz_m:02d} (source={_tz_src})")
+  4438→    print(f"  {Colors.CYAN}Gap fill   {Colors.RESET}: {GAP_FILL_CANDLES} candles / {GAP_FILL_REFRESH_INTERVAL}s")
+  4439→    print(f"  {Colors.GREEN}Contact    {Colors.RESET}: https://t.me/qxchart")
+  4440→    print(f"  {Colors.DIM}{'─'*68}{Colors.RESET}\n")
+  4441→
+  4442→# ==============================================================================
+  4443→# WEB SERVER — Live chart dashboard (ap.py style, embedded)
+  4444→# Runs on http://localhost:8765  — pairs click -> live chart
+  4445→# ==============================================================================
+  4446→WEB_SERVER_PORT = 8765
+  4447→WEB_SERVER_HOST = "127.0.0.1"
+  4448→
+  4449→# Shared candle store for web server (populated by realtime_stream + fetch)
+  4450→_web_candle_store = {}          # pair_name -> {"candles": [...], "lastUpdate": ms, "digits": int}
+  4451→_web_candle_lock = threading.RLock()
+  4452→_web_push_stats = {"total_pushes": 0, "last_push_time": 0, "start_time": time.time()}
+  4453→
+  4454→def _web_pair_name(api_symbol):
+  4455→    """Convert api_symbol (e.g. AUDCAD_otc) -> display pair name (AUDCAD-OTCq)."""
+  4456→    s = api_symbol.strip()
+  4457→    if s.lower().endswith("_otc"):
+  4458→        return s[:-4].upper() + "-OTCq"
+  4459→    return s.upper()
+  4460→
+  4461→_web_latest_tick = {}   # pair_name -> {"price": float, "time": int, "digits": int, "ts": ms}
+  4462→
+  4463→def _web_update_asset(asset, full_resync=False):
+  4464→    """Called after every candle update -- pushes data to web candle store.
+  4465→
+  4466→    v9.0: OPTIMIZED for max-speed live ticks.
+  4467→      - Default (full_resync=False): only updates _web_latest_tick (cheap, ~1µs).
+  4468→        Used by realtime_stream on every tick. Does NOT copy the full candle list.
+  4469→      - full_resync=True: refreshes the full _web_candle_store[pair] entry.
+  4470→        Used after initial historical fetch and on candle close (new candle started).
+  4471→    """
+  4472→    if not asset.candles:
+  4473→        return
+  4474→    pair = _web_pair_name(asset.api_symbol)
+  4475→    try:
+  4476→        digits = asset.digits(asset.price) if asset.price else 5
+  4477→    except Exception:
+  4478→        digits = 5
+  4479→    last_c = asset.candles[-1]
+  4480→    now_ms = int(time.time() * 1000)
+  4481→
+  4482→    # Always update the lightweight tick cache (fast path for /api/last-tick).
+  4483→    # This is what the chart polls at 50ms — must be O(1).
+  4484→    with _web_candle_lock:
+  4485→        _web_latest_tick[pair] = {
+  4486→            "price": float(asset.price) if asset.price else float(last_c.get("close", 0)),
+  4487→            "time": int(last_c.get("time", 0)),
+  4488→            "open": float(last_c.get("open", 0)),
+  4489→            "high": float(last_c.get("high", 0)),
+  4490→            "low": float(last_c.get("low", 0)),
+  4491→            "close": float(last_c.get("close", 0)),
+  4492→            "digits": digits,
+  4493→            "ts": now_ms,
+  4494→        }
+  4495→        _web_push_stats["total_pushes"] += 1
+  4496→        _web_push_stats["last_push_time"] = now_ms
+  4497→
+  4498→    # Only do the heavy full-candle copy when explicitly requested.
+  4499→    # realtime_stream calls _web_update_asset(asset, full_resync=True) only on
+  4500→    # candle CLOSE (new candle started), not on every tick.
+  4501→    if full_resync:
+  4502→        candles_copy = [dict(c) for c in asset.candles[-3000:]]
+  4503→        with _web_candle_lock:
+  4504→            _web_candle_store[pair] = {
+  4505→                "pair": pair,
+  4506→                "digits": digits,
+  4507→                "candles": candles_copy,
+  4508→                "lastUpdate": now_ms,
+  4509→            }
+  4510→
+  4511→# == HTML & CSS (same dark theme as ap.py) =====================================
+  4512→_WEB_SHARED_CSS = """
+  4513→:root{--bg-primary:#0a0e17;--bg-secondary:#111827;--bg-nav:#0d1117;
+  4514→      --border:#1f2937;--text:#e5e7eb;--text-dim:#9ca3af;--text-muted:#6b7280;
+  4515→      --green:#22c55e;--red:#ef4444;--blue:#3b82f6;--accent:#6366f1;}
+  4516→*{margin:0;padding:0;box-sizing:border-box;}
+  4517→body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+  4518→     background:var(--bg-primary);color:var(--text);min-height:100vh;}
+  4519→a{color:var(--blue);text-decoration:none;}
+  4520→a:hover{text-decoration:underline;}
+  4521→"""
+  4522→
+  4523→_WEB_HOME_HTML = r"""<!DOCTYPE html>
+  4524→<html lang="en">
+  4525→<head>
+  4526→<meta charset="UTF-8">
+  4527→<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0,user-scalable=yes">
+  4528→<meta name="theme-color" content="#0a0e17">
+  4529→<title>QXChart MT4 - Live Dashboard</title>
+  4530→<style>
+  4531→CSS_HERE
+  4532→.header{background:var(--bg-nav);border-bottom:1px solid var(--border);
+  4533→        padding:16px 24px;display:flex;align-items:center;justify-content:space-between;
+  4534→        position:sticky;top:0;z-index:50;}
+  4535→.logo{display:flex;align-items:center;gap:12px;}
+  4536→.logo-icon{width:40px;height:40px;border-radius:12px;
+  4537→           background:linear-gradient(135deg,#22c55e,#06b6d4);
+  4538→           display:flex;align-items:center;justify-content:center;
+  4539→           font-weight:bold;color:#000;font-size:18px;}
+  4540→.logo h1{font-size:20px;font-weight:700;}
+  4541→.logo p{font-size:12px;color:var(--text-muted);}
+  4542→.status-badge{display:flex;align-items:center;gap:8px;
+  4543→              padding:6px 12px;border-radius:20px;background:rgba(255,255,255,0.05);}
+  4544→.status-dot{width:8px;height:8px;border-radius:50%;}
+  4545→.status-dot.live{background:var(--green);animation:pulse 2s infinite;}
+  4546→.status-dot.offline{background:var(--red);}
+  4547→@keyframes pulse{0%,100%{opacity:1;}50%{opacity:0.4;}}
+  4548→.status-text{font-size:12px;color:var(--text-dim);}
+  4549→.main{max-width:1200px;margin:0 auto;padding:24px;}
+  4550→.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+  4551→            gap:12px;margin-bottom:24px;}
+  4552→.stat-card{background:var(--bg-secondary);border:1px solid var(--border);
+  4553→           border-radius:12px;padding:16px;}
+  4554→.stat-card .label{font-size:11px;color:var(--text-muted);margin-bottom:4px;}
+  4555→.stat-card .value{font-size:24px;font-weight:700;}
+  4556→.stat-card .value.green{color:var(--green);}
+  4557→.stat-card .value.red{color:var(--red);}
+  4558→.search-box{position:relative;margin-bottom:24px;}
+  4559→.search-box input{width:100%;padding:12px 16px 12px 44px;background:var(--bg-secondary);
+  4560→                  border:1px solid var(--border);border-radius:12px;color:var(--text);
+  4561→                  font-size:14px;outline:none;transition:border-color 0.2s;}
+  4562→.search-box input:focus{border-color:var(--blue);}
+  4563→.search-box svg{position:absolute;left:14px;top:50%;transform:translateY(-50%);
+  4564→                width:20px;height:20px;color:var(--text-muted);}
+  4565→.pairs-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px;}
+  4566→.pair-card{background:var(--bg-secondary);border:1px solid var(--border);
+  4567→           border-radius:12px;padding:16px;cursor:pointer;
+  4568→           transition:all 0.2s;display:flex;align-items:center;justify-content:space-between;}
+  4569→.pair-card:hover{background:#162032;border-color:rgba(59,130,246,0.5);transform:translateY(-1px);}
+  4570→.pair-left{display:flex;align-items:center;gap:12px;}
+  4571→.pair-flag{font-size:24px;}
+  4572→.pair-name{font-weight:600;font-size:15px;}
+  4573→.pair-detail{font-size:12px;color:var(--text-muted);}
+  4574→.pair-right{text-align:right;}
+  4575→.pair-status{font-size:11px;padding:2px 8px;border-radius:10px;display:inline-flex;
+  4576→             align-items:center;gap:4px;margin-bottom:4px;}
+  4577→.pair-status.live{background:rgba(34,197,94,0.1);color:var(--green);}
+  4578→.pair-status.stale{background:rgba(239,68,68,0.1);color:var(--red);}
+  4579→.pair-status .dot{width:6px;height:6px;border-radius:50%;display:inline-block;}
+  4580→.pair-status.live .dot{background:var(--green);}
+  4581→.pair-status.stale .dot{background:var(--red);}
+  4582→.pair-time{font-size:11px;color:var(--text-muted);}
+  4583→.empty-state{text-align:center;padding:60px 24px;}
+  4584→.empty-state h3{font-size:20px;margin-bottom:8px;}
+  4585→.empty-state p{color:var(--text-dim);font-size:14px;max-width:400px;margin:0 auto;}
+  4586→.footer{border-top:1px solid var(--border);background:var(--bg-nav);padding:16px 24px;margin-top:32px;}
+  4587→.footer-inner{max-width:1200px;margin:0 auto;display:flex;
+  4588→              justify-content:space-between;font-size:12px;color:var(--text-muted);flex-wrap:wrap;gap:8px;}
+  4589→@media(max-width:640px){
+  4590→  .header{padding:12px 16px;flex-wrap:wrap;gap:8px;}
+  4591→  .logo h1{font-size:16px;}.logo p{font-size:11px;}
+  4592→  .main{padding:16px;}
+  4593→  .pairs-grid{grid-template-columns:1fr;}
+  4594→  .stats-grid{grid-template-columns:repeat(2,1fr);}
+  4595→  .pair-card{padding:12px;}
+  4596→}
+  4597→</style>
+  4598→</head>
+  4599→<body>
+  4600→<div class="header">
+  4601→  <div class="logo">
+  4602→    <div class="logo-icon">Q</div>
+  4603→    <div><h1>QXChart MT4 Pro</h1><p>Live Quotex OTC Chart Dashboard</p></div>
+  4604→  </div>
+  4605→  <div class="status-badge">
+  4606→    <span class="status-dot offline" id="statusDot"></span>
+  4607→    <span class="status-text" id="statusText">Connecting...</span>
+  4608→  </div>
+  4609→</div>
+  4610→<div class="main">
+  4611→  <div class="stats-grid">
+  4612→    <div class="stat-card"><div class="label">Active Pairs</div><div class="value" id="statPairs">0</div></div>
+  4613→    <div class="stat-card"><div class="label">Total Pushes</div><div class="value" id="statPushes">0</div></div>
+  4614→    <div class="stat-card"><div class="label">Last Push</div><div class="value" id="statLastPush">Never</div></div>
+  4615→    <div class="stat-card"><div class="label">Status</div><div class="value red" id="statStatus">OFFLINE</div></div>
+  4616→  </div>
+  4617→  <div class="search-box">
+  4618→    <svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+  4619→    <input type="text" id="searchInput" placeholder="Search pairs... (e.g. USD, EUR, BDT)">
+  4620→  </div>
+  4621→  <div class="pairs-grid" id="pairsGrid"></div>
+  4622→  <div class="empty-state" id="emptyState" style="display:none;">
+  4623→    <h3>No Data Yet</h3>
+  4624→    <p>Waiting for candle data from Quotex... The script is fetching history for all pairs.</p>
+  4625→  </div>
+  4626→</div>
+  4627→<div class="footer">
+  4628→  <div class="footer-inner">
+  4629→    <span>QXChart MT4 Pro - Live Dashboard &copy; 2026</span>
+  4630→    <span>Pairs refresh every 3s &bull; Chart updates every 1s</span>
+  4631→  </div>
+  4632→</div>
+  4633→<script>
+  4634→const FLAGS={USD:"\u{1F1FA}\u{1F1F8}",EUR:"\u{1F1EA}\u{1F1FA}",GBP:"\u{1F1EC}\u{1F1E7}",JPY:"\u{1F1EF}\u{1F1F5}",AUD:"\u{1F1E6}\u{1F1FA}",NZD:"\u{1F1F3}\u{1F1FF}",CAD:"\u{1F1E8}\u{1F1E6}",CHF:"\u{1F1E8}\u{1F1ED}",BDT:"\u{1F1E7}\u{1F1E9}",ARS:"\u{1F1E6}\u{1F1F7}",INR:"\u{1F1EE}\u{1F1F3}",MXN:"\u{1F1F2}\u{1F1FD}",PHP:"\u{1F1F5}\u{1F1ED}",PKR:"\u{1F1F5}\u{1F1F0}",NGN:"\u{1F1F3}\u{1F1EC}",COP:"\u{1F1E8}\u{1F1F4}",IDR:"\u{1F1EE}\u{1F1E9}",EGP:"\u{1F1EA}\u{1F1EC}",DZD:"\u{1F1E9}\u{1F1FF}",BRL:"\u{1F1E7}\u{1F1F7}",ZAR:"\u{1F1FF}\u{1F1E6}"};
+  4635→function getFlag(pair){const base=pair.replace(/-OTCq?$/,"").replace(/[-_].*$/,"");const codes=Object.keys(FLAGS).sort((a,b)=>b.length-a.length);let rem=base,f=[];for(const c of codes){if(rem.startsWith(c)){f.push(FLAGS[c]);rem=rem.slice(c.length);}}return f.join("")||"\u{1F4B1}";}
+  4636→function cleanName(p){return p.replace("-OTCq"," (OTC)").replace("-OTC"," (OTC)");}
+  4637→function timeSince(ts){if(!ts)return"Never";const d=Math.floor((Date.now()-ts)/1000);if(d<3)return"Just now";if(d<60)return d+"s ago";if(d<3600)return Math.floor(d/60)+"m ago";return Math.floor(d/3600)+"h ago";}
+  4638→async function loadPairs(){
+  4639→  try{
+  4640→    const r=await fetch("/api/pairs",{cache:"no-store"});
+  4641→    const d=await r.json();
+  4642→    if(d.status==="OK"){
+  4643→      const pairs=d.pairs||[];const stats=d.stats||{};
+  4644→      document.getElementById("statPairs").textContent=pairs.length;
+  4645→      document.getElementById("statPushes").textContent=(stats.totalPushes||0).toLocaleString();
+  4646→      document.getElementById("statLastPush").textContent=timeSince(stats.lastPushTime);
+  4647→      const isLive=stats.isLive;
+  4648→      document.getElementById("statusDot").className="status-dot "+(isLive?"live":"offline");
+  4649→      document.getElementById("statusText").textContent=isLive?"LIVE":"Waiting for data...";
+  4650→      const sv=document.getElementById("statStatus");
+  4651→      sv.textContent=isLive?"LIVE":"OFFLINE";sv.className="value "+(isLive?"green":"red");
+  4652→      const search=document.getElementById("searchInput").value.toLowerCase();
+  4653→      const filtered=pairs.filter(p=>p.pair.toLowerCase().includes(search));
+  4654→      const grid=document.getElementById("pairsGrid");
+  4655→      const empty=document.getElementById("emptyState");
+  4656→      if(pairs.length===0){grid.innerHTML="";empty.style.display="block";return;}
+  4657→      empty.style.display="none";
+  4658→      if(filtered.length===0&&search){grid.innerHTML='<div style="text-align:center;padding:40px;color:var(--text-dim);">No pairs matching "'+search+'"</div>';return;}
+  4659→      grid.innerHTML=filtered.map(p=>{
+  4660→        const live=Date.now()-p.lastUpdate<10000;
+  4661→        return '<a href="/pairs='+encodeURIComponent(p.pair)+'" class="pair-card">'
+  4662→          +'<div class="pair-left"><span class="pair-flag">'+getFlag(p.pair)+'</span>'
+  4663→          +'<div><div class="pair-name">'+cleanName(p.pair)+'</div>'
+  4664→          +'<div class="pair-detail">'+(p.candleCount||0)+' candles</div></div></div>'
+  4665→          +'<div class="pair-right">'
+  4666→          +'<div class="pair-status '+(live?"live":"stale")+'"><span class="dot"></span>'+(live?"Live":"Stale")+'</div>'
+  4667→          +'<div class="pair-time">'+timeSince(p.lastUpdate)+'</div></div></a>';
+  4668→      }).join("");
+  4669→    }
+  4670→  }catch(e){console.error(e);}
+  4671→}
+  4672→loadPairs();
+  4673→setInterval(loadPairs,3000);
+  4674→document.getElementById("searchInput").addEventListener("input",loadPairs);
+  4675→</script>
+  4676→</body>
+  4677→</html>"""
+  4678→
+  4679→_WEB_CHART_HTML = r"""<!DOCTYPE html>
+  4680→<html lang="en">
+  4681→<head>
+  4682→<meta charset="UTF-8">
+  4683→<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0,user-scalable=yes,viewport-fit=cover">
+  4684→<meta name="theme-color" content="#0a0e17">
+  4685→<title>PAIR_DISPLAY - Live Chart | QXChart MT4</title>
+  4686→<!-- ===== Lightweight Charts (TradingView) ~45KB, no jQuery/React ===== -->
+  4687→<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+  4688→<style>
+  4689→CSS_HERE
+  4690→html,body{height:100%;width:100%;overflow:hidden;}
+  4691→body{height:100vh;display:flex;flex-direction:column;overflow:hidden;}
+  4692→.nav{display:flex;align-items:center;gap:10px;padding:10px 16px;
+  4693→     background:var(--bg-nav);border-bottom:1px solid var(--border);flex-shrink:0;}
+  4694→.nav-back{color:var(--text-dim);display:flex;text-decoration:none;}
+  4695→.nav-back:hover{color:#fff;}
+  4696→.nav-sep{width:1px;height:16px;background:var(--border);}
+  4697→.nav-brand{font-size:13px;color:var(--text-dim);}
+  4698→.chart-header{display:flex;align-items:center;padding:12px 16px;
+  4699→              background:var(--bg-nav);border-bottom:1px solid var(--border);
+  4700→              flex-shrink:0;flex-wrap:wrap;gap:8px 16px;}
+  4701→.chart-header-left{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;flex:1;}
+  4702→.pair-title{font-size:18px;font-weight:700;white-space:nowrap;}
+  4703→.current-price{font-size:24px;font-weight:700;font-family:'SF Mono','Fira Code',monospace;white-space:nowrap;transition:color 300ms ease;}
+  4704→.price-change{font-size:13px;font-weight:600;font-family:monospace;white-space:nowrap;}
+  4705→.price-change.up{color:var(--green);}
+  4706→.price-change.down{color:var(--red);}
+  4707→.chart-wrap{flex:1;position:relative;background:var(--bg-primary);min-height:0;width:100%;overflow:hidden;}
+  4708→#chartContainer{position:absolute;inset:0;width:100%;height:100%;}
+  4709→.overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  4710→         background:rgba(10,14,23,0.92);z-index:10;}
+  4711→.overlay-box{text-align:center;padding:24px;max-width:400px;}
+  4712→.spinner{width:48px;height:48px;border:3px solid var(--blue);border-top-color:transparent;
+  4713→         border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 16px;}
+  4714→@keyframes spin{to{transform:rotate(360deg);}}
+  4715→.overlay p{font-size:14px;color:var(--text-dim);}
+  4716→@media(max-width:380px){.nav{padding:6px 10px;}.chart-header{padding:8px 10px;}.pair-title{font-size:14px;}.current-price{font-size:18px;}}
+  4717→@media(max-width:600px){.pair-title{font-size:16px;}.current-price{font-size:20px;}}
+  4718→</style>
+  4719→</head>
+  4720→<body>
+  4721→<div class="nav">
+  4722→  <a href="/" class="nav-back"><svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg></a>
+  4723→  <div class="nav-sep"></div>
+  4724→  <span class="nav-brand">QXChart MT4 Pro</span>
+  4725→</div>
+  4726→<div class="chart-header">
+  4727→  <div class="chart-header-left">
+  4728→    <span class="pair-title" id="pairTitle">PAIR_DISPLAY</span>
+  4729→    <span class="current-price" id="currentPrice">---</span>
+  4730→    <span class="price-change" id="priceChange"></span>
+  4731→  </div>
+  4732→</div>
+  4733→<div class="chart-wrap">
+  4734→  <div id="chartContainer"></div>
+  4735→  <div class="overlay" id="loadingOverlay">
+  4736→    <div class="overlay-box">
+  4737→      <div class="spinner"></div>
+  4738→      <p>Loading chart data...</p>
+  4739→    </div>
+  4740→  </div>
+  4741→</div>
+  4742→<script>
+  4743→// ===== Lightweight Charts (TradingView) — Same dark theme as the rest of the app =====
+  4744→const PAIR_NAME = "PAIR_NAME_RAW";
+  4745→let candles = [];       // [{t, open, high, low, close}]
+  4746→let digits = 5;
+  4747→let lastBarTime = 0;     // last candle time we fed to the series (for series.update)
+  4748→let initialized = false;
+  4749→
+  4750→// Colors (match the existing palette)
+  4751→const C = {
+  4752→  bg:"#0a0e17", grid:"#1a2235", up:"#22c55e", down:"#ef4444",
+  4753→  text:"#9ca3af", textBright:"#e5e7eb", crosshair:"rgba(255,255,255,0.3)",
+  4754→  border:"#1f2937"
+  4755→};
+  4756→
+  4757→// ===== Create chart =====
+  4758→const container = document.getElementById("chartContainer");
+  4759→const chart = LightweightCharts.createChart(container, {
+  4760→  layout: {
+  4761→    background: { type: 'solid', color: C.bg },
+  4762→    textColor: C.text,
+  4763→    fontSize: 11,
+  4764→    fontFamily: "'SF Mono','Fira Code',monospace"
+  4765→  },
+  4766→  grid: {
+  4767→    vertLines: { color: C.grid, style: 1 },
+  4768→    horzLines: { color: C.grid, style: 1 }
+  4769→  },
+  4770→  crosshair: {
+  4771→    mode: LightweightCharts.CrosshairMode.Normal,
+  4772→    vertLine: { color: C.crosshair, width: 1, style: 2, labelBackgroundColor: "#3b82f6" },
+  4773→    horzLine: { color: C.crosshair, width: 1, style: 2, labelBackgroundColor: "#3b82f6" }
+  4774→  },
+  4775→  rightPriceScale: {
+  4776→    borderColor: C.border,
+  4777→    scaleMargins: { top: 0.08, bottom: 0.08 }
+  4778→  },
+  4779→  timeScale: {
+  4780→    borderColor: C.border,
+  4781→    timeVisible: true,
+  4782→    secondsVisible: false,
+  4783→    rightOffset: 4,
+  4784→    barSpacing: 8
+  4785→  },
+  4786→  handleScroll: true,
+  4787→  handleScale: true,
+  4788→  autoSize: true
+  4789→});
+  4790→
+  4791→// ===== Candlestick series =====
+  4792→const series = chart.addCandlestickSeries({
+  4793→  upColor: C.up,
+  4794→  downColor: C.down,
+  4795→  borderUpColor: C.up,
+  4796→  borderDownColor: C.down,
+  4797→  wickUpColor: C.up,
+  4798→  wickDownColor: C.down,
+  4799→  borderVisible: false,
+  4800→  priceFormat: { type: 'price', precision: digits, minMove: 0.00001 }
+
+[showing lines 3201-4800 of 6137; use offset=4801 with limit to continue reading]
