@@ -144,3 +144,65 @@ TypeError: attribute name must be string, not 'bool'
 [19:35:56] [v14-endpoint] circuit selftest -> CLOSED
 [19:36:00] [v14-supervisor] loop 'selftest_dying' crashed (run 1, attempt 1): RuntimeError: simulated crash for selftest — restarting
 [19:36:01] [v14-supervisor] loop 'selftest_dying' crashed (run 2, attempt 2): RuntimeError: simulated crash for selftest — restarting
+[20:12:08] FATAL in main thread (top level): test_older_batch.<locals>.fake_window() missing 1 required positional argument: 'period'
+Traceback (most recent call last):
+  File "/home/z/my-project/scripts/test_v141.py", line 291, in <module>
+    sys.exit(asyncio.run(main()))
+             ^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/z/my-project/scripts/test_v141.py", line 278, in main
+    await test_older_batch()
+  File "/home/z/my-project/scripts/test_v141.py", line 125, in test_older_batch
+    n = await qx.fetch_older_batch("OLDUSD_otc", before, 300)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/my-project/download/qx_server_v14.py", line 5497, in fetch_older_batch
+    res = await _fetch_candle_window(api_symbol, before_time,
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: test_older_batch.<locals>.fake_window() missing 1 required positional argument: 'period'
+
+[20:12:34] [older:OLDUSD_otc] +300 candles (batch 300) — oldest now 2026-11-13 10:12
+[20:12:34] [older:OLDUSD_otc] +1 candles (batch 300) — oldest now 2026-11-13 10:11
+[20:12:34] [older:OLDUSD_otc] +1 candles (batch 300) — oldest now 2026-11-13 10:10
+[20:12:34] [gap:GAPUSD-OTC] freeze lifted — 95 candles scanned, holes found → original fill_gap_once runs again
+[20:13:17] [older:OLDUSD_otc] +300 candles (batch 300) — oldest now 2026-11-13 10:13
+[20:13:17] [older:OLDUSD_otc] attempt 1 got 10 candles but none older than 2026-11-13 10:13 — retrying once (stolen/broken response guard)
+[20:13:18] [older:OLDUSD_otc] +300 candles (batch 300) — oldest now 2026-11-13 05:13
+[20:13:18] [older:OLDUSD_otc] attempt 1 got 10 candles but none older than 2026-11-13 05:13 — retrying once (stolen/broken response guard)
+[20:13:18] [older:OLDUSD_otc] server returned nothing older than 2026-11-13 05:13 (history end?)
+[20:13:18] [gap:GAPUSD-OTC] freeze lifted — 95 candles scanned, holes found → original fill_gap_once runs again
+[20:14:17] [older:OLDUSD_otc] +300 candles (batch 300) — oldest now 2026-11-13 10:14
+[20:14:17] [older:OLDUSD_otc] attempt 1 got 10 candles but none older than 2026-11-13 10:14 — retrying once (stolen/broken response guard)
+[20:14:17] [older:OLDUSD_otc] +300 candles (batch 300) — oldest now 2026-11-13 05:14
+[20:14:17] [older:OLDUSD_otc] attempt 1 got 10 candles but none older than 2026-11-13 05:14 — retrying once (stolen/broken response guard)
+[20:14:18] [older:OLDUSD_otc] server returned nothing older than 2026-11-13 05:14 (history end?)
+[20:14:18] [gap:GAPUSD-OTC] freeze lifted — 95 candles scanned, holes found → original fill_gap_once runs again
+[20:14:34] [older:OLDUSD_otc] +300 candles (batch 300) — oldest now 2026-11-13 10:14
+[20:14:34] [older:OLDUSD_otc] attempt 1 got 10 candles but none older than 2026-11-13 10:14 — retrying once (stolen/broken response guard)
+[20:14:35] [older:OLDUSD_otc] +300 candles (batch 300) — oldest now 2026-11-13 05:14
+[20:14:35] [older:OLDUSD_otc] attempt 1 got 10 candles but none older than 2026-11-13 05:14 — retrying once (stolen/broken response guard)
+[20:14:35] [older:OLDUSD_otc] server returned nothing older than 2026-11-13 05:14 (history end?)
+[20:14:35] [gap:GAPUSD-OTC] freeze lifted — 95 candles scanned, holes found → original fill_gap_once runs again
+[20:14:41] [v14-endpoint] circuit selftest -> OPEN
+[20:14:41] [v14-endpoint] circuit selftest -> HALF_OPEN
+[20:14:41] [v14-endpoint] circuit selftest -> CLOSED
+[20:14:45] [v14-supervisor] loop 'selftest_dying' crashed (run 1, attempt 1): RuntimeError: simulated crash for selftest — restarting
+[20:14:46] [v14-supervisor] loop 'selftest_dying' crashed (run 2, attempt 2): RuntimeError: simulated crash for selftest — restarting
+[20:17:07] [older:OLDUSD_otc] +300 candles (batch 300) — oldest now 2026-11-13 10:17
+[20:17:07] [older:OLDUSD_otc] attempt 1 got 10 candles but none older than 2026-11-13 10:17 — retrying once (stolen/broken response guard)
+[20:17:08] [older:OLDUSD_otc] +300 candles (batch 300) — oldest now 2026-11-13 05:17
+[20:17:08] [older:OLDUSD_otc] attempt 1 got 10 candles but none older than 2026-11-13 05:17 — retrying once (stolen/broken response guard)
+[20:17:08] [older:OLDUSD_otc] server returned nothing older than 2026-11-13 05:17 (history end?)
+[20:17:08] [gap:GAPUSD-OTC] freeze lifted — 95 candles scanned, holes found → original fill_gap_once runs again
+[20:17:09] [v14-endpoint] circuit selftest -> OPEN
+[20:17:09] [v14-endpoint] circuit selftest -> HALF_OPEN
+[20:17:09] [v14-endpoint] circuit selftest -> CLOSED
+[20:17:13] [v14-supervisor] loop 'selftest_dying' crashed (run 1, attempt 1): RuntimeError: simulated crash for selftest — restarting
+[20:17:14] [v14-supervisor] loop 'selftest_dying' crashed (run 2, attempt 2): RuntimeError: simulated crash for selftest — restarting

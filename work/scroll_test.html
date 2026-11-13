@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>scroll-back v14.1 test</title></head>
+<body style="margin:0">
+<div id="gridHost" style="width:1100px;height:620px;position:relative">
+  <div class="pane" style="position:absolute;inset:0">
+    <div class="pane-cv" style="position:absolute;inset:0"><canvas id="cv" style="width:100%;height:100%"></canvas></div>
+  </div>
+</div>
+<script src="badi-chart.js"></script>
+<script>
+/* ==== exact v14.1 copies from BadiChartsStudio_live.py ==== */
+var OLDER = { loading: false, at: 0, asset: "", tf: "", key: null, anchor: null, exhausted: null, consec: 0 };
+function send(cmd, obj) {
+  try { console.log("BADI::" + cmd + " " + (typeof obj === "string" ? obj : JSON.stringify(obj))); } catch (e) {}
+}
+window.__BADI_EMBEDDED = true;
+window.__BADI_LANG__ = "ar";
+
+/* window.__badiMaybeLoadOlder — v14.1 verbatim */
+window.__badiMaybeLoadOlder = function (p, auto) {
+  try {
+    if (!window.__BADI_EMBEDDED || !p || !window.__badiPrimary || p !== window.__badiPrimary()) return;
+    if (p.tf && /^[0-9]+s$/.test(String(p.tf))) return;
+    var dd = p.dataArr;
+    if (!dd || dd.length < 30 || !p.chart) return;
+    var key = String(p.asset || "") + "|" + String(p.tf || "");
+    if (OLDER.key !== key) { OLDER.key = key; OLDER.loading = false; OLDER.exhausted = null; OLDER.consec = 0; }
+    if (OLDER.loading) {
+      if (Date.now() - OLDER.at > 8000) OLDER.loading = false; else return;
+    }
+    var ch = p.chart;
+    if (typeof ch.rightOffset !== "number" || !ch.sim || !ch.sim.candles || !ch.sim.candles.length) return;
+    var N = ch.sim.candles.length;
+    var visible = (ch.chartRight - ch.chartLeft) / (ch.barSpacing || 8);
+    var firstIdx = N - 1 + ch.rightOffset - visible;
+    if (firstIdx > Math.max(6, visible * 0.2)) return;
+    if (auto === true) { if ((OLDER.consec || 0) >= 8) return; }
+    else OLDER.consec = 0;
+    var t0 = ch.sim.candles[0].time;
+    if (t0 === undefined || t0 === null) t0 = dd[0].time;
+    if (t0 > 1e11) t0 = Math.floor(t0 / 1000);
+    t0 = Math.floor(t0);
+    if (OLDER.exhausted === t0) return;
+    OLDER.loading = true; OLDER.at = Date.now();
+    OLDER.anchor = t0;
+    OLDER.asset = String(p.asset || ""); OLDER.tf = String(p.tf || "");
+    send("older", JSON.stringify({ before: t0, asset: OLDER.asset, tf: OLDER.tf }));
+  } catch (e) { OLDER.loading = false; }
+};
+
+var panes = [];
+var primaryPane = 0;
+window.__badiPrimary = function () { return panes[primaryPane] || panes[0] || null; };
+
+function setupChart(ch, p) {
+  try {
+    if (window.__BADI_EMBEDDED) {
+      try {
+        const origConstrain = ch.constrainRightOffset.bind(ch);
+        ch.constrainRightOffset = function () {
+          origConstrain();
+          if (typeof window.__badiMaybeLoadOlder === "function") window.__badiMaybeLoadOlder(p);
+        };
+      } catch (e) {}
+    }
+  } catch (e) {}
+}
+
+var cv = document.getElementById("cv");
+var chart = new window.BadiCharts(cv, {
+  symbol: { label: "USD/BRL (OTC)", priceScale: 10000, decimals: 4 },
+  timeframe: { label: "1m", ms: 60000 }
+});
+var p = { el: null, head: null, cv: cv, chart: chart, asset: "USD/BRL (OTC)", tf: "1m", dataArr: [], tick: 0 };
+setupChart(chart, p);
+chart.start();
+panes.push(p);
+
+var now = Math.floor(Date.now() / 1000);
+now -= now % 60;
+var dd = [];
+for (var i = 299; i >= 0; i--) {
+  var t = now - i * 60;
+  var base = 5.12 + Math.sin(i / 7) * 0.01;
+  dd.push({ time: t, open: base, high: base + 0.002, low: base - 0.002, close: base + 0.001, volume: 100, t: t, o: base, h: base + 0.002, l: base - 0.002, c: base + 0.001, v: 100 });
+}
+p.dataArr = dd;
+chart.setData(dd.map(function (c) { return { time: c.time, open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume }; }));
+
+/* prependCandles — v14.1 verbatim */
+window.__badiApp = {
+  prependCandles: function (arr, asset, tf) {
+    try {
+      OLDER.loading = false;
+      var pr = window.__badiPrimary ? window.__badiPrimary() : null;
+      if (!pr || !pr.chart) return 0;
+      if (asset !== undefined && asset !== null && String(asset) !== "" &&
+          String(pr.asset || "") !== String(asset)) { OLDER.exhausted = null; return 0; }
+      if (tf !== undefined && tf !== null && String(tf) !== "" &&
+          String(pr.tf || "") !== String(tf)) { OLDER.exhausted = null; return 0; }
+      var add = [];
+      for (var i = 0; i < (arr || []).length; i++) {
+        var c = arr[i];
+        add.push({ time: c.t !== undefined ? c.t : c.time, open: c.o !== undefined ? c.o : c.open, high: c.h !== undefined ? c.h : c.high, low: c.l !== undefined ? c.l : c.low, close: c.c !== undefined ? c.c : c.close, volume: c.v || 0 });
+      }
+      if (!add.length || !pr.dataArr.length) { OLDER.exhausted = pr.dataArr.length ? OLDER.anchor : null; return 0; }
+      var firstT = pr.dataArr[0].time;
+      var pre = [];
+      for (var i = 0; i < add.length; i++) { if (add[i].time < firstT) pre.push(add[i]); }
+      if (!pre.length) { OLDER.exhausted = OLDER.anchor; return 0; }
+      pre.sort(function (a, b) { return a.time - b.time; });
+      pr.dataArr = pre.concat(pr.dataArr);
+      var ch = pr.chart, sim = ch.sim;
+      if (sim && sim.candles) {
+        for (var j = pre.length - 1; j >= 0; j--) {
+          var c = pre[j];
+          var nc = { time: c.time, open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume || 0 };
+          if (sim._norm) nc = sim._norm(nc);
+          sim.candles.unshift(nc);
+        }
+      }
+      ch.computeTimeWeights(); ch.computeIndicators();
+      try { ch.invalidateTimeMarks(); } catch (e) {}
+      ch.autoScale(); ch.invalidate();
+      OLDER.exhausted = null;
+      OLDER.consec = (OLDER.consec || 0) + 1;
+      if (OLDER.consec <= 8 && typeof window.__badiMaybeLoadOlder === "function") {
+        setTimeout(function () { try { window.__badiMaybeLoadOlder(window.__badiPrimary(), true); } catch (e2) {} }, 120);
+      }
+      return pre.length;
+    } catch (e) { OLDER.loading = false; console.log("BADI::dbg prepend ERR " + e); return 0; }
+  }
+};
+
+/* test driver */
+window.__test = {
+  state: function () {
+    var ch = p.chart;
+    var N = ch.sim.candles.length;
+    var visible = (ch.chartRight - ch.chartLeft) / (ch.barSpacing || 8);
+    return {
+      N: N, dataLen: p.dataArr.length, rightOffset: ch.rightOffset, barSpacing: ch.barSpacing,
+      visible: visible, firstIdx: N - 1 + ch.rightOffset - visible,
+      loading: OLDER.loading, exhausted: OLDER.exhausted, anchor: OLDER.anchor, consec: OLDER.consec,
+      oldest: ch.sim.candles.length ? ch.sim.candles[0].time : 0
+    };
+  },
+  /* drag the chart content rightwards = go back in time (library semantics) */
+  dragBack: function (px) {
+    var cv = p.cv, r = cv.getBoundingClientRect();
+    var x0 = r.left + r.width * 0.6, y0 = r.top + r.height * 0.5;
+    function ev(type, x) { return new MouseEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y0, button: 0 }); }
+    cv.dispatchEvent(ev("mousedown", x0));
+    for (var s = 1; s <= 12; s++) cv.dispatchEvent(ev("mousemove", x0 + (px * s / 12)));
+    cv.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, clientX: x0 + px, clientY: y0 }));
+    return window.__test.state();
+  },
+  /* scroll deep programmatically (what a long drag achieves) */
+  deepScroll: function (bars) {
+    p.chart.rightOffset = -(bars);
+    p.chart.constrainRightOffset();
+    return window.__test.state();
+  },
+  /* server answers the LAST older request with 300 older candles */
+  serveBatch: function (n) {
+    n = n || 300;
+    var firstT = p.dataArr[0].time;
+    var add = [];
+    for (var i = 1; i <= n; i++) {
+      var t = firstT - i * 60;
+      var base = 5.12 + Math.sin(i / 5) * 0.01;
+      add.push({ t: t, o: base, h: base + 0.002, l: base - 0.002, c: base + 0.001, v: 100 });
+    }
+    return window.__badiApp.prependCandles(add, p.asset, p.tf);
+  },
+  /* server answers "no more history" */
+  serveEmpty: function () { return window.__badiApp.prependCandles([], p.asset, p.tf); },
+  serveWrongAsset: function () { return window.__badiApp.prependCandles([{ t: 111, o: 1, h: 1, l: 1, c: 1, v: 1 }], "EUR/USD (OTC)", "1m"); },
+  waitAuto: function (ms) {
+    return new Promise(function (res) { setTimeout(function () { res(window.__test.state()); }, ms || 400); });
+  }
+};
+console.log("BADI::ready 1");
+</script>
+</body>
+</html>
