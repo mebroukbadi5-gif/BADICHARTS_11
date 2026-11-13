@@ -34,3 +34,18 @@ Traceback (most recent call last):
            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 AssertionError: FAIL 2b: inline event wrong
 
+[22:06:26] [v14-endpoint] circuit selftest -> OPEN
+[22:06:27] [v14-endpoint] circuit selftest -> HALF_OPEN
+[22:06:27] [v14-endpoint] circuit selftest -> CLOSED
+[22:06:30] [v14-supervisor] loop 'selftest_dying' crashed (run 1, attempt 1): RuntimeError: simulated crash for selftest — restarting
+[22:06:31] [v14-supervisor] loop 'selftest_dying' crashed (run 2, attempt 2): RuntimeError: simulated crash for selftest — restarting
+[22:10:04] [v14-endpoint] circuit selftest -> OPEN
+[22:10:04] [v14-endpoint] circuit selftest -> HALF_OPEN
+[22:10:04] [v14-endpoint] circuit selftest -> CLOSED
+[22:10:08] [v14-supervisor] loop 'selftest_dying' crashed (run 1, attempt 1): RuntimeError: simulated crash for selftest — restarting
+[22:10:09] [v14-supervisor] loop 'selftest_dying' crashed (run 2, attempt 2): RuntimeError: simulated crash for selftest — restarting
+[22:10:46] [v14-endpoint] circuit selftest -> OPEN
+[22:10:46] [v14-endpoint] circuit selftest -> HALF_OPEN
+[22:10:46] [v14-endpoint] circuit selftest -> CLOSED
+[22:10:49] [v14-supervisor] loop 'selftest_dying' crashed (run 1, attempt 1): RuntimeError: simulated crash for selftest — restarting
+[22:10:50] [v14-supervisor] loop 'selftest_dying' crashed (run 2, attempt 2): RuntimeError: simulated crash for selftest — restarting

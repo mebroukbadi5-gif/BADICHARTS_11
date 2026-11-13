@@ -2961,11 +2961,11 @@ async def fetch_candles_once(asset: Asset, idx=1, total=1):
             while len(all_candles_1s) < target_1s_count and chunks_done < max_chunks:
                 chunk_end = current_end - (chunks_done * chunk_seconds)
                 try:
-                    # v13.1: عبر بوابة الجلب الواحدة — نفس الطلب نفسه بلا اختلاط
+                    # v14.4: النداء الأصلي عاد حرفياً كما في الكود المرجعي
+                    # (CLIENT.get_candles مباشرة — دون أي بوابة فوقه).
                     res_chunk = await asyncio.wait_for(
-                        qx_fetch_window_raw(api_name, chunk_end, chunk_seconds, fetch_period,
-                                            foreground=False, timeout=20, retries=0),
-                        timeout=25,
+                        CLIENT.get_candles(api_name, chunk_end, chunk_seconds, fetch_period),
+                        timeout=20,
                     )
                 except Exception as e:
                     if chunks_done == 0:
@@ -3117,16 +3117,16 @@ async def _bridge_fetch_recent_candles(asset: Asset, existing_candles: list) -> 
                 # هذا يضمن أن الجسر يغطي 75 شمعة 5s — أكثر من كافٍ لأي فجوة
                 bridge_1s_offset = BRIDGE_FETCH_CANDLES * PERIOD_SECONDS * 5
                 try:
-                    # v13.1: عبر بوابة الجلب الواحدة — نفس الطلب نفسه بلا اختلاط
+                    # v14.4: النداء الأصلي عاد حرفياً كما في الكود المرجعي
+                    # (CLIENT.get_candles مباشرة — دون أي بوابة فوقه).
                     bridge_1s = await asyncio.wait_for(
-                        qx_fetch_window_raw(
+                        CLIENT.get_candles(
                             asset.api_symbol,
                             bridge_end_time,
                             bridge_1s_offset,
-                            1,  # period=1 (1s candles — مدعوم دائماً من الخادم)
-                            foreground=False, timeout=BRIDGE_FETCH_TIMEOUT, retries=0,
+                            1  # period=1 (1s candles — مدعوم دائماً من الخادم)
                         ),
-                        timeout=BRIDGE_FETCH_TIMEOUT + 5,
+                        timeout=BRIDGE_FETCH_TIMEOUT,
                     )
                 except asyncio.TimeoutError:
                     logmsg(f"[bridge:{asset.symbol}] 1s fetch timeout (non-fatal)")
@@ -4476,6 +4476,37 @@ def reset_gap_flags() -> int:
         return 0
 
 
+def clear_gap_flag_any(symbol_variants) -> int:
+    """v14.4 — رفع تجمّد سد الثغرات عن عملة واحدة فقط عند اكتشاف ثغرات حقيقية.
+
+    لماذا؟ هذا هو السبب الجذري لـ«آلية سد الثغرات لا تفعل معا كل العملات»:
+    الجلسة تجمّد العملة (gap_state.filled=1) بعد أول سد — فإن اكتشف المدقق
+    لاحقاً ثغرات حقيقية في خط شموعها واستدعى fill_gap_once الأصلية، كانت
+    العلامة تجعله يعود فوراً بلا أي سد — فتبقى العملة مثقوبة للأبد بينما
+    العملات الأخرى سليمة. الآن: عند ثغرات حقيقية فقط تُرفع العلامة لهذه
+    العملة وحدها ثم تُنفَّد الخوارزمية الأصلية نفسها كما هي (بلا أي تغيير
+    فيها) — فتُسد العملة مثل بقية العملات دون تفاوت."""
+    n = 0
+    try:
+        store = get_candle_store()
+        conn = _sqlite3.connect(store.db_path, timeout=10.0, isolation_level=None)
+        try:
+            for _s in symbol_variants:
+                _s = str(_s or "").strip()
+                if not _s:
+                    continue
+                try:
+                    cur = conn.execute("DELETE FROM gap_state WHERE symbol=?;", (_s,))
+                    n += int(cur.rowcount or 0)
+                except Exception:
+                    continue
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    return n
+
+
 # ==============================================================================
 # SECTION 9.1: MT4 WRITER (uses CandleStore instead of JSON snapshots)
 # ==============================================================================
@@ -4777,10 +4808,9 @@ class MT4Writer:
             offset_seconds = int(days * 86400)
             # ===== FIX 10: get_candles PERIOD_SECONDS (60s ) =====
             # PERIOD (1 = M1 timeframe)
-            # v13.1: عبر بوابة الجلب الواحدة — نفس الطلب نفسه بلا اختلاط
-            candles = await qx_fetch_window_raw(api_symbol, time.time(), offset_seconds,
-                                                PERIOD_SECONDS, foreground=False,
-                                                timeout=FETCH_TIMEOUT, retries=1)
+            # v14.4: النداء الأصلي عاد حرفياً كما في الكود المرجعي
+            # (client.get_candles مباشرة — دون أي بوابة فوقه).
+            candles = await client.get_candles(api_symbol, time.time(), offset_seconds, PERIOD_SECONDS)
             if candles and len(candles) > 0:
                 # ===== FIX L7: _align_time ( tz_offset + ) =====
                 # `t = int(c.get('time', ...)) + _tz_offset` —
@@ -5519,6 +5549,20 @@ async def preload_one_asset(api_symbol: str, idx: int = 1, total: int = 1):
             await apply_1s_bridge_to_asset(asset, idx, total)
         except Exception as _bridge_e:
             logmsg(f"[preload {idx}/{total}] {api_symbol}: 1s bridge skipped (non-fatal): {_bridge_e}")
+    # v14.4 (طلب المستخدم حرفياً: «يجب ان تجلبها من هنا وتجعلها تعمل معا كل
+    # العملات دون تخلف»): خط الجسر الثاني من qx_server_v10.py كما هو حرفياً —
+    # _bridge_fetch_recent_candles تجلب آخر BRIDGE_FETCH_CANDLES شمعة تنتهي
+    # عند time.time() الحالي وتدمجها (لإطارات 60s+ عبر _fetch_historical_batch
+    # وبفهرس فريد، وللثواني الفرعية عبر شموع 1s) — نفس الدالة نفسها التي يستدعيها
+    # fetch_candles_with_retry في الكود المرجعي بعد كل جلب تاريخي. هي الطبقة
+    # التي تغلق فجوة «بين شمعة الحية والشموع التي قبلها بـ 5 دقائق» بشموع حقيقية
+    # لكل العملات حتى لو كان تاريخ الثانية-واحدة محدوداً لها. أي فشل غير مُتلف.
+    try:
+        _bridged = await _bridge_fetch_recent_candles(asset, list(asset.candles or []))
+        if _bridged and len(_bridged) > len(asset.candles or []):
+            _apply_candles_to_asset(asset, _bridged)
+    except Exception as _bridge2_e:
+        logmsg(f"[preload {idx}/{total}] {api_symbol}: recent bridge skipped (non-fatal): {_bridge2_e}")
     _PRELOADED_INFO[api_symbol] = {
         "candles": len(asset.candles) if asset.candles else 0,
         "at": datetime.now().strftime("%H:%M:%S"),
@@ -5858,7 +5902,7 @@ from typing import Optional as _v14_Optional
 from typing import Set as _v14_Set
 from typing import Tuple as _v14_Tuple
 
-_V14_VERSION = "14.1"
+_V14_VERSION = "14.4"
 _V14_STARTED_AT = time.time()
 
 
@@ -8252,6 +8296,21 @@ class V14GapLossAuditor:
                     V14_JOURNAL.record("gap_holes", asset=sym,
                                        holes=len(holes),
                                        first=int(holes[0]) if holes else 0)
+                    # v14.4 («آلية سد الثغرات لا تفعل معا كل العملات» — الجذر):
+                    # علامة التجمد المحفوظة كانت تُبطل استدعاء الآلة الأصلية
+                    # لهذه العملة بالذات (تعود فوراً بلا سد) فتبقى مثقوبة بينما
+                    # البقية سليمة. عند ثغرات حقيقية فقط: ارفع تجمّد هذه العملة
+                    # ثم نفّذ الخوارزمية الأصلية نفسها كما هي — بلا أي تغيير فيها.
+                    _variants = [sym]
+                    try:
+                        _asset_obj = _v14_find_asset(sym)
+                        if _asset_obj is not None and getattr(_asset_obj, "symbol", ""):
+                            _variants.append(_asset_obj.symbol)
+                    except Exception:
+                        pass
+                    _cleared = clear_gap_flag_any(_variants)
+                    if _cleared:
+                        V14_JOURNAL.record("gap_unfrozen", asset=sym, cleared=_cleared)
                     # إعادة السد بالطريقة الأصلية نفسها — حتى لا يُفقد شيء
                     ok = await v14_gap_fill_for_asset(sym, reason="audit")
                     if ok:

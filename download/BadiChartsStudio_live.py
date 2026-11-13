@@ -8872,6 +8872,67 @@ function defineBadiApp() {
         try { renderChartLoading(); } catch (e) {}   /* v13.2: إخفاء دائرة التحميل عند وصول الشموع */
       } catch (e) { console.log("BADI::dbg setCandles ERR " + e); }
     },
+    patchCandles: function (arr) {
+      /* v14.4 (طلب المستخدم حرفياً): «الشارت لا نريده ان يتاثر اطلاقا يجب ان
+         يبقا حر ولا يتاثر ولا نريد فقدان الشموع» — دمج كامل في مكانه:
+         الشموع المطابقة زمنياً تُستبدل بقيم الخادم (إصلاحات سد الثغرات تصل
+         فوراً)، الشموع الناقصة تُضاف، بلا setData وبلا أي إعادة ضبط —
+         الزوم والموضع يبقيان كما هما بالضبط. تعيد عدد الشموع الملموسة. */
+      try {
+        var pr = window.__badiPrimary ? window.__badiPrimary() : null;
+        if (!pr || !pr.chart) return 0;
+        var add = normArr(arr || []);
+        if (!add.length) return 0;
+        var ch = pr.chart, sim = ch.sim;
+        var touched = 0, i, j, c;
+        /* فهرس زمني لشموع اللوحة والمحرك الداخلي */
+        var dmap = {};
+        for (i = 0; i < pr.dataArr.length; i++) dmap[pr.dataArr[i].time] = i;
+        var smap = null;
+        if (sim && sim.candles) {
+          smap = {};
+          for (i = 0; i < sim.candles.length; i++) smap[sim.candles[i].time] = i;
+        }
+        var appended = [];
+        for (i = 0; i < add.length; i++) {
+          c = add[i];
+          if (c.time === undefined || c.time === null) continue;
+          var ix = dmap[c.time];
+          if (ix === undefined) {
+            appended.push(c);
+            if (smap && sim) {
+              var ncA = sim._norm ? sim._norm({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume || 0 }) : c;
+              if (ncA && smap[c.time] === undefined) { sim.candles.push(ncA); smap[c.time] = sim.candles.length - 1; }
+            }
+          } else {
+            var ex = pr.dataArr[ix];
+            if (ex.open !== c.open || ex.high !== c.high || ex.low !== c.low || ex.close !== c.close) {
+              pr.dataArr[ix] = c;
+              touched++;
+              if (smap && sim && smap[c.time] !== undefined) {
+                var ncB = sim._norm ? sim._norm({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume || 0 }) : c;
+                if (ncB) sim.candles[smap[c.time]] = ncB;
+              }
+            }
+          }
+        }
+        if (appended.length) {
+          for (j = 0; j < appended.length; j++) pr.dataArr.push(appended[j]);
+          pr.dataArr.sort(function (a, b) { return a.time - b.time; });
+          if (sim && sim.candles) sim.candles.sort(function (a, b) { return a.time - b.time; });
+          /* سماحية الالتقاط: الشموع الجديدة لا تُزيح العرض (نفس prependCandles) */
+          try { if (ch.rightOffset < 0) ch.rightOffset -= appended.length; } catch (e2) {}
+        }
+        if (!touched && !appended.length) return 0;
+        ch.computeTimeWeights(); ch.computeIndicators();
+        try { ch.invalidateTimeMarks(); } catch (e3) {}
+        ch.autoScale(); ch.invalidate();
+        syncCdColor(pr);
+        try { runSignals(); } catch (e4) {}
+        try { renderChartLoading(); } catch (e5) {}
+        return touched + appended.length;
+      } catch (e) { console.log("BADI::dbg patchCandles ERR " + e); return 0; }
+    },
     setBoard: function (list) {
       /* LIVE SERVER EDITION: لوحة العملات الحقيقية من خادم QX
          (الاسم + نسبة الدفع + مفتوح/مغلق + علم الزوج) */
@@ -9707,6 +9768,7 @@ ApplicationWindow {
     property string lastTf: ""
     property int lastLen: -1
     property bool lastLoading: false      // v13.2: حالة دائرة التحميل في الشارت
+    property var prependSentAt: 0         // v14.4: لحظة إرسال آخر دفعة تاريخية (فورية — بلا سباق)
     property var filesAcc: ({})
     property var pendingExport: null      // مؤشر معلّق ينتظر إدخال معرّف المشتري (ترخيص)
 
@@ -9760,9 +9822,17 @@ ApplicationWindow {
             win.lastLoading = backend.chartLoading
             webCall("__badiApp.setChartLoading(" + (backend.chartLoading ? "true" : "false") + ")")
         }
-        /* دفعة التمرير للخلف (300 شمعة) دُمجت في الصفحة فعلاً عبر prependCandles
-           دون أي تأثير على العرض — لا تُعاد تهيئة الشارت هنا (كانت هذه إعادة
-           الضبط تُظهر "قفزة" في الشموع عند كل دفعة — أُصلحت بطلب المستخدم) */
+        /* v14.4: حماية سلسلة التاريخ (300 ثم 300) — دفعة candlesChanged التي
+           تلي دفعة "older" خلال نافذة الدفعات (20 ثانية) لا تعيد ضبط الشارت
+           أبداً: الصفحة دمجت الدفعة فعلاً عبر prependCandles، فالعدّاد فقط
+           يتزامن هنا. الزوم والموضع يبقيان حرين تماماً أثناء جلب التاريخ.
+           العلامة تُضبط فوراً عند الإرسال (prependSentAt) — لا سباق مع callback */
+        if ((Date.now() - (win.prependSentAt || 0)) < 20000
+                && backend.assetLabel === win.lastAsset && backend.tfLabel === win.lastTf
+                && backend.candlesCount >= win.lastLen) {
+            win.lastLen = backend.candlesCount
+            return
+        }
         if ((Date.now() - (win.prependAt || 0)) < 5000
                 && backend.assetLabel === win.lastAsset && backend.tfLabel === win.lastTf
                 && backend.candlesCount >= win.lastLen) {
@@ -9992,24 +10062,26 @@ ApplicationWindow {
                 return
             }
             if (e.type === "resync") {
-                /* v14.3: إصلاح سد الثغرات وصل إلى ذاكرة الخادم — مزامنة كاملة
-                   واحدة تُظهر الشموع المُصلَحة (سد الفجوة بين شمعة الحية
-                   والشموع التي قبلها) بلا أي إعادة طلب */
-                win.syncFull()
+                /* v14.4 (طلب المستخدم حرفياً: «الشارت لا نريده ان يتاثر اطلاقا
+                   يجب ان يبقا حر ولا يتاثر ولا نريد فقدان الشموع»): إصلاح سد
+                   الثغرات يُدمج في الشارت في مكانه — تحديث الشموع بالوقت وإضافة
+                   الناقص بلا setData وبلا أي إعادة ضبط — الزوم والموضع يبقان
+                   حرين تماماً كما هما */
+                win.webCall("__badiApp.patchCandles(" + backend.candlesJson + ")")
                 return
             }
             if (e.type === "older") {
                 /* v14.1: الدفعة موسومة بالعملة والفريم — prependCandles ترفض
                    أي دفعة لا تطابق الشارت الحالي (حماية من الاخلاط عند التبديل السريع) */
+                /* v14.4: العلامة تُضبط هنا فوراً (وليس في callback) — أي نبضة
+                   candlesChanged قادمة خلال نافذة الدفعات لا تعيد ضبط الشارت */
+                win.prependSentAt = Date.now()
                 win.webCall("__badiApp.prependCandles(" + JSON.stringify(e.candles || []) + ","
                             + JSON.stringify(String(e.asset || "")) + ","
                             + JSON.stringify(String(e.tf || "")) + ")",
                             function (res) {
                                 /* مزامنة عدّاد الشموع حتى لا تُعاد تهيئة الشارت
-                                   بعد دمج الدفعة — العرض يبقى ثابتاً تماماً.
-                                   prependAt يحمي من دفعة candlesChanged القادمة من
-                                   بايثون (العداد تضاءل بـ170) حتى لا تستدعي syncFull
-                                   وتعيد ضبط الشارت أثناء التمرير للخلف */
+                                   بعد دمج الدفعة — العرض يبقى ثابتاً تماماً */
                                 var n = parseInt(res || "0", 10) || 0
                                 if (n > 0) {
                                     win.prependAt = Date.now()
