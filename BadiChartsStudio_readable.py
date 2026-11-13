@@ -1836,11 +1836,16 @@ function cdFrame() {
       let rem = tS + tfMs(p.tf) / 1000 - nowS;
       if (rem < 0) rem = 0;
       const gap = Math.max(9, Math.min(20, (ch.barSpacing || 8) * 0.8));
-      let x = ch.indexToX(n - 1) + gap;
-      const cr = ch.chartRight || 0;
+      /* الكانفس قد يُعرض بعرض مختلف عن مخزنه لحظة تغيّر حجم اللوحة — نحول دائمًا
+         من إحداثيات المكتبة الداخلية إلى البكسل المعروض فعلاً */
+      const rect = p.cv.getBoundingClientRect();
+      const sx = (p.cv.width && rect.width) ? rect.width / p.cv.width : 1;
+      const sy = (p.cv.height && rect.height) ? rect.height / p.cv.height : 1;
+      let x = ch.indexToX(n - 1) * sx + gap;
+      const cr = (ch.chartRight || 0) * sx;
       if (cr && x > cr - 24) x = cr - 24;   /* يبقى الرقم داخل مساحة الرسم بجانب محور السعر */
-      const y = ch.priceToY(last.close);
-      const ok = isFinite(x) && isFinite(y) && x > (ch.chartLeft || 0) + 4 && y > 8 && y < (ch.chartBottom || 1e9) - 8;
+      const y = ch.priceToY(last.close) * sy;
+      const ok = isFinite(x) && isFinite(y) && x > (ch.chartLeft || 0) * sx + 4 && y > 8 && y < (ch.chartBottom || 1e9) * sy - 8;
       if (!ok) { if (!cd.hidden) cd.hidden = true; continue; }
       const txt = padCd(rem), col = last.close >= last.open ? bull : bear;
       if (cd.textContent !== txt) cd.textContent = txt;
@@ -2424,6 +2429,8 @@ function bindEvents() {
     const sb = $("sigShow");
     if (sb) sb.hidden = !off;
     try { localStorage.setItem("badiSigHidden", off ? "1" : "0"); } catch (e) {}
+    /* عرض الشارت تغيّر — أعِد تخطيط الكانفس (المكتبة تسمع لـ window.resize فقط) */
+    try { window.dispatchEvent(new Event("resize")); } catch (e) {}
   }
   window.setSigHidden = setSigHidden;   /* متاحة لجسر سطح المكتب (__badiApp.setSigHidden) */
   $("sigHide").addEventListener("click", function () { setSigHidden(true); });
