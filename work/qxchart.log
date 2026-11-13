@@ -206,3 +206,261 @@ TypeError: test_older_batch.<locals>.fake_window() missing 1 required positional
 [20:17:09] [v14-endpoint] circuit selftest -> CLOSED
 [20:17:13] [v14-supervisor] loop 'selftest_dying' crashed (run 1, attempt 1): RuntimeError: simulated crash for selftest — restarting
 [20:17:14] [v14-supervisor] loop 'selftest_dying' crashed (run 2, attempt 2): RuntimeError: simulated crash for selftest — restarting
+[21:03:57] [older:OLDUSD_otc] +300 candles (batch 300) — oldest now 2026-11-13 11:03
+[21:03:57] [older:OLDUSD_otc] attempt 1 got 10 candles but none older than 2026-11-13 11:03 — retrying once (stolen/broken response guard)
+[21:03:57] [older:OLDUSD_otc] +300 candles (batch 300) — oldest now 2026-11-13 06:03
+[21:03:57] [older:OLDUSD_otc] attempt 1 got 10 candles but none older than 2026-11-13 06:03 — retrying once (stolen/broken response guard)
+[21:03:58] [older:OLDUSD_otc] server returned nothing older than 2026-11-13 06:03 (history end?)
+[21:03:59] [v14-endpoint] circuit selftest -> OPEN
+[21:03:59] [v14-endpoint] circuit selftest -> HALF_OPEN
+[21:03:59] [v14-endpoint] circuit selftest -> CLOSED
+[21:03:59] [v14-supervisor] loop 'selftest_dying' crashed (run 1, attempt 1): RuntimeError: simulated crash for selftest — restarting
+[21:04:00] [v14-supervisor] loop 'selftest_dying' crashed (run 2, attempt 2): RuntimeError: simulated crash for selftest — restarting
+[21:04:02] [v14-hook] uncaught exception: RuntimeError: v14 gate: engine loop regenerated — request re-issued
+[21:05:22] [older:OLDUSD_otc] +300 candles (batch 300) — oldest now 2026-11-13 11:05
+[21:05:22] [older:OLDUSD_otc] attempt 1 got 10 candles but none older than 2026-11-13 11:05 — retrying once (stolen/broken response guard)
+[21:05:23] [older:OLDUSD_otc] +300 candles (batch 300) — oldest now 2026-11-13 06:05
+[21:05:23] [older:OLDUSD_otc] attempt 1 got 10 candles but none older than 2026-11-13 06:05 — retrying once (stolen/broken response guard)
+[21:05:23] [older:OLDUSD_otc] server returned nothing older than 2026-11-13 06:05 (history end?)
+[21:05:23] FATAL in main thread (top level): name 'test_flags' is not defined
+Traceback (most recent call last):
+  File "/home/z/my-project/scripts/test_v141.py", line 252, in <module>
+    sys.exit(asyncio.run(main()))
+             ^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/z/my-project/scripts/test_v141.py", line 241, in main
+    test_flags()
+    ^^^^^^^^^^
+NameError: name 'test_flags' is not defined
+
+[21:05:51] [older:OLDUSD_otc] +300 candles (batch 300) — oldest now 2026-11-13 11:05
+[21:05:51] [older:OLDUSD_otc] attempt 1 got 10 candles but none older than 2026-11-13 11:05 — retrying once (stolen/broken response guard)
+[21:05:52] [older:OLDUSD_otc] +300 candles (batch 300) — oldest now 2026-11-13 06:05
+[21:05:52] [older:OLDUSD_otc] attempt 1 got 10 candles but none older than 2026-11-13 06:05 — retrying once (stolen/broken response guard)
+[21:05:53] [older:OLDUSD_otc] server returned nothing older than 2026-11-13 06:05 (history end?)
+[21:05:53] FATAL in main thread (top level): property 'candle_store' of 'MT4Writer' object has no setter
+Traceback (most recent call last):
+  File "/home/z/my-project/scripts/test_v141.py", line 289, in <module>
+    sys.exit(asyncio.run(main()))
+             ^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/z/my-project/scripts/test_v141.py", line 277, in main
+    await test_gap_freeze()
+  File "/home/z/my-project/scripts/test_v141.py", line 175, in test_gap_freeze
+    writer.candle_store = qx.CandleStore(_tmpdb)
+    ^^^^^^^^^^^^^^^^^^^
+AttributeError: property 'candle_store' of 'MT4Writer' object has no setter
+
+[21:06:02] [older:OLDUSD_otc] +300 candles (batch 300) — oldest now 2026-11-13 11:06
+[21:06:02] [older:OLDUSD_otc] attempt 1 got 10 candles but none older than 2026-11-13 11:06 — retrying once (stolen/broken response guard)
+[21:06:02] [older:OLDUSD_otc] +300 candles (batch 300) — oldest now 2026-11-13 06:06
+[21:06:02] [older:OLDUSD_otc] attempt 1 got 10 candles but none older than 2026-11-13 06:06 — retrying once (stolen/broken response guard)
+[21:06:03] [older:OLDUSD_otc] server returned nothing older than 2026-11-13 06:06 (history end?)
+[21:06:08] [v14-endpoint] circuit selftest -> OPEN
+[21:06:08] [v14-endpoint] circuit selftest -> HALF_OPEN
+[21:06:08] [v14-endpoint] circuit selftest -> CLOSED
+[21:06:08] FATAL in main thread (top level): 
+Traceback (most recent call last):
+  File "/home/z/my-project/scripts/smoke_v14.py", line 144, in <module>
+    sys.exit(asyncio.run(main()))
+             ^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/z/my-project/scripts/smoke_v14.py", line 27, in main
+    res = await qx.V14_API["selftest"]()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/my-project/download/qx_server_v14.py", line 9618, in v14_selftest
+    return await V14SelfTest().run_all()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/my-project/download/qx_server_v14.py", line 9593, in run_all
+    await self._test_gate_priority()
+  File "/home/z/my-project/download/qx_server_v14.py", line 9343, in _test_gate_priority
+    await _v14_asyncio.wait_for(fut_fg, timeout=5.0)
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/tasks.py", line 520, in wait_for
+    return await fut
+           ^^^^^^^^^
+asyncio.exceptions.CancelledError
+
+[21:06:13] [v14-endpoint] circuit selftest -> OPEN
+[21:06:13] [v14-endpoint] circuit selftest -> HALF_OPEN
+[21:06:13] [v14-endpoint] circuit selftest -> CLOSED
+[21:06:13] FATAL in main thread (top level): 
+Traceback (most recent call last):
+  File "/home/z/my-project/scripts/smoke_v14.py", line 144, in <module>
+    sys.exit(asyncio.run(main()))
+             ^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/z/my-project/scripts/smoke_v14.py", line 27, in main
+    res = await qx.V14_API["selftest"]()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/my-project/download/qx_server_v14.py", line 9618, in v14_selftest
+    return await V14SelfTest().run_all()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/my-project/download/qx_server_v14.py", line 9593, in run_all
+    await self._test_gate_priority()
+  File "/home/z/my-project/download/qx_server_v14.py", line 9343, in _test_gate_priority
+    await _v14_asyncio.wait_for(fut_fg, timeout=5.0)
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/tasks.py", line 520, in wait_for
+    return await fut
+           ^^^^^^^^^
+asyncio.exceptions.CancelledError
+
+[21:06:16] [v14-endpoint] circuit selftest -> OPEN
+[21:06:16] [v14-endpoint] circuit selftest -> HALF_OPEN
+[21:06:16] [v14-endpoint] circuit selftest -> CLOSED
+[21:06:16] FATAL in main thread (top level): 
+Traceback (most recent call last):
+  File "/home/z/my-project/scripts/smoke_v14.py", line 144, in <module>
+    sys.exit(asyncio.run(main()))
+             ^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/z/my-project/scripts/smoke_v14.py", line 27, in main
+    res = await qx.V14_API["selftest"]()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/my-project/download/qx_server_v14.py", line 9618, in v14_selftest
+    return await V14SelfTest().run_all()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/my-project/download/qx_server_v14.py", line 9593, in run_all
+    await self._test_gate_priority()
+  File "/home/z/my-project/download/qx_server_v14.py", line 9343, in _test_gate_priority
+    await _v14_asyncio.wait_for(fut_fg, timeout=5.0)
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/tasks.py", line 520, in wait_for
+    return await fut
+           ^^^^^^^^^
+asyncio.exceptions.CancelledError
+
+[21:06:44] [v14-endpoint] circuit selftest -> OPEN
+[21:06:44] [v14-endpoint] circuit selftest -> HALF_OPEN
+[21:06:44] [v14-endpoint] circuit selftest -> CLOSED
+[21:06:44] FATAL in main thread (top level): 
+Traceback (most recent call last):
+  File "/home/z/my-project/scripts/smoke_v14.py", line 144, in <module>
+    sys.exit(asyncio.run(main()))
+             ^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/z/my-project/scripts/smoke_v14.py", line 27, in main
+    res = await qx.V14_API["selftest"]()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/my-project/download/qx_server_v14.py", line 9618, in v14_selftest
+    return await V14SelfTest().run_all()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/my-project/download/qx_server_v14.py", line 9593, in run_all
+    await self._test_gate_priority()
+  File "/home/z/my-project/download/qx_server_v14.py", line 9343, in _test_gate_priority
+    await _v14_asyncio.wait_for(fut_fg, timeout=5.0)
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/tasks.py", line 520, in wait_for
+    return await fut
+           ^^^^^^^^^
+asyncio.exceptions.CancelledError
+
+[21:07:39] [v14-endpoint] circuit selftest -> OPEN
+[21:07:39] [v14-endpoint] circuit selftest -> HALF_OPEN
+[21:07:39] [v14-endpoint] circuit selftest -> CLOSED
+[21:07:43] [v14-supervisor] loop 'selftest_dying' crashed (run 1, attempt 1): RuntimeError: simulated crash for selftest — restarting
+[21:07:44] [v14-supervisor] loop 'selftest_dying' crashed (run 2, attempt 2): RuntimeError: simulated crash for selftest — restarting
+[21:08:22] FATAL in main thread (top level): 
+Traceback (most recent call last):
+  File "/home/z/my-project/scripts/test_v142.py", line 154, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/home/z/my-project/scripts/test_v142.py", line 140, in main
+    test_v14_gate_ensure_loop()
+  File "/home/z/my-project/scripts/test_v142.py", line 63, in test_v14_gate_ensure_loop
+    bound = fut.result(2)
+            ^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/concurrent/futures/_base.py", line 458, in result
+    raise TimeoutError()
+TimeoutError
+
+[21:08:48] FATAL in main thread (top level): asyncio.run() cannot be called from a running event loop
+Traceback (most recent call last):
+  File "/home/z/my-project/scripts/test_v142.py", line 143, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/home/z/my-project/scripts/test_v142.py", line 128, in main
+    asyncio.run(test_gate_lock_follows_loop())
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/z/my-project/scripts/test_v142.py", line 38, in test_gate_lock_follows_loop
+    lock_a = asyncio.run(get_lock())
+             ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 191, in run
+    raise RuntimeError(
+RuntimeError: asyncio.run() cannot be called from a running event loop
+
+[21:09:15] FATAL in main thread (top level): name 'bound' is not defined
+Traceback (most recent call last):
+  File "/home/z/my-project/scripts/test_v142.py", line 152, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/home/z/my-project/scripts/test_v142.py", line 138, in main
+    test_v14_gate_ensure_loop()
+  File "/home/z/my-project/scripts/test_v142.py", line 81, in test_v14_gate_ensure_loop
+    pending2 == 0 and bound2 is not None and bound2 is not bound)
+                                                           ^^^^^
+NameError: name 'bound' is not defined. Did you mean: 'bound2'?
+
+[21:09:16] [older:OLDUSD_otc] +300 candles (batch 300) — oldest now 2026-11-13 11:09
+[21:09:16] [older:OLDUSD_otc] attempt 1 got 10 candles but none older than 2026-11-13 11:09 — retrying once (stolen/broken response guard)
+[21:09:17] [older:OLDUSD_otc] +300 candles (batch 300) — oldest now 2026-11-13 06:09
+[21:09:17] [older:OLDUSD_otc] attempt 1 got 10 candles but none older than 2026-11-13 06:09 — retrying once (stolen/broken response guard)
+[21:09:18] [older:OLDUSD_otc] server returned nothing older than 2026-11-13 06:09 (history end?)
+[21:09:19] [v14-endpoint] circuit selftest -> OPEN
+[21:09:19] [v14-endpoint] circuit selftest -> HALF_OPEN
+[21:09:19] [v14-endpoint] circuit selftest -> CLOSED
+[21:09:23] [v14-supervisor] loop 'selftest_dying' crashed (run 1, attempt 1): RuntimeError: simulated crash for selftest — restarting
+[21:09:24] [v14-supervisor] loop 'selftest_dying' crashed (run 2, attempt 2): RuntimeError: simulated crash for selftest — restarting

@@ -54,3 +54,64 @@ ValueError: too many values to unpack (expected 2)
 
 [02:09:25] [older:BRLUSD_otc] +170 candles (batch 170) — oldest now 2026-11-12 18:20
 [02:09:59] [older:BRLUSD_otc] +170 candles (batch 170) — oldest now 2026-11-12 18:20
+[20:54:52] FATAL in main thread (top level): object Future can't be used in 'await' expression
+Traceback (most recent call last):
+  File "/home/z/my-project/scripts/test_v142_logic.py", line 144, in <module>
+    rc = asyncio.run(main())
+         ^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/z/my-project/scripts/test_v142_logic.py", line 86, in main
+    n_older = await fut
+              ^^^^^^^^^
+TypeError: object Future can't be used in 'await' expression
+
+[20:55:00] FATAL in main thread (top level): object Future can't be used in 'await' expression
+Traceback (most recent call last):
+  File "/home/z/my-project/scripts/test_v142_logic.py", line 145, in <module>
+    rc = asyncio.run(main())
+         ^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/z/my-project/scripts/test_v142_logic.py", line 87, in main
+    n_older = await fut
+              ^^^^^^^^^
+TypeError: object Future can't be used in 'await' expression
+
+[20:55:56] [older:BRLUSD_otc] +198 candles (batch 300) — oldest now 2026-11-13 12:38
+[20:57:21] FATAL in main thread (top level): name 'PERIOD_SECONDS' is not defined
+Traceback (most recent call last):
+  File "/home/z/my-project/scripts/debug_freeze_lift.py", line 80, in <module>
+    asyncio.run(main())
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/z/my-project/scripts/debug_freeze_lift.py", line 60, in main
+    holes_found = mod.MT4_WRITER._scan_line_holes(list(with_holes), PERIOD_SECONDS)
+                                                                    ^^^^^^^^^^^^^^
+NameError: name 'PERIOD_SECONDS' is not defined
+
+[21:03:42] [older:BRLUSD_otc] +198 candles (batch 300) — oldest now 2026-11-13 12:46
+[21:03:51] [older:BRLUSD_otc] +198 candles (batch 300) — oldest now 2026-11-13 12:46
+[21:06:09] [older:BRLUSD_otc] +198 candles (batch 300) — oldest now 2026-11-13 12:49
+[21:09:18] [older:BRLUSD_otc] +198 candles (batch 300) — oldest now 2026-11-13 12:52
