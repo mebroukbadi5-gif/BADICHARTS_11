@@ -104,6 +104,13 @@ svg{vertical-align:middle;flex-shrink:0}
 .tf{padding:5px 9px;font-size:11px;font-weight:700;background:var(--panel3);color:#a1a1aa;transition:.15s}
 .tf:hover{background:var(--btn-bg);color:var(--t-bright)}
 .tf.on{background:var(--accent);color:#fff}
+/* سهم إخفاء/إظهار قائمة الفريمات (طلب المستخدم): يطوي القائمة ويُبقي الفريم المضبوط ظاهرًا
+   ليعرف المستخدم أن هذا مكان الفريمات */
+.tf-arrow{display:grid;width:22px;height:22px;flex-shrink:0;place-items:center;border-radius:6px;border:1px solid var(--border2);background:var(--panel3);color:var(--t-dim);transition:.15s}
+.tf-arrow:hover{color:var(--t-bright);background:var(--btn-bg)}
+.tf-arrow svg{display:block;width:12px;height:12px;transition:transform .18s}
+.tf-arrow.on svg{transform:rotate(180deg)}
+.tf.tf-hidden{display:none}
 
 /* ═══ Buttons ═══ */
 .abtn{display:grid;height:28px;width:28px;place-items:center;border-radius:6px;background:var(--accent);color:#fff;transition:.15s}
@@ -357,7 +364,7 @@ svg{vertical-align:middle;flex-shrink:0}
 .aflag{display:block;width:16px;height:11px;border-radius:2px}
 .aempty{font-size:10.5px;color:var(--t-dim2);white-space:nowrap}
 
-@media(max-width:640px){.tfs{display:none}}
+@media(max-width:640px){.tfs,.tf-arrow{display:none}}
 
 /* ═══ Currency list popup (+ button): search + add/remove ═══ */
 #assetMenu{position:absolute;top:60px;left:4px;z-index:70;display:flex;flex-direction:column;width:264px;max-height:330px;border-radius:12px;background:var(--panel3);border:1px solid var(--border2);box-shadow:0 16px 34px -14px rgba(0,0,0,.65);overflow:hidden}
@@ -382,6 +389,7 @@ svg{vertical-align:middle;flex-shrink:0}
        والشموع الحية تعمل مباشرة دائمًا — لا زر لتشغيل/إيقاف البث ═══ -->
   <header class="topbar">
     <div class="tfs" id="tfGroup"></div>
+          <button id="tfArrow" class="tf-arrow" title="Hide/show the timeframes"></button>
     <button id="indBtn" class="ibtn wide" title="Indicators library" aria-label="Open the indicators library"></button>
     <button id="shotBtn" class="ibtn" title="Screenshot the chart" aria-label="Take a chart screenshot"></button>
     <span class="grow"></span>
@@ -635,11 +643,16 @@ const SYMBOLS = {
 };
 const TIMEFRAMES = {
   "5s": 5 * 1000,
+  "10s": 10 * 1000,
   "15s": 15 * 1000,
   "30s": 30 * 1000,
-  "1m": 60 * 60000 / 60,
+  "1m": 60 * 1000,
+  "2m": 2 * 60000,
+  "3m": 3 * 60000,
   "5m": 5 * 60000,
+  "10m": 10 * 60000,
   "15m": 15 * 60000,
+  "30m": 30 * 60000,
   "1H": 60 * 60000,
   "4H": 4 * 60 * 60000,
   "1D": 24 * 60 * 60000
@@ -1195,8 +1208,20 @@ function renderCodeArea() {
 }
 
 /* ───────────── Render: timeframe, editor toggle ───────────── */
+let tfCollapsed = false;
+function applyTfCollapse() {
+  /* سهم الفريمات (طلب المستخدم): عند الطي تُخفى كل الأزرار ويبقى الفريم المضبوط
+     وحده ظاهرًا ليعرف المستخدم أن هذا مكان الفريمات */
+  const tg = $("tfGroup");
+  if (!tg) return;
+  const act = aPane() ? aPane().tf : "";
+  tg.querySelectorAll(".tf").forEach((b) => b.classList.toggle("tf-hidden", tfCollapsed && b.dataset.tf !== act));
+  const ar = $("tfArrow");
+  if (ar) ar.classList.toggle("on", tfCollapsed);
+}
 function renderTf() {
   document.querySelectorAll(".tf").forEach((b) => b.classList.toggle("on", b.dataset.tf === (aPane() ? aPane().tf : "")));
+  applyTfCollapse();
 }
 function renderEdToggle() {
   $("edToggle").className = "ibtn wide" + (editorOpen ? " on" : "");
@@ -1318,19 +1343,15 @@ function runFile(id, activate) {
     ? "▶ Applied indicator " + f.fileName + " to the chart"
     : "▶ Registered tool " + f.fileName + (activate ? " — click the chart to draw" : ""));
   f.enabled = true;
-  /* لقطة عند التشغيل (طلب المستخدم): كل تشغيل يحدّث صورة المؤشر بعد رسمه */
-  try {
-    delete __thumbSent[String(f.fileName).toLowerCase()];
-    scheduleThumbCapture(f.fileName, f.kind, f);
-  } catch (e) {}
+  /* طلب المستخدم: لا تُلتقط أي لقطة عند التشغيل إطلاقًا — الصورة تُلتقط عند الحفظ فقط */
   editedIds.delete(id); /* the new code is now the displayed one */
   scheduleSave(); renderTabs(); renderRunBtn();
 }
 
-/* ═══ الصورة المصغرة الذكية: لقطة واحدة فقط لكل مؤشر عند أول تشغيل (طلب المستخدم) ═══
-   لا تُلتقط إلا بعد أن يرسم المؤشر نفسه على الشارت فعلاً — نراقب أول render ناجح
-   (حتى ~10 ثوانٍ كحد أقصى) ثم نطلب من سطح المكتب لقطة واضحة عالية الدقة،
-   ولا تُلتقط مرة ثانية ولا تُستبدل حتى لا تملأ التخزين */
+/* ═══ الصورة المصغرة: تُلتقط عند الحفظ فقط (طلب المستخدم) ═══
+   لا أي لقطة قبل الحفظ — لا عند التشغيل ولا عند الحفظ التلقائي أثناء الكتابة.
+   إن كان المؤشر يعمل على الشارت ننتظر أول رسم فعلي له (حتى ~10 ثوانٍ) لتصبح
+   الصورة نظيفة له وحده، وإن لم يكن يعمل تُلتقط فورًا بعد استقرار الحفظ */
 var __thumbSent = {}, __thumbTries = {};
 function scheduleThumbCapture(fileName, kind, f) {
   try {
@@ -1342,11 +1363,11 @@ function scheduleThumbCapture(fileName, kind, f) {
     const started = Date.now();
     const poll = setInterval(function () {
       try {
-        /* ننتظر أول رسم فعلي للمؤشر — أو 10 ثوانٍ كحد أقصى احتياطًا */
-        if (!(f && f.__drawnOnce) && Date.now() - started < 10000) return;
+        /* يعمل على الشارت: انتظار أول رسم فعلي — لا يعمل: لقطة فورية بلا انتظار */
+        if (f && f.enabled && !(f.__drawnOnce) && Date.now() - started < 10000) return;
         clearInterval(poll);
-        /* مهلة صغيرة إضافية بعد أول رسم حتى يكتمل الإطار على الشارت */
-        setTimeout(function () { badiSend("badi-thumb", String(fileName)); }, 500);
+        /* مهلة صغيرة حتى يكتمل الإطار على الشارت */
+        setTimeout(function () { badiSend("badi-thumb", String(fileName)); }, 400);
       } catch (e) { try { clearInterval(poll); } catch (e2) {} }
     }, 250);
   } catch (e) {}
@@ -1955,6 +1976,19 @@ function showLibError(msg) {
 /* ═══════════ Init & events ═══════════ */
 function buildStatic() {
   $("tfGroup").innerHTML = TF_KEYS.map((k) => '<button class="tf" data-tf="' + k + '">' + k + "</button>").join("");
+  /* سهم إخفاء/إظهار قائمة الفريمات (طلب المستخدم) — الحالة تُحفظ بين الجلسات */
+  const tfAr = $("tfArrow");
+  if (tfAr) {
+    tfAr.innerHTML = icon("chevron-up", 12);
+    tfAr.title = window.__BADI_LANG__ === "ar" ? "إخفاء/إظهار قائمة الفريمات" : "Hide/show the timeframes";
+    tfAr.addEventListener("click", function () {
+      tfCollapsed = !tfCollapsed;
+      try { localStorage.setItem("badiTfCollapsed", tfCollapsed ? "1" : "0"); } catch (e) {}
+      applyTfCollapse();
+    });
+  }
+  try { tfCollapsed = localStorage.getItem("badiTfCollapsed") === "1"; } catch (e) { tfCollapsed = false; }
+  applyTfCollapse();
   $("edNewBtn").innerHTML = icon("plus", 16);
   $("edCloseBtn").innerHTML = icon("x", 14);
   $("indBtn").innerHTML = icon("arrowsUpDown", 15) + '<span class="btxt">Indicators</span>';
@@ -2838,7 +2872,7 @@ T = {
         "cGrid": "Grid", "cAxis": "Axis text", "cCross": "Crosshair", "cDraw": "Drawings",
         "resetLook": "Restore defaults", "pickColor": "Pick a color freely",
         "myinds": "My indicators", "myindsHint": "Auto-detected from the BadiCharts folder — drop any indicator or tool file there and it appears here instantly.",
-        "myindThumbNone": "Screenshot on save or run", "kindbadi": "Encrypted (.badi)",
+        "myindThumbNone": "Screenshot on save", "kindbadi": "Encrypted (.badi)",
         "backChart": "Back to chart",
         "shareOk": "Encrypted .badi file copied — paste it in any Telegram chat", "shareFail": "Share failed",
         "rescan": "Rescan",
@@ -2915,7 +2949,7 @@ T = {
         "cGrid": "الشبكة", "cAxis": "نص المحاور", "cCross": "مؤشر التقاطع", "cDraw": "أدوات الرسم",
         "resetLook": "استعادة الافتراضي", "pickColor": "اختر أي لون بحرية",
         "myinds": "مؤشراتي", "myindsHint": "تُكتشف تلقائيًا من مجلد BadiCharts — ضع أي ملف مؤشر أو أداة في المجلد وسيظهر هنا فورًا.",
-        "myindThumbNone": "اللقطة عند الحفظ أو التشغيل", "kindbadi": "مؤشر مشفر (.badi)",
+        "myindThumbNone": "اللقطة عند الحفظ", "kindbadi": "مؤشر مشفر (.badi)",
         "backChart": "الرجوع إلى الشارت",
         "shareOk": "نُسخ ملف .badi المشفر إلى الحافظة — الصقه في أي محادثة تلجرام", "shareFail": "فشلت المشاركة",
         "rescan": "إعادة فحص",
@@ -3111,7 +3145,10 @@ ASSETS = {
         {"name": "BTC/USD OTC", "base": 67210.0, "vol": 0.013, "dec": 2},
     ],
 }
-TFS = [("5s", 5), ("15s", 15), ("30s", 30), ("1m", 60), ("5m", 300), ("15m", 900), ("1H", 3600)]
+# الفريمات الكاملة (طلب المستخدم): 10 ثوانٍ و30 ثانية و2 و3 و10 و30 دقيقة و4 ساعات ويوم —
+# مع الإبقاء على الفريمات القديمة (5 ثوانٍ و15 ثانية و1 و5 و15 دقيقة وساعة)
+TFS = [("5s", 5), ("10s", 10), ("15s", 15), ("30s", 30), ("1m", 60), ("2m", 120), ("3m", 180),
+       ("5m", 300), ("10m", 600), ("15m", 900), ("30m", 1800), ("1H", 3600), ("4H", 14400), ("1D", 86400)]
 
 # ---------------------------------------------- أعلام ونِسَب الدفع لشريط العملات
 def _flag_uri(body):
@@ -5278,7 +5315,7 @@ class Backend(QObject):
             if ";base64," not in data_url or "," not in data_url:
                 return
             raw = base64.b64decode(data_url.split(",", 1)[1], validate=False)
-            if len(raw) < 512 or len(raw) > 900_000:   # ذكية: حجم مضغوط معقول فقط
+            if len(raw) < 512 or len(raw) > 2_000_000:   # لقطة عالية الدقة مضغوطة — السقف أُرفع مع الدقة
                 return
             os.makedirs(BADI_THUMB_DIR, exist_ok=True)
             path = os.path.join(BADI_THUMB_DIR, base + ".jpg")
@@ -6714,6 +6751,8 @@ buildStatic = function () {
         return '<button class="tf" data-tf="' + t + '">' + t + "</button>"; }).join("");
       document.querySelectorAll(".tf").forEach(function (b) {
         b.classList.toggle("on", b.dataset.tf === (mk.tf || "")); });
+      /* إعادة تطبيق حالة طي الفريمات بعد إعادة بناء الأزرار (طلب المستخدم) */
+      if (typeof applyTfCollapse === "function") applyTfCollapse();
       live = (mk.live === undefined) ? true : !!mk.live;
     }
     window.CUR_ASSET = String((mk && mk.asset) || "");
@@ -7088,17 +7127,28 @@ function defineBadiApp() {
         });
         host.render(performance.now());   /* إعادة رسم متزامنة بلا المؤشرات المخفية */
       } catch (e) {}
-      /* لقطة كاملة واضحة عالية الدقة (طلب المستخدم): عرض 1440px بجودة 0.92 */
-      var w = 1440, h = Math.max(200, Math.round(w * cv.height / Math.max(1, cv.width)));
-      var off = document.createElement("canvas");
-      off.width = w; off.height = h;
-      var cx = off.getContext("2d");
-      cx.imageSmoothingEnabled = true;
-      cx.imageSmoothingQuality = "high";
-      cx.drawImage(cv, 0, 0, w, h);
+      /* لقطة كاملة واضحة عالية الدقة (طلب المستخدم — الدقة أُرفعت): إعادة رسم حقيقية بدقة
+         مُضاعفة على backing الشارت نفسه بدل تكبير الصورة، ثم إعادة الدقة كما كانت */
       var url = "";
-      try { url = off.toDataURL("image/jpeg", 0.92); } catch (e) {}
-      /* إعادة كل المؤشرات كما كانت فورًا */
+      var d0 = (typeof host.dpr === "number" && host.dpr > 0) ? host.dpr : 1;
+      try {
+        host.dpr = Math.min(3, d0 * 2);
+        host.render(performance.now());
+        url = cv.toDataURL("image/jpeg", 0.95);
+      } catch (e) {
+        try {
+          var w = 2200, h = Math.max(200, Math.round(w * cv.height / Math.max(1, cv.width)));
+          var off = document.createElement("canvas");
+          off.width = w; off.height = h;
+          var cx = off.getContext("2d");
+          cx.imageSmoothingEnabled = true;
+          cx.imageSmoothingQuality = "high";
+          cx.drawImage(cv, 0, 0, w, h);
+          url = off.toDataURL("image/jpeg", 0.95);
+        } catch (e2) {}
+      }
+      /* إعادة الدقة وكل المؤشرات كما كانت فورًا */
+      try { host.dpr = d0; } catch (e) {}
       hidden.forEach(function (id) { try { host.setIndicatorVisible(id, true); } catch (e) {} });
       try { host.render(performance.now()); } catch (e) {}
       return url;
@@ -7191,9 +7241,18 @@ function defineBadiApp() {
       try { if (PY[id] && window.__badiPCH()) { window.__badiPCH().removeIndicator(id); delete PY[id]; } } catch (e) {}
     },
     shot: function () {
+      /* لقطة الشارت بدقة أعلى (طلب المستخدم): إعادة رسم بدقة مُضاعفة مؤقتًا ثم
+         التصدير وإعادة الدقة كما كانت — تُستخدم لزر الكاميرا ومرفقات تلجرام */
       try {
-        var cv = window.__badiShotCanvas ? window.__badiShotCanvas() : document.getElementById("chartCanvas");
-        return cv ? cv.toDataURL("image/png") : "";
+        var ch = (typeof aChart === "function") ? aChart() : null;
+        var cv = ch && ch.canvas ? ch.canvas : (window.__badiShotCanvas ? window.__badiShotCanvas() : document.getElementById("chartCanvas"));
+        if (!cv) return "";
+        var d0 = (typeof ch.dpr === "number" && ch.dpr > 0) ? ch.dpr : 1;
+        try { ch.dpr = Math.min(3, d0 * 2); ch.render(performance.now()); } catch (e) {}
+        var out = "";
+        try { out = cv.toDataURL("image/png"); } catch (e) {}
+        try { ch.dpr = d0; ch.render(performance.now()); } catch (e) {}
+        return out;
       } catch (e) { return ""; }
     },
     sigResult: function (r) { try { if (window.__badiSigResult) window.__badiSigResult(r); } catch (e) {} },
@@ -9086,8 +9145,8 @@ QML += r'''
                                                 border.color: modelData.enc ? Qt.rgba(0.08, 0.55, 0.96, 0.5) : backend.c.border
                                                 ColumnLayout {
                                                     anchors.fill: parent; anchors.margins: 12; spacing: 7
-                                                    /* الصورة المصغرة فوق اسم المؤشر — تُلتقط تلقائيًا عند
-                                                       أول تشغيل، والنقر عليها يكبّرها (طلب المستخدم) */
+                                                    /* الصورة المصغرة فوق اسم المؤشر — تُلتقط عند الحفظ فقط،
+                                                       والنقر عليها يكبّرها (طلب المستخدم) */
                                                     Rectangle {
                                                         id: thumbBox
                                                         Layout.fillWidth: true
@@ -9120,7 +9179,7 @@ QML += r'''
                                                             onClicked: thumbPop.openThumb(pageInd.fileUrl(modelData.thumb), modelData.fileName)
                                                         }
                                                     }
-                                                    /* اسم المؤشر + شارة التشفير + أيقونة الحذف (طلب المستخدم) */
+                                                    /* اسم المؤشر + شارة التشفير — الحذف انتقل بجوار زر الإضافة (طلب المستخدم) */
                                                     RowLayout {
                                                         spacing: 6
                                                         Icon { visible: modelData.enc; name: "lock"; sz: 13; tint: backend.c.accent }
@@ -9129,10 +9188,6 @@ QML += r'''
                                                             font.pixelSize: 13; font.bold: true; color: backend.c.fg
                                                             Layout.fillWidth: true
                                                             elide: Text.ElideRight
-                                                        }
-                                                        IBtn {
-                                                            iconName: "trash"
-                                                            onClicked: backend.delMy(modelData.fileName)
                                                         }
                                                     }
                                                     Label {
@@ -9151,6 +9206,8 @@ QML += r'''
                                                             text: backend.s.add; iconName: "plus"; fs: 12
                                                             onClicked: win.addMy(modelData.fileName, modelData.enc)
                                                         }
+                                                        /* زر الحذف بجوار زر الإضافة مباشرة (طلب المستخدم) */
+                                                        IBtn { iconName: "trash"; onClicked: backend.delMy(modelData.fileName) }
                                                         /* مشاركة عبر تلجرام — ينسخ ملف .badi المشفر */
                                                         IBtn { iconName: "send"; onClicked: win.shareMy(modelData.fileName) }
                                                     }
