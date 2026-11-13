@@ -2809,6 +2809,11 @@ T = {
         "otherSett": "Other settings", "darkMode": "Dark mode", "langLbl": "Language", "sndLbl": "Signal sounds",
         "sbLbl": "Status bar", "cdLbl": "Candle countdown",
         "badiSect": "Encrypted indicators (BADI)", "keyFp": "Key fingerprint:",
+        "notifT": "Notifications", "notifEmpty": "No notifications yet",
+        "notifHint": "Notifications from your paid indicators appear here — the developer sends them from his own server (updates, subscription reminders). No files can ever pass through this channel.",
+        "notifClear": "Clear all",
+        "paidSrvLbl": "Paid control server (optional) — the app polls it and accepts whitelist commands only:",
+        "paidIdLbl": "Paid indicator ID on that server:",
         "badiEnc": "Encrypt the indicator — export a .badi file", "badiImp": "Import an encrypted indicator (.badi)",
         "badiSaved": "Encrypted indicator saved", "badiEmpty": "There is no code to encrypt",
         "badiJsOnly": "Only JavaScript indicators can be encrypted", "badiOk": "Loaded — runs internally, its code stays hidden",
@@ -2881,6 +2886,11 @@ T = {
         "otherSett": "إعدادات أخرى", "darkMode": "الوضع الليلي", "langLbl": "اللغة", "sndLbl": "أصوات الإشارات",
         "sbLbl": "شريط الحالة", "cdLbl": "العد التنازلي على الشارت",
         "badiSect": "المؤشرات المشفرة (BADI)", "keyFp": "بصمة المفتاح:",
+        "notifT": "الإشعارات", "notifEmpty": "لا توجد إشعارات بعد",
+        "notifHint": "تظهر هنا إشعارات المؤشرات المدفوعة — المبرمج يرسلها من خادمه (تحديثات، تذكير بالاشتراك). لا يمكن لأي ملف أن يمر عبر هذه القناة إطلاقًا.",
+        "notifClear": "مسح الكل",
+        "paidSrvLbl": "خادم التحكم المدفوع (اختياري) — التطبيق يسأله دوريًا ويقبل الأوامر البيضاء فقط:",
+        "paidIdLbl": "معرف المؤشر المدفوع عند ذلك الخادم:",
         "badiEnc": "تشفير المؤشر وتصديره إلى ملف .badi", "badiImp": "استيراد مؤشر مشفر (.badi)",
         "badiSaved": "تم حفظ المؤشر المشفر", "badiEmpty": "لا يوجد كود لتشفيره",
         "badiJsOnly": "التشفير لمؤشرات JavaScript فقط — ملفات Python غير مدعومة", "badiOk": "تم التحميل — يعمل داخليًا وكودــه مخفي",
@@ -3760,6 +3770,9 @@ BADI_MSGS = {
         "blocked": "Indicator code tried to access app files, services or internals — rejected",
         "license": "This indicator is licensed to another USER ID — it will not run on this device. Your ID: ",
         "uidbad": "Invalid USER ID — the correct format is BADI-XXXX-XXXX-XXXX",
+        "paidend": "Subscription of this paid indicator ended — renew from its developer",
+        "paidoff": "This paid indicator is currently disabled by its developer",
+        "paidbad": "Invalid paid server/ID — server must be an http(s) URL and ID letters/digits only",
     },
     "ar": {
         "noaes": "مكتبة التشفير غير موجودة — ثبّتها بالأمر: pip install cryptography",
@@ -3773,6 +3786,9 @@ BADI_MSGS = {
         "blocked": "كود المؤشر يحاول الوصول إلى ملفات أو خدمات أو أجزاء داخلية من التطبيق — مرفوض",
         "license": "هذا المؤشر مرخّص لمعرّف مستخدم آخر — لن يعمل على هذا الجهاز. معرّفك: ",
         "uidbad": "معرّف مستخدم غير صالح — الصيغة الصحيحة BADI-XXXX-XXXX-XXXX",
+        "paidend": "انتهى اشتراك هذا المؤشر المدفوع — يجب التجديد من مبرمجه",
+        "paidoff": "هذا المؤشر المدفوع موقوف حاليًا من مبرمجه",
+        "paidbad": "خادم/معرف المدفوع غير صالح — الخادم يجب أن يكون رابط http(s) والمعرف حروفًا وأرقامًا فقط",
     },
 }
 
@@ -4020,7 +4036,8 @@ def _get_user_id():
 
 def _badi_payload(plain):
     """تفكيك الحمولة المفكوكة: مغلف جديد {t:badi-ind,...} أو كود خام (توافق مع الملفات القديمة).
-    يرجع (code, license_ids, is_envelope)."""
+    يرجع (code, license_ids, paid_manifest, name) — بيان المؤشر المدفوع (المعرف + خادم المبرمج)
+    مدفون داخل المغلف المشفر نفسه: لا يمكن لأي سكريبت قراءته قبل الفك ولا زوّره (طلب المستخدم)."""
     s = str(plain or "")
     if s.lstrip().startswith("{"):
         try:
@@ -4030,10 +4047,11 @@ def _badi_payload(plain):
                 if not isinstance(lic, list):
                     lic = []
                 lic = [str(x).strip().upper() for x in lic if str(x).strip()]
-                return str(d.get("code") or ""), lic, True
+                paid = _norm_paid_manifest(d.get("paid")) if d.get("paid") else None
+                return str(d.get("code") or ""), lic, paid, str(d.get("name") or "")
         except Exception:
             pass
-    return s, [], False
+    return s, [], None, ""
 
 
 def _badi_license_denied(license_ids):
@@ -4043,6 +4061,244 @@ def _badi_license_denied(license_ids):
     if not ids:
         return False
     return _get_user_id().upper() not in ids
+
+
+# ═══════════ المؤشرات المدفوعة — قاعدة محمية + تحكم المبرمج عبر خادمه (طلب المستخدم) ═══════════
+# المبدأ الأمني (لا يمكن لأي سكريبت تجاوزه):
+#   • بيان المؤشر المدفوع (معرفه + خادم مبرمجه) مدفون داخل المغلف المشفر AES-GCM نفسه —
+#     لا يُقرأ إلا عند فك التشفير داخل التطبيق، فلا يمكن لأي كود زوّره أو تغييره.
+#   • قاعدة البيانات الصغيرة موقّعة HMAC-SHA256 بمفتاح مشتق من مفتاح التطبيق + بصمة
+#     الجهاز، وبنسخ مخفية متعددة — الحذف أو التعديل لا يمدد الاشتراك أبدًا:
+#     (الفشل مغلق) المفقود = مؤشر متوقف حتى يعيد خادم المبرمج الحقيقة.
+#   • منع تراجع ساعة الجهاز: يُحفظ آخر تاريخ رأاه النظام — الأيام لا تزيد أبدًا.
+#   • قناة التحكم من الخادم: استطلاع GET صغير واستجابة JSON فقط ≤16KB — أوامر بيضاء
+#     (duration/enable/disable/status/notify) وفقط: لا ملفات ولا base64 ولا تنفيذ أي كود.
+_PAID_VER = 1
+_PAID_LOCK = threading.RLock()   # RLock: نفس الخيط يستدعي دوالاً داخلية تأخذ القفل
+_PAID_RECS = None
+
+
+def _paid_secret():
+    """سر توقيع القاعدة المحمية — مشتق داخل التطبيق من مفتاحه + بصمة الجهاز، لا يُكتب في أي ملف."""
+    return hashlib.sha256(
+        BADI.master_key() + b"badi-paid-store-v1" + _machine_fp().encode()).digest()
+
+
+def _paid_stores():
+    """مواقع القاعدة المحمية (نسخ مخفية متعددة — قاعدة داخلية مثل معرّف المستخدم)."""
+    out = [os.path.join(CFG_DIR, ".badi-sys", "paid.dat"),
+           os.path.join(CFG_DIR, ".badi-sys", ".c", "p.bin")]
+    try:
+        from PySide6.QtCore import QStandardPaths
+        ad = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
+        if ad:
+            out.append(os.path.join(ad, "BadiCharts", ".sys", "paid.dat"))
+    except Exception:
+        pass
+    try:
+        out.append(os.path.join(BADI_DIR, ".sys", "paid.dat"))
+    except Exception:
+        pass
+    return out
+
+
+def _paid_sign(body):
+    return hmac.new(_paid_secret(), body.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _paid_load():
+    """قراءة القاعدة: تُعتمد السجلات من النسخ السليمة التوقيع فقط — أي عبث يكسر التوقيع فيُهمَل."""
+    global _PAID_RECS
+    with _PAID_LOCK:
+        if _PAID_RECS is not None:
+            return _PAID_RECS
+        recs = {}
+        for p in _paid_stores():
+            try:
+                with open(p, "r", encoding="utf-8") as fh:
+                    d = json.loads(fh.read().strip() or "{}")
+                if not isinstance(d, dict) or int(d.get("v") or 0) != _PAID_VER:
+                    continue
+                body = json.dumps(d.get("recs") or {}, sort_keys=True, ensure_ascii=False)
+                if hmac.compare_digest(str(d.get("sig") or ""), _paid_sign(body)):
+                    for k, v in (d.get("recs") or {}).items():
+                        if isinstance(v, dict) and str(v.get("id") or "") == str(k):
+                            old = recs.get(k)
+                            if old is None or int(v.get("upd") or 0) >= int(old.get("upd") or 0):
+                                recs[k] = v
+            except Exception:
+                continue
+        _PAID_RECS = recs
+        return _PAID_RECS
+
+
+def _paid_save():
+    """كتابة القاعدة في كل النسخ المخفية مع التوقيع + وضع القراءة فقط (منع العبث السهل)."""
+    with _PAID_LOCK:
+        body = json.dumps(_PAID_RECS or {}, sort_keys=True, ensure_ascii=False)
+        doc = {"v": _PAID_VER, "recs": _PAID_RECS or {}, "sig": _paid_sign(body)}
+        txt = json.dumps(doc, ensure_ascii=False)
+        for p in _paid_stores():
+            try:
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                try:
+                    os.chmod(p, 0o666)
+                except Exception:
+                    pass
+                with open(p, "w", encoding="utf-8") as fh:
+                    fh.write(txt)
+                try:
+                    os.chmod(p, 0o444)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+
+def _today_iso():
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _paid_days_left(rec, today):
+    """الأيام المتبقية من الاشتراك — مع منع تراجع التاريخ (آخر تاريخ رأاه النظام)."""
+    try:
+        exp = str(rec.get("expiry") or "")
+        if not exp:
+            return None
+        seen = str(rec.get("last_seen") or "")
+        use = today if str(today) >= seen else seen
+        ed = datetime.strptime(exp, "%Y-%m-%d").date()
+        td = datetime.strptime(use, "%Y-%m-%d").date()
+        return (ed - td).days
+    except Exception:
+        return None
+
+
+def _norm_paid_manifest(m):
+    """تحقق صارم من بيان المؤشر المدفوع: معرف آمن + خادم http(s) فقط — بلا أي شيء آخر."""
+    try:
+        if not isinstance(m, dict):
+            return None
+        sid = str(m.get("id") or "").strip()
+        srv = str(m.get("server") or "").strip()
+        if not re.match(r"^[A-Za-z0-9_.\-]{1,64}$", sid):
+            return None
+        u = urllib.parse.urlparse(srv)
+        if u.scheme not in ("https", "http") or not u.netloc or len(srv) > 200:
+            return None
+        if any(c in srv for c in "\"'" + "<>"):
+            return None
+        return {"id": sid, "server": srv}
+    except Exception:
+        return None
+
+
+def paid_register(manifest, name):
+    """تسجيل/تحديث سجل المؤشر المدفوع في القاعدة المحمية — يُستدعى فقط عند فك التشفير
+    داخل التطبيق (لا يمكن لأي سكريبت استدعاؤه أو زوّر بياناته)."""
+    with _PAID_LOCK:
+        recs = _paid_load()
+        rid = str(manifest.get("id") or "")
+        rec = recs.get(rid) or {}
+        nm = str(name or rec.get("name") or "").strip()
+        if nm and not re.search(r"\.(js|py)$", nm, re.I):
+            nm += ".js"
+        rec.update({"id": rid, "name": nm or rid,
+                    "server": str(manifest.get("server") or ""),
+                    "upd": int(time.time())})
+        rec.setdefault("expiry", "")
+        rec.setdefault("status", "")
+        rec.setdefault("enabled", True)
+        rec.setdefault("warned", 99)
+        if str(rec.get("last_seen") or "") < _today_iso():
+            rec["last_seen"] = _today_iso()
+        recs[rid] = rec
+        _paid_save()
+
+
+def paid_records():
+    """نسخة من سجلات القاعدة المحمية — للقراءة فقط."""
+    with _PAID_LOCK:
+        return dict(_paid_load())
+
+
+def paid_days_left(rec, today):
+    return _paid_days_left(rec, today)
+
+
+def paid_save_rec(rec):
+    """حفظ تعديل سجل (من مراقبة الاشتراك المحلية) — مع تحديث آخر تاريخ رأاه النظام."""
+    with _PAID_LOCK:
+        recs = _paid_load()
+        rec["upd"] = int(time.time())
+        if str(rec.get("last_seen") or "") < _today_iso():
+            rec["last_seen"] = _today_iso()
+        recs[str(rec.get("id") or "")] = rec
+        _paid_save()
+
+
+def paid_open_denied(rid, lang):
+    """بوابة الفتح للمدفوع: انتهى الاشتراك أو أوقفه المبرمج؟ الفشل مغلق — لا فتح."""
+    rec = paid_records().get(str(rid or ""))
+    if not rec:
+        return None
+    if rec.get("enabled") is False:
+        return BADI_MSGS[lang].get("paidoff", "locked by developer")
+    left = _paid_days_left(rec, _today_iso())
+    if left is not None and left < 0:
+        return BADI_MSGS[lang].get("paidend", "subscription ended")
+    return None
+
+
+def paid_apply_commands(rid, rec, cmds):
+    """تنفيذ الأوامر البيضاء فقط (طلب المستخدم: مدة/تشغيل/إيقاف/نجاح/إشعار — وفقط).
+    يرجع (toggles, notes) — أي أمر آخر يُتجاهل صامتًا ولا يُنفذ أي كود من الخادم."""
+    toggles, notes = [], []
+    for c in cmds[:20]:
+        try:
+            if not isinstance(c, dict):
+                continue
+            cmd = str(c.get("cmd") or "").strip().lower()
+            if cmd == "duration":
+                days = c.get("days")
+                until = c.get("until")
+                if days is not None:
+                    n = max(1, min(3650, int(days)))
+                    try:
+                        base = datetime.strptime(str(rec.get("expiry") or _today_iso()), "%Y-%m-%d").date()
+                        today = datetime.strptime(_today_iso(), "%Y-%m-%d").date()
+                        rec["expiry"] = (max(base, today) + timedelta(days=n)).strftime("%Y-%m-%d")
+                    except Exception:
+                        rec["expiry"] = (datetime.strptime(_today_iso(), "%Y-%m-%d") + timedelta(days=n)).strftime("%Y-%m-%d")
+                elif until:
+                    rec["expiry"] = datetime.strptime(str(until), "%Y-%m-%d").strftime("%Y-%m-%d")
+                rec["warned"] = 99
+                rec["upd"] = int(time.time())
+            elif cmd in ("enable", "disable"):
+                want = (cmd == "enable")
+                if rec.get("enabled") != want:      # أمر التشغيل/الإيقاف فقط عند تغيّر فعلي
+                    rec["enabled"] = want
+                    toggles.append((str(rec.get("name") or rid), want))
+                rec["upd"] = int(time.time())
+            elif cmd == "status":
+                st = str(c.get("state") or "").strip().lower()
+                if st in ("active", "expired"):
+                    rec["status"] = st
+                    if st == "expired" and not rec.get("expiry"):
+                        rec["enabled"] = False
+                        toggles.append((str(rec.get("name") or rid), False))
+                    rec["upd"] = int(time.time())
+            elif cmd == "notify":
+                notes.append(str(c.get("text") or ""))
+        except Exception:
+            continue
+    if toggles or notes:
+        with _PAID_LOCK:
+            recs = _paid_load()
+            rec["upd"] = int(time.time())
+            recs[str(rec.get("id") or "")] = rec
+            _paid_save()
+    return toggles, notes
 
 
 def _downloads_dir():
@@ -4065,7 +4321,59 @@ def _downloads_dir():
 # وأي ملف .badi مشفر يُكتب بجوار ملف المؤشر الأصلي (مثل .mq5/.ex5 في ميتاتريدر).
 # المستخدم يمكنه أيضًا أن يضع ملفات المؤشرات/الأدوات مباشرة في المجلد —
 # التطبيق يفحص المجلدين عند الإقلاع وعند فتح المحرر ويستوردها تلقائيًا.
-BADI_DIR = os.path.join(CFG_DIR, "BadiCharts")
+def _desktop_dir():
+    """مجلد سطح المكتب الحقيقي على أي نظام (طلب المستخدم: التطبيق ينشئ مجلده على سطح المكتب)."""
+    try:
+        from PySide6.QtCore import QStandardPaths
+        p = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DesktopLocation)
+        if p and os.path.isdir(p) and os.access(p, os.W_OK):
+            return p
+    except Exception:
+        pass
+    home = os.path.expanduser("~")
+    for cand in ("Desktop", "سطح المكتب", "OneDrive/Desktop", "OneDrive/سطح المكتب"):
+        p = os.path.join(home, cand)
+        if os.path.isdir(p) and os.access(p, os.W_OK):
+            return p
+    return CFG_DIR   # تعذر الوصول لسطح المكتب — بجانب التطبيق (احتياط)
+
+
+def _migrate_badi_tree(src, dst):
+    """ترحيل محتوى Indicators/Tools/Thumbs من الموقع القديم إلى الجديد (مرة واحدة)."""
+    try:
+        if not os.path.isdir(src) or (os.path.isdir(dst) and any(os.scandir(dst))):
+            return
+        import shutil as _sh
+        for sub in ("Indicators", "Tools", "Thumbs"):
+            s, d = os.path.join(src, sub), os.path.join(dst, sub)
+            if not os.path.isdir(s):
+                continue
+            os.makedirs(d, exist_ok=True)
+            for it in os.listdir(s):
+                sp, dp = os.path.join(s, it), os.path.join(d, it)
+                try:
+                    if os.path.isfile(dp):
+                        continue
+                    try:
+                        os.replace(sp, dp)
+                    except Exception:
+                        _sh.copy2(sp, dp)
+                        os.remove(sp)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+# مجلد التطبيق على سطح المكتب أولًا — وإن فشل الإنشاء يبقى بجانب التطبيق (طلب المستخدم)
+_BADI_DIR_DESK = os.path.join(_desktop_dir(), "BadiCharts")
+_BADI_DIR_LOCAL = os.path.join(CFG_DIR, "BadiCharts")
+try:
+    os.makedirs(_BADI_DIR_DESK, exist_ok=True)
+    BADI_DIR = _BADI_DIR_DESK
+except Exception:
+    BADI_DIR = _BADI_DIR_LOCAL
+_migrate_badi_tree(_BADI_DIR_LOCAL, BADI_DIR)
 BADI_IND_DIR = os.path.join(BADI_DIR, "Indicators")
 BADI_TOOL_DIR = os.path.join(BADI_DIR, "Tools")
 # صور المصغرة: صورة واحدة فقط لكل مؤشر — تُلتقط تلقائيًا عند أول تشغيل (طلب المستخدم)
@@ -4175,6 +4483,50 @@ GUIDE_JS = """/* ═════════════════════
      getRange(values, s) → {min, max}   تحديد نطاق النافذة السفلية (pane)
      log('نص')                          طباعة في كونسول المحرر
      النتيجة تُحسب تلقائيًا: عند انتهاء مدة الفريم تُقارن الدخول بالخروج (WIN/LOSS)
+
+   ── 8) المؤشرات المدفوعة — تحكم المبرمج في مؤشره عبر خادمه (جديد) ───────────
+   عند تشفير المؤشر (نافذة الترخيص) توجد حقلا المدفوع:
+     Paid control server : https://خادمك/badi/api   (https فقط — اختياري)
+     Paid indicator ID   : PRO_SIGNAL_1             (حروف وأرقام و _ . - فقط)
+   الحقولا يُدمان داخل المغلف المشفر نفسه — لا يمكن لأي سكريبت تغييرهما.
+
+   ثم تتحكم في المؤشر من خادمك — التطبيق يسأل خادمك عند الإقلاع وكل 15 دقيقة:
+     GET {server}?ind=ID&dev=USER-ID&left=الأيام المتبقية&st=الحالة&v=1
+     (left = الأيام المتبقية محليًا — تتابعها من خادمك وتقرر بنفسك)
+   ويقبل تطبيقك من خادمك استجابة JSON فقط (أقل من 16KB):
+     {"ok":1,"cmds":[
+       {"cmd":"duration","days":30},             ← تحديد/تمديد الاشتراك 30 يومًا
+       {"cmd":"duration","until":"2026-12-31"},  ← أو حتى تاريخ محدد
+       {"cmd":"enable"},                         ← تشغيل المؤشر
+       {"cmd":"disable"},                        ← إيقاف المؤشر
+       {"cmd":"status","state":"active"},        ← active أو expired (ساري/انتهى)
+       {"cmd":"notify","text":"تم تحديث المؤشر — فلترة أدق وإصلاحات"} ← إشعار للمستخدم
+     ]}
+   هذه الأوامر كلها — وفقط: أي أمر آخر يُتجاهل، ولا يُنفَّذ أي كود قادم من الخادم،
+   ولا يمكن رفع أو سحب أي ملف عبر هذه القناة إطلاقًا — أي استجابة تحوي base64
+   أو ملفًا أو بيانات كبيرة تُرفض ويُحظر خادمك 10 دقائق.
+
+   قاعدة بيانات صغيرة محمية داخل التطبيق لكل مؤشر مدفوع (لا يمكن حذفها أو عبثها):
+     • تحفظ لكل مؤشر: معرفه، خادمه، تاريخ انتهاء الاشتراك، الحالة، الأيام المتبقية،
+       وآخر تاريخ رأاه النظام.
+     • موقّعة HMAC-SHA256 بمفتاح مشتق من مفتاح التطبيق + بصمة هذا الجهاز، وبنسخ
+       مخفية متعددة — حذفها أو تعديلها لا يمدد الاشتراك: (الفشل مغلق) المؤشر
+       يتوقف حتى يجيب خادمك بالحقيقة ويعيد الحالة.
+     • مراقبة الأيام تعمل حتى لو حذف المستخدم سجلّات التطبيق: الأيام تُحسب
+       من آخر تاريخ رأاه النظام — رجّع المستخدم ساعة جهازه فلن يكسب يومًا واحدًا.
+     • التذكير تلقائي: قبل الانتهاء بـ 7 و3 ويوم واحد يظهر إشعار «ينتهي اشتراك
+       مؤشر كذا بعد N يوم — يجب التجديد»، وعند الانتهاء: «انتهى الشهر/الاشتراك —
+       يجب التجديد» وينطفئ المؤشر حتى تفعّله أنت من خادمك.
+     • إشعاراتك (notify) تظهر في بطاقة الإشعارات الصغيرة بجانب زر الإعدادات —
+       نص فقط حتى 300 حرف، بلا HTML ولا روابط ملفات.
+
+   الحماية المدمجة (لا يمكن لأي سكريبت تجاوزها):
+     • مفتاح فك تشفير المؤشرات مدموج داخل التطبيق — لا يُكتب في ملف، لا يصل إلى
+       صفحة الويب، ولا يمكن نسخه؛ لا يظهر إلا بصمته في الإعدادات.
+     • بيان المدفوع (المعرف + الخادم) داخل التشفير — كود المؤشر نفسه لا يراه ولا يغيره.
+     • كود المؤشر ممنوع منه الشبكة والتخزين والجسور نهائيًا (فحص مزدوج قبل التشغيل
+       وداخل QuickJS) — ولا يرى الترخيص ولا القاعدة المحمية ولا خادم التحكم شيء منه.
+     • الأوامر تُفحص بقائمة بيضاء صارمة داخل التطبيق — تنفيذ الكود من الخادم مستحيل.
    ═══════════════════════════════════════════════════════════════════════════ */
 
 return {
@@ -4263,7 +4615,15 @@ def _seed_guide_file():
                 except Exception:
                     pass
         p = os.path.join(BADI_IND_DIR, GUIDE_FILE_NAME)
-        if not os.path.exists(p):
+        cur = ""
+        if os.path.exists(p):
+            try:
+                with open(p, "r", encoding="utf-8") as fh:
+                    cur = fh.read()
+            except Exception:
+                cur = ""
+        # يُعاد كتابة الدليل عند تغيّر محتواه — ليصل قسم المؤشرات المدفوعة الجديد لكل المستخدمين
+        if cur.strip() != GUIDE_JS.strip():
             with open(p, "w", encoding="utf-8") as fh:
                 fh.write(GUIDE_JS + "\n")
     except Exception:
@@ -4382,6 +4742,8 @@ class Backend(QObject):
     addedChanged = Signal()                # قائمة العملات المضافة تغيّرت (لوحة الإعدادات)
     sigResult = Signal(str)                # نتيجة إشارة (WIN/LOSS) بعد انتهاء المدة
     myIndsChanged = Signal()               # قائمة مؤشراتي في صفحة المؤشرات تغيّرت (طلب المستخدم)
+    notifChanged = Signal()                # بطاقة الإشعارات تغيّرت (طلب المستخدم)
+    paidCmd = Signal(str)                  # أمر تحكم بعيد صالح: تشغيل/إيقاف مؤشر مدفوع (طلب المستخدم)
 
     def __init__(self):
         super().__init__()
@@ -4425,6 +4787,20 @@ class Backend(QObject):
         self._pending = None     # إشارة بانتظار لقطة الشاشة
         os.makedirs(SHOTS_DIR, exist_ok=True)
 
+        # ── المؤشرات المدفوعة: بطاقة الإشعارات (بلا إشعارات جاهزة — المبرمج يرسلها من خادمه)
+        #    + قناة تحكم المبرمج عبر خادمه بأوامر بيضاء فقط (طلب المستخدم) ──
+        self._notifs = []            # إشعارات البطاقة: نص فقط — لا ملفات إطلاقًا عبر هذه القناة
+        self._paid_block = {}        # خادم تجاوز الحدود → حظر مؤقت 10 دقائق (تشديد الحماية)
+        self._paidT = QTimer(self)
+        self._paidT.setInterval(15 * 60 * 1000)
+        self._paidT.timeout.connect(self._paid_poll)
+        self._paidT.start()
+        QTimer.singleShot(6000, self._paid_poll)
+        self._paidW = QTimer(self)
+        self._paidW.setInterval(60 * 60 * 1000)
+        self._paidW.timeout.connect(self._paid_watch)
+        self._paidW.start()
+        QTimer.singleShot(7000, self._paid_watch)
         self._timer = QTimer(self)
         self._timer.setInterval(1000)
         self._timer.timeout.connect(self._on_tick)
@@ -5568,8 +5944,8 @@ class Backend(QObject):
             return None
         return BADI_MSGS[self._lang]["run"] + ": " + msg[:140]
 
-    @Slot(str, str, str, str, result=str)
-    def badiExport(self, code, file_name, kind="indicator", license_ids=""):
+    @Slot(str, str, str, str, str, str, result=str)
+    def badiExport(self, code, file_name, kind="indicator", license_ids="", paid_server="", paid_id=""):
         """تشفير المؤشر وكتابة ملف .badi بجوار ملفه الأصلي في مجلد BadiCharts
         (مثل ميتاتريدر: .mq5/.ex5 جنبًا إلى جنب) — النتيجة JSON.
         يُكتب الملف الأصلي أولًا إن لم يكن على القرص، ثم الملف المشفر بجواره.
@@ -5592,6 +5968,13 @@ class Backend(QObject):
             # مغلف مشفر: الكود + قائمة المعرفات المرخصة — المفتاح خارج الملف تمامًا
             env = {"t": "badi-ind", "name": base, "license": ids,
                    "created": int(time.time()), "code": code or ""}
+            # المؤشر المدفوع (طلب المستخدم): خادم المبرمج + معرف المؤشر عنده — يُدمان داخل
+            # المغلف المشفر نفسه فلا يمكن لأي سكريبت تغييرهما، والتحكم لاحقًا من الخادم فقط
+            if str(paid_server or "").strip() or str(paid_id or "").strip():
+                pm = _norm_paid_manifest({"id": paid_id, "server": paid_server})
+                if not pm:
+                    return json.dumps({"ok": False, "error": BADI_MSGS[lang]["paidbad"]})
+                env["paid"] = pm
             blob = BADI.encrypt(json.dumps(env, ensure_ascii=False))
             d = _disk_dir_for(kind)
             path = os.path.join(d, base + ".badi")
@@ -5637,10 +6020,20 @@ class Backend(QObject):
             with open(p, "rb") as fh:
                 blob = fh.read()
             plain = BADI.decrypt(blob)
-            code, lic, _env = _badi_payload(plain)
+            code, lic, pmanifest, pname = _badi_payload(plain)
             # بوابة الترخيص (طلب المستخدم): معرف المشتري المدمج يجب أن يطابق معرف هذا الجهاز
             if _badi_license_denied(lic):
                 return json.dumps({"ok": False, "error": BADI_MSGS[lang]["license"] + _get_user_id()})
+            # بوابة المؤشرات المدفوعة (طلب المستخدم): تسجيل السجل في القاعدة المحمية
+            # + منع الفتح تمامًا عند انتهاء الاشتراك أو إيقاف المبرمج للمؤشر من خادمه
+            if pmanifest:
+                try:
+                    paid_register(pmanifest, pname)
+                    deny = paid_open_denied(str(pmanifest.get("id") or ""), lang)
+                    if deny:
+                        return json.dumps({"ok": False, "error": deny})
+                except Exception:
+                    pass
             warn = self._badi_sandbox_check(code)
             if warn:
                 return json.dumps({"ok": False, "error": warn})
@@ -5668,10 +6061,20 @@ class Backend(QObject):
             with open(p, "rb") as fh:
                 blob = fh.read()
             plain = BADI.decrypt(blob)
-            code, lic, _env = _badi_payload(plain)
+            code, lic, pmanifest, pname = _badi_payload(plain)
             # بوابة الترخيص (طلب المستخدم): معرف المشتري المدمج يجب أن يطابق معرف هذا الجهاز
             if _badi_license_denied(lic):
                 return json.dumps({"ok": False, "error": BADI_MSGS[lang]["license"] + _get_user_id()})
+            # بوابة المؤشرات المدفوعة (طلب المستخدم): تسجيل السجل في القاعدة المحمية
+            # + منع الفتح تمامًا عند انتهاء الاشتراك أو إيقاف المبرمج للمؤشر من خادمه
+            if pmanifest:
+                try:
+                    paid_register(pmanifest, pname)
+                    deny = paid_open_denied(str(pmanifest.get("id") or ""), lang)
+                    if deny:
+                        return json.dumps({"ok": False, "error": deny})
+                except Exception:
+                    pass
             warn = self._badi_sandbox_check(code)
             if warn:
                 return json.dumps({"ok": False, "error": warn})
@@ -5705,6 +6108,134 @@ class Backend(QObject):
     # ---------- معرّف المستخدم الثابت BADI-XXXX-XXXX-XXXX (طلب المستخدم) ----------
     userId = Property(str, lambda self: _get_user_id(), constant=True)
     """معرّف هذا الجهاز الثابت — يُعرض في الشريط السفلي ويُستخدم لترخيص المؤشرات المشفرة."""
+
+    # ---------- المؤشرات المدفوعة: بطاقة الإشعارات + قناة تحكم المبرمج (طلب المستخدم) ----------
+    @Property(list, notify=notifChanged)
+    def notifs(self):
+        """قائمة إشعارات البطاقة الصغيرة — لا إشعارات جاهزة: المبرمج يرسلها من خادمه."""
+        return self._notifs
+
+    @Property(int, notify=notifChanged)
+    def notifsUnread(self):
+        """عدد غير المقروء — للشارة الحمراء على زر الإشعارات."""
+        return sum(1 for n in self._notifs if not n.get("read"))
+
+    @Slot()
+    def notifsMarkAll(self):
+        """فتح البطاقة يعلم الكل مقروءًا فتختفي الشارة الحمراء."""
+        ch = False
+        for n in self._notifs:
+            if not n.get("read"):
+                n["read"] = True
+                ch = True
+        if ch:
+            self.notifChanged.emit()
+
+    @Slot()
+    def notifsClear(self):
+        """مسح كل الإشعارات من البطاقة."""
+        if self._notifs:
+            self._notifs = []
+            self.notifChanged.emit()
+
+    def _notif_push(self, text, ind=""):
+        """إشعار جديد: نص فقط ≤300 حرف — لا HTML ولا روابط ملفات (طلب المستخدم: تشديد الحماية)."""
+        t = re.sub(r"[\x00-\x1f]", " ", str(text or "")).strip()[:300]
+        if not t:
+            return
+        self._notifs.insert(0, {"t": t, "at": int(time.time()), "read": False,
+                                "ind": str(ind or "")[:60]})
+        if len(self._notifs) > 50:
+            del self._notifs[50:]
+        self.notifChanged.emit()
+
+    def _paid_poll(self):
+        """قناة تحكم المبرمج عبر خادمه (طلب المستخدم): استطلاع GET صغير لكل مؤشر مدفوع،
+        استجابة JSON فقط ≤16KB وأوامر بيضاء فقط — لا رفع ولا سحب ملفات إطلاقًا،
+        وأي استجابة تحوي ملفات/base64 → رفض كامل + حظر الخادم 10 دقائق."""
+        try:
+            recs = paid_records()
+            today = _today_iso()
+            now = time.time()
+            for rid, rec in list(recs.items()):
+                srv = str(rec.get("server") or "")
+                if not srv or now < self._paid_block.get(rid, 0):
+                    continue
+                u = urllib.parse.urlparse(srv)
+                if u.scheme not in ("https", "http") or not u.netloc:
+                    continue
+                try:
+                    left = paid_days_left(rec, today)
+                    q = urllib.parse.urlencode({
+                        "ind": rid, "dev": _get_user_id(),
+                        "left": "" if left is None else max(0, int(left)),
+                        "st": str(rec.get("status") or ""), "v": "1"})
+                    req = urllib.request.Request(
+                        srv + ("&" if "?" in srv else "?") + q,
+                        headers={"User-Agent": "BadiCharts-Paid/1"})
+                    with urllib.request.urlopen(req, timeout=8) as resp:
+                        raw = resp.read(16385)
+                    if len(raw) > 16384:
+                        self._paid_block[rid] = time.time() + 600
+                        continue
+                    txt = raw.decode("utf-8", "ignore")
+                    # حماية صارمة: أي أثر ملفات/base64 في الاستجابة → رفض + حظر الخادم
+                    if re.search(r"base64|data:|file://|content-disposition|multipart", txt, re.I):
+                        self._paid_block[rid] = time.time() + 600
+                        continue
+                    data = json.loads(txt)
+                    if not isinstance(data, dict) or not isinstance(data.get("cmds"), list):
+                        continue
+                    if len(data["cmds"]) > 20:
+                        self._paid_block[rid] = time.time() + 600
+                        continue
+                    self._paid_apply(rid, rec, data["cmds"])
+                except Exception:
+                    continue   # الخادم غير متاح — بلا إزعاج للمستخدم
+        except Exception:
+            pass
+
+    def _paid_apply(self, rid, rec, cmds):
+        """تنفيذ الأوامر البيضاء التي قررتها القاعدة: تشغيل/إيقاف عبر الجسر + إشعارات نصية."""
+        try:
+            toggles, notes = paid_apply_commands(rid, rec, cmds)
+            for nm, on in toggles:
+                if nm:
+                    self.paidCmd.emit(json.dumps({"name": nm, "on": bool(on)}))
+            for nt in notes:
+                self._notif_push(nt, rec.get("name") or rid)
+        except Exception:
+            pass
+
+    def _paid_watch(self):
+        """مراقبة الاشتراك محليًا من القاعدة المحمية (طلب المستخدم): تذكير قبل الانتهاء
+        بـ 7/3/1 يوم، وعند الانتهاء: إشعار + إيقاف المؤشر حتى يجدد المبرمج من خادمه."""
+        try:
+            today = _today_iso()
+            for rid, rec in list(paid_records().items()):
+                if not rec.get("expiry"):
+                    continue
+                left = paid_days_left(rec, today)
+                if left is None:
+                    continue
+                name = str(rec.get("name") or rid)
+                ar = self._lang == "ar"
+                lv = -1 if left < 0 else (1 if left <= 1 else (3 if left <= 3 else (7 if left <= 7 else 30)))
+                if lv < int(rec.get("warned", 99)):
+                    rec["warned"] = lv
+                    paid_save_rec(rec)
+                    if lv == -1:
+                        self._notif_push((ar and ("انتهى اشتراك مؤشر " + name + " — يجب التجديد لاستخدامه من جديد"))
+                                         or ("Subscription of " + name + " ended — renew to use it again"), name)
+                        if rec.get("enabled"):
+                            rec["enabled"] = False
+                            paid_save_rec(rec)
+                            self.paidCmd.emit(json.dumps({"name": name, "on": False}))
+                    else:
+                        self._notif_push((ar and ("ينتهي اشتراك مؤشر " + name + " بعد " + str(max(0, left)) + " يوم — يجب التجديد"))
+                                         or ("Subscription of " + name + " ends in " + str(max(0, left)) + " day(s) — renew"), name)
+        except Exception:
+            pass
 
     @Slot(result=str)
     def openBadiDir(self):
@@ -6609,6 +7140,20 @@ function defineBadiApp() {
         renderTabs(); renderEdBar(); renderCodeArea();
       } catch (e) {}
     },
+    /* أمر التحكم البعيد من مبرمج المؤشر المدفوع عبر خادمه (طلب المستخدم):
+       تشغيل/إيقاف فقط — لا شيء آخر، ولا أي وصول لملفات أو للمفتاح من هذه القناة */
+    remoteSet: function (o) {
+      try {
+        o = (typeof o === "string") ? JSON.parse(o) : (o || {});
+        var want = String(o.name || "").toLowerCase();
+        var on = !!o.on;
+        var f = files.find(function (x) { return String(x.fileName || "").toLowerCase() === want && x.kind !== "badi"; });
+        if (!f) return "no";
+        if (!on && f.enabled) toggleFile(f.id);
+        else if (on && !f.enabled) runFile(f.id, true);
+        return "ok";
+      } catch (e) { return "err"; }
+    },
     pyMeta: function (id, meta, fileName) {
       try { pyRegister(id, meta || {}, fileName || ""); } catch (e) {}
     },
@@ -7277,7 +7822,7 @@ ApplicationWindow {
     function badiExportConfirm() {
         var pe = win.pendingExport
         if (!pe) { licPop.close(); return }
-        var r = JSON.parse(backend.badiExport(pe.c, pe.n, pe.k, licField.text))
+        var r = JSON.parse(backend.badiExport(pe.c, pe.n, pe.k, licField.text, paidSrvField.text.trim(), paidIdField.text.trim()))
         licPop.close()
         win.pendingExport = null
         if (r.ok) win.webLog("ok", backend.s.badiSaved + " ← " + r.path)
@@ -7362,6 +7907,10 @@ ApplicationWindow {
         }
         function onSigResult(js) {
             win.webCall("__badiApp.sigResult(" + js + ")")
+        }
+        function onPaidCmd(js) {
+            /* أمر التحكم البعيد الصالح (تشغيل/إيقاف) — يُنفذ في صفحة الويب فورًا (طلب المستخدم) */
+            win.webCall("__badiApp.remoteSet(" + js + ")")
         }
     }
 
@@ -7459,6 +8008,25 @@ ApplicationWindow {
             IBtn {
                 iconName: backend.dark ? "sun" : "moon"
                 onClicked: backend.dark = !backend.dark
+            }
+            /* زر الإشعارات جنب زر الإعدادات مباشرة + شارة حمراء بعدد غير المقروء (طلب المستخدم) */
+            IBtn {
+                id: notifBtn
+                visible: win.loggedIn
+                iconName: "bell"
+                onClicked: {
+                    backend.notifsMarkAll()
+                    notifPop.open()
+                }
+                Rectangle {
+                    anchors.top: parent.top; anchors.right: parent.right
+                    anchors.topMargin: 1; anchors.rightMargin: 1
+                    width: 15; height: 15; radius: 7.5
+                    color: "#FF4D5E"
+                    visible: backend.notifsUnread > 0
+                    Label { text: backend.notifsUnread; font.pixelSize: 9; font.bold: true
+                            color: "#FFFFFF"; anchors.centerIn: parent }
+                }
             }
             IBtn {
                 visible: win.loggedIn
@@ -7691,6 +8259,115 @@ ApplicationWindow {
         }
     }
 
+    /* ═══════ بطاقة الإشعارات الصغيرة (طلب المستخدم): ليست صفحة كبيرة — بطاقة تحت الزر.
+       بلا إشعارات جاهزة إطلاقًا: المبرمج يرسلها من خادمه عبر أمر notify فقط ═══════ */
+    Popup {
+        id: notifPop
+        parent: Overlay.overlay
+        width: Math.min(360, win.width - 24)
+        height: Math.min(430, win.height - 120)
+        x: win.width - width - 14
+        y: 62
+        padding: 0
+        modal: false
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        background: Rectangle {
+            radius: 14; color: backend.c.card
+            border.width: 1; border.color: backend.c.border
+        }
+        contentItem: ColumnLayout {
+            spacing: 8
+            RowLayout {
+                spacing: 9
+                Rectangle {
+                    width: 30; height: 30; radius: 9
+                    color: Qt.rgba(0.08, 0.55, 0.96, 0.14)
+                    Icon { anchors.centerIn: parent; name: "bell"; sz: 15; tint: backend.c.accent }
+                }
+                Label { text: backend.s.notifT; font.pixelSize: 14; font.bold: true; color: backend.c.fg }
+                Label {
+                    text: backend.notifsUnread
+                    visible: backend.notifsUnread > 0
+                    font.pixelSize: 10; font.bold: true; color: "#FFFFFF"
+                    leftPadding: 7; rightPadding: 7; topPadding: 2; bottomPadding: 2
+                    background: Rectangle { radius: 8; color: "#FF4D5E" }
+                }
+                Item { Layout.fillWidth: true }
+                IBtn { iconName: "x"; onClicked: notifPop.close() }
+            }
+            Rectangle { Layout.fillWidth: true; height: 1; color: backend.c.border }
+            /* الحالة الفارغة — البطاقة تبدأ خالية (طلب المستخدم: لا إشعارات جاهزة الآن) */
+            ColumnLayout {
+                visible: backend.notifs.length === 0
+                Layout.fillWidth: true
+                spacing: 6
+                Item { Layout.fillWidth: true; implicitHeight: 26 }
+                Icon { name: "bell"; sz: 30; tint: backend.c.border; Layout.alignment: Qt.AlignHCenter }
+                Label { text: backend.s.notifEmpty; font.pixelSize: 12; font.bold: true
+                        color: backend.c.sub; Layout.alignment: Qt.AlignHCenter }
+                Label { text: backend.s.notifHint; font.pixelSize: 10; color: backend.c.sub
+                        wrapMode: Text.WordWrap; Layout.fillWidth: true
+                        horizontalAlignment: Text.AlignHCenter }
+                Item { Layout.fillWidth: true; implicitHeight: 10 }
+            }
+            ListView {
+                id: notifList
+                visible: backend.notifs.length > 0
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                spacing: 6
+                model: backend.notifs
+                boundsBehavior: Flickable.StopAtBounds
+                ScrollBar.vertical: SlimBar { }
+                delegate: Rectangle {
+                    width: notifList.width
+                    height: ncol.implicitHeight + 14
+                    radius: 10
+                    color: backend.c.bg
+                    border.width: 1
+                    border.color: modelData.read ? backend.c.border : Qt.rgba(0.08, 0.55, 0.96, 0.45)
+                    ColumnLayout {
+                        id: ncol
+                        x: 10; y: 7
+                        width: parent.width - 26
+                        spacing: 3
+                        RowLayout {
+                            Layout.fillWidth: true; spacing: 6
+                            Rectangle {
+                                width: 7; height: 7; radius: 3.5
+                                color: backend.c.accent
+                                visible: !modelData.read
+                            }
+                            Label {
+                                text: modelData.t
+                                font.pixelSize: 11
+                                color: backend.c.fg
+                                wrapMode: Text.WordWrap
+                                Layout.fillWidth: true
+                            }
+                        }
+                        Label {
+                            text: (modelData.ind ? modelData.ind + " · " : "")
+                                  + Qt.formatDateTime(new Date(modelData.at * 1000), "dd/MM hh:mm")
+                            font.pixelSize: 9; color: backend.c.sub
+                        }
+                    }
+                }
+            }
+            RowLayout {
+                spacing: 8
+                Item { Layout.fillWidth: true }
+                Btn {
+                    text: backend.s.notifClear; iconName: "trash"; outline: true
+                    implicitHeight: 30; font.pixelSize: 10
+                    visible: backend.notifs.length > 0
+                    onClicked: backend.notifsClear()
+                }
+            }
+        }
+    }
+
     /* نافذة اختيار لون حرة لألوان الشارت — أي لون وليس قوائم محدودة (طلب المستخدم) */
     ColorDialog {
         id: chartColorPicker
@@ -7719,6 +8396,7 @@ ApplicationWindow {
     Popup {
         id: licPop
         parent: Overlay.overlay
+        onOpened: { paidSrvField.text = ""; paidIdField.text = "" }
         anchors.centerIn: Overlay.overlay
         width: Math.min(430, win.width - 48)
         padding: 16
@@ -7765,6 +8443,44 @@ ApplicationWindow {
                     border.color: licField.activeFocus ? backend.c.accent : backend.c.border
                 }
                 onAccepted: win.badiExportConfirm()
+            }
+            /* حقول المؤشر المدفوع (طلب المستخدم): خادم المبرمج + معرف المؤشر عنده —
+               يُدمان داخل المغلف المشفر نفسه، والتحكم لاحقًا من خادمه فقط بأوامر بيضاء */
+            Label { text: backend.s.paidSrvLbl; font.pixelSize: 11; color: backend.c.sub
+                    wrapMode: Text.WordWrap; Layout.fillWidth: true }
+            TextField {
+                id: paidSrvField
+                Layout.fillWidth: true
+                implicitHeight: 38
+                font.pixelSize: 12
+                color: backend.c.fg
+                placeholderText: "https://your-server.com/badi/api"
+                placeholderTextColor: backend.c.sub
+                selectByMouse: true
+                leftPadding: 12; rightPadding: 12
+                background: Rectangle {
+                    radius: 10; color: backend.c.bg
+                    border.width: paidSrvField.activeFocus ? 2 : 1
+                    border.color: paidSrvField.activeFocus ? backend.c.accent : backend.c.border
+                }
+            }
+            Label { text: backend.s.paidIdLbl; font.pixelSize: 11; color: backend.c.sub
+                    wrapMode: Text.WordWrap; Layout.fillWidth: true }
+            TextField {
+                id: paidIdField
+                Layout.fillWidth: true
+                implicitHeight: 38
+                font.pixelSize: 12; font.family: "monospace"
+                color: backend.c.fg
+                placeholderText: "PRO_SIGNAL_1"
+                placeholderTextColor: backend.c.sub
+                selectByMouse: true
+                leftPadding: 12; rightPadding: 12
+                background: Rectangle {
+                    radius: 10; color: backend.c.bg
+                    border.width: paidIdField.activeFocus ? 2 : 1
+                    border.color: paidIdField.activeFocus ? backend.c.accent : backend.c.border
+                }
             }
             /* معرّف هذا الجهاز — نسخة سريعة ليرسلها المشتري للبائع */
             Rectangle {
