@@ -5331,6 +5331,8 @@ class Backend(QObject):
         self._qx_older_busy = False    # دفعة تمرير للخلف جارية
         self._qx_pre_log = 0.0         # خنق سجلات حالة التحميل المسبق
         self._qx_tf_retry = 0.0        # خنق إعادة محاولة جلب فريم أعلى
+        self._qx_ensure_at = {}        # v13.1: آخر جلب فوري لكل عملة (خنق 15 ثانية)
+        self._qx_ensure_fail = {}      # v13.1: عدّاد فشل الجلب الفوري (خنق تصاعدي)
         self._files = self._load_files()
         _ensure_badi_dirs()
         self.syncDiskFiles(emit=False)     # استيراد أي ملفات وضعها المستخدم في مجلد BadiCharts
@@ -5510,6 +5512,17 @@ class Backend(QObject):
         المغلقة قبلهما، حتى لا تبقى شمعة مغلقة خاطئة في الشارت ثم "تقفز" فجأة
         إلى قيمتها الصحيحة عند أول مزامنة كاملة (أُصلحت بطلب المستخدم)."""
         return json.dumps(self._candles[-3:], separators=(",", ":")) if self._candles else "[]"
+
+    @Slot(int, result=str)
+    def tailJsonN(self, n):
+        """v13.1: آخر n شمعة فقط — دفعة ذيل خفيفة تُدفع للشارت عند تراكم أكثر
+        من شمعة بين نبضتين، بدل إعادة إرسال المصفوفة كاملة (بلا قفزات ولا
+        إعادة ضبط للعرض — طلب المستخدم). تُدمج عبر pushTail نفسها."""
+        try:
+            n = max(1, int(n))
+            return json.dumps(self._candles[-n:], separators=(",", ":"))
+        except Exception:
+            return "[]"
 
     @Property(int, notify=candlesChanged)
     def candlesCount(self):
@@ -6200,6 +6213,41 @@ class Backend(QObject):
         return [{"name": "BRL/USD OTC", "symbol": "BRLUSD_otc", "payout": 0,
                  "open": True, "otc": True, "flag": pair_flag_uri("BRL/USD OTC")}]
 
+    def _qx_ensure_asset(self, api):
+        """v13.1 (طلب المستخدم): عملة فُتح شارتها ووجد بلا شموع تُجلب فوراً —
+        جلب أمامي عبر الخادم (ensure_asset_loaded → نفس المسار الرسمي عبر بوابة
+        الجلب) بدل انتظار دور التحميل المسبق الخلفي الذي يمر على كل العملات
+        واحدة تلو الأخرى (لهذا كانت بعض العملات تُفتح بشارت فارغ تماماً).
+        مضمومة لكل عملة مرة كل 15 ثانية حتى لا تُغرق الخادم."""
+        qx = _qx_module()
+        if not qx or getattr(qx, "CLIENT", None) is None or not self._qx_logged or not api:
+            return
+        now = time.time()
+        # v13.1: خنق تصاعدي — 15 ثانية لأول محاولة، وكل فشل يضاعف المهلة حتى 60 ثانية
+        # (حتى لا نغرق الخادم بطلبات متكررة لعملة بلا تاريخ فعلاً)
+        fails = self._qx_ensure_fail.get(api, 0)
+        if now - self._qx_ensure_at.get(api, 0.0) < min(60.0, 15.0 * (1 + fails)):
+            return
+        self._qx_ensure_at[api] = now
+        self._log("info", f"chart opened with no candles — loading {api} now (foreground)")
+
+        def _worker():
+            try:
+                fut = asyncio.run_coroutine_threadsafe(
+                    qx.ensure_asset_loaded(api), qx.ASYNC_LOOP)
+                n = fut.result(timeout=120)
+                if n:
+                    self._log("ok", f"{api}: {n} candles loaded + live stream ON")
+                    self._qx_ensure_fail[api] = 0
+                    self._qx_last_sig = None   # المضخة تدفع الغذاء الجديد فوراً
+                else:
+                    self._qx_ensure_fail[api] = self._qx_ensure_fail.get(api, 0) + 1
+            except Exception as e:
+                self._qx_ensure_fail[api] = self._qx_ensure_fail.get(api, 0) + 1
+                self._log("err", f"ensure {api}: {str(e)[:100]}")
+
+        threading.Thread(target=_worker, daemon=True, name="qxEnsure").start()
+
     def _qx_load_feed(self, force=False):
         """تحميل غذاء الشارت الحقيقي للعملة/الفريم الحاليين من الخادم."""
         api = self._qx_symbols.get(self._asset) or self._api_from_display(self._asset)
@@ -6216,6 +6264,9 @@ class Backend(QObject):
             if candles and (force or not self._candles or self._qx_feed_key != key):
                 self._candles = candles[-self._QX_FEED_CAP:]
                 self._qx_feed_key = key
+            elif not candles:
+                # v13.1: لا شموع بعد (لم يصل دور التحميل المسبق) — جلب فوري أمامي
+                self._qx_ensure_asset(api)
         elif tf_sec < 60:
             # فريمات الثواني: تُبنى من تيكات الخادم الحية (نافذة 5 دقائق — سياسة الخادم)
             ticks = []
@@ -6229,6 +6280,10 @@ class Backend(QObject):
             if feed and (force or not self._candles or self._qx_feed_key != key):
                 self._candles = feed
                 self._qx_feed_key = key
+            elif not feed:
+                # v13.1: لا تيكات بعد (البث لم يبدأ لهذه العملة) — جلب فوري أمامي
+                # يشغّل البث الحي نفسه فيتدفق التيك مباشرة
+                self._qx_ensure_asset(api)
         else:
             # فريمات أعلى من الدقيقة: جلب مباشر 300 شمعة بنفس طريقة الخادم الأصلية.
             # ملاحظة: feed_key يُضبط داخل العامل عند وصول الشموع فعلاً — حتى لا يبدأ
@@ -6237,7 +6292,9 @@ class Backend(QObject):
                 self._qx_fetch_tf_async(api, tf_sec, 300)
 
     def _qx_fetch_tf_async(self, api, tf_sec, count):
-        """جلب شموع فريم أعلى داخل حلقة الخادم (نفس CLIENT.get_candles الأصلي)."""
+        """جلب شموع فريم أعلى داخل حلقة الخادم — نفس CLIENT.get_candles الأصلي
+        لكن عبر بوابة الجلب الواحدة (v13.1): طلب واحد في كل لحظة + أولوية أمامية
+        (طلب المستخدم المعروض يتقدم على التحميل المسبق ولا يختلط معه)."""
         qx = _qx_module()
         if not qx or getattr(qx, "CLIENT", None) is None:
             return
@@ -6247,8 +6304,9 @@ class Backend(QObject):
             try:
                 end = int(time.time())
                 fut = asyncio.run_coroutine_threadsafe(
-                    qx.CLIENT.get_candles(api, end, count * tf_sec, tf_sec), qx.ASYNC_LOOP)
-                res = fut.result(timeout=45)
+                    qx.qx_fetch_window_raw(api, end, count * tf_sec, tf_sec,
+                                           foreground=True, timeout=45.0), qx.ASYNC_LOOP)
+                res = fut.result(timeout=60)
                 candles = self._qx_fmt_raw(res, tf_sec)[-count:]
                 if candles and asset_name == self._asset and tf_key == self._tf:
                     self._candles = candles
@@ -6310,9 +6368,14 @@ class Backend(QObject):
                 d["v"] += 1
         return [buckets[k] for k in sorted(buckets)]
 
-    def _qx_merge_tail_full(self, new_feed):
+    def _qx_merge_tail_full(self, new_feed, tf_sec=None):
         """دمج غذاء الخادم مع غذاء الواجهة من الذيل فقط — رأس البيانات يبقى ثابتاً
-        حتى لا يُعاد ضبط الشارت أثناء التمرير للخلف. يعيد True إن تغيّر شيء."""
+        حتى لا يُعاد ضبط الشارت أثناء التمرير للخلف. يعيد True إن تغيّر شيء.
+
+        v13.1 (طلب المستخدم): سد الثغرات داخل غذاء الواجهة نفسه — أي فجوة
+        زمنية بين آخر شمعة موجودة وأول شمعة جديدة تُملأ بشموع مسطحة
+        (فتح/إغلاق = إغلاق الشمعة السابقة) بسقف أمان كبير (720 فريم) —
+        الفارغ في الشموع لن يحدث أبداً."""
         old = self._candles
         if not new_feed:
             return False
@@ -6322,6 +6385,23 @@ class Backend(QObject):
         added = [c for c in new_feed if c["t"] > old[-1]["t"]]
         changed = False
         if added:
+            # v13.1: سد الثغرات الزمنية بين الذيل القديم والجديد (شموع مسطحة)
+            if tf_sec and tf_sec > 0:
+                filled = []
+                last_t = old[-1]["t"]
+                last_c = old[-1]["c"]
+                for c in added:
+                    gap = int((c["t"] - last_t) // tf_sec) if c["t"] > last_t else 0
+                    if gap > 1 and gap <= 720:
+                        slot = last_t + tf_sec
+                        while slot < c["t"]:
+                            filled.append({"t": slot, "o": last_c, "h": last_c,
+                                           "l": last_c, "c": last_c, "v": 0})
+                            slot += tf_sec
+                    filled.append(c)
+                    last_t = c["t"]
+                    last_c = c["c"]
+                added = filled
             self._candles = old + added
             changed = True
         # تحديث الشموع المطابقة زمنياً (آخر 3 شموع): إغلاق الشمعة السابقة النهائي
@@ -6360,6 +6440,16 @@ class Backend(QObject):
                 return True
             return False
         if bucket > last["t"]:
+            # v13.1 (طلب المستخدم): سد الثغرات في مدّ الذيل — إذا قفز الزمن أكثر
+            # من فريم واحد (سبت النظام مثلاً) تُملأ الفواصل الزمنية الوسيطة
+            # بشموع مسطحة (إغلاق الشمعة السابقة) — لا فراغات في الفريمات العليا
+            _gap = int((bucket - last["t"]) // tf_sec) if tf_sec > 0 else 1
+            if 1 < _gap <= 720:
+                _slot = last["t"] + tf_sec
+                while _slot < bucket:
+                    self._candles.append({"t": _slot, "o": last["c"], "h": last["c"],
+                                          "l": last["c"], "c": last["c"], "v": 0})
+                    _slot += tf_sec
             self._candles.append({"t": bucket, "o": last["c"],
                                   "h": max(last["c"], px), "l": min(last["c"], px),
                                   "c": px, "v": 0})
@@ -6429,12 +6519,15 @@ class Backend(QObject):
                     self._candles = candles[-self._QX_FEED_CAP:]
                     self._qx_feed_key = key
                 else:
-                    self._qx_merge_tail_full(candles)
+                    self._qx_merge_tail_full(candles, tf_sec)
             elif self._qx_feed_key != key:
                 # بيانات العملة لم تُحمّل بعد (التحميل المسبق يتدرج عملة تلو
                 # أخرى) — الشارت يبقى فارغاً بدل إظهار شموع العملة السابقة
                 self._candles = []
                 self._qx_feed_key = key
+            else:
+                # v13.1: لا شموع في الخادم لهذه العملة — جلب فوري أمامي
+                self._qx_ensure_asset(api)
         elif tf_sec < 60:
             ticks = []
             try:
@@ -6449,10 +6542,13 @@ class Backend(QObject):
                     self._candles = feed
                     self._qx_feed_key = key
                 else:
-                    self._qx_merge_tail_full(feed)
+                    self._qx_merge_tail_full(feed, tf_sec)
             elif self._qx_feed_key != key:
                 self._candles = []
                 self._qx_feed_key = key
+            else:
+                # v13.1: لا تيكات — جلب فوري أمامي يشغّل البث الحي أيضاً
+                self._qx_ensure_asset(api)
         else:
             px = 0.0
             try:
@@ -6538,6 +6634,9 @@ class Backend(QObject):
             asyncio.run_coroutine_threadsafe(qx.asset_payout_monitor(), loop)
             # BRLUSD_otc فوراً (300 شمعة + الحالة + الدفع) ثم بقية العملات واحدة تلو الأخرى
             asyncio.run_coroutine_threadsafe(qx.preload_all_assets(), loop)
+            # v13.1 (طلب المستخدم): آلية سد الثغرات تعمل الآن مع التطبيق أيضاً —
+            # نفس mt4_gap_filler الخادم بلا أي تغيير (كانت معرّفة بلا تشغيل)
+            asyncio.run_coroutine_threadsafe(qx.mt4_gap_filler(), loop)
             # تيكات في الذاكرة فقط + حذف الأقدم من 5 دقائق (حماية القرص)
             asyncio.run_coroutine_threadsafe(qx.tick_cache_collector(), loop)
             asyncio.run_coroutine_threadsafe(qx.tick_retention_loop(), loop)
@@ -6578,14 +6677,17 @@ class Backend(QObject):
             if qx and api and before > 0 and getattr(qx, "CLIENT", None) is not None and tf_sec >= 60:
                 if tf_sec == 60:
                     # دفعة الخادم الرسمية: fetch_older_batch تجلب 170 شمعة أقدم وتدمجها
+                    # (v13.1: داخل الخادم تمر بأولوية أمامية عبر بوابة الجلب الواحدة)
                     fut = asyncio.run_coroutine_threadsafe(
                         qx.fetch_older_batch(api, before, qx.PAGINATION_BATCH), qx.ASYNC_LOOP)
                     fut.result(timeout=60)
                     batch = [c for c in self._qx_engine_candles(api) if c["t"] < before][-qx.PAGINATION_BATCH:]
                 else:
+                    # v13.1: نفس CLIENT.get_candles الأصلي لكن عبر البوابة الأمامية
                     fut = asyncio.run_coroutine_threadsafe(
-                        qx.CLIENT.get_candles(api, before, 170 * tf_sec, tf_sec), qx.ASYNC_LOOP)
-                    res = fut.result(timeout=45)
+                        qx.qx_fetch_window_raw(api, before, 170 * tf_sec, tf_sec,
+                                               foreground=True, timeout=45.0), qx.ASYNC_LOOP)
+                    res = fut.result(timeout=60)
                     batch = [c for c in self._qx_fmt_raw(res, tf_sec) if c["t"] < before][-170:]
                 # مزامنة غذاء بايثون فوراً حتى لا يعيد المضخة إرسال إعادة ضبط للشارت
                 if tf == self._tf and asset == self._asset and batch:
@@ -6597,7 +6699,13 @@ class Backend(QObject):
                         self._candles = batch + self._candles
                         if len(self._candles) > self._QX_FEED_CAP:
                             self._candles = self._candles[-self._QX_FEED_TRIM:]
-                    self._qx_last_sig = None
+                    # v13.1 (طلب المستخدم: بلا قفزات): لا إعادة ضبط بعد الدفعة —
+                    # تحديث بصمة الذيل (آخر 3 شموع) فقط؛ الدفعة تُدمج في الصفحة
+                    # بلا أي قفزة والمضخة تُبقي الشمعة الحية عبر pushTail العادي
+                    _tail = self._candles[-3:]
+                    self._qx_last_sig = ((len(self._candles),) + tuple(
+                        (c["t"], round(float(c["o"]), 10), round(float(c["h"]), 10),
+                         round(float(c["l"]), 10), round(float(c["c"]), 10)) for c in _tail)) if _tail else None
                 if batch:
                     self._log("info", f"older batch: +{len(batch)} candles — {asset} {tf}")
                 else:
@@ -7559,6 +7667,10 @@ var OLDER = { loading: false, at: 0, asset: "", tf: "" };
 window.__badiMaybeLoadOlder = function (p) {
   try {
     if (!window.__BADI_EMBEDDED || !p || !window.__badiPrimary || p !== window.__badiPrimary()) return;
+    /* v13.1: فريمات الثواني (5s/10s/15s/30s) تاريخها يُبنى من تيكات الخادم
+       الحية (نافذة 5 دقائق — سياسة الخادم نفسها) — لا يوجد تاريخ أقدم يُجلب،
+       فلا تُرسل طلبات older تكرارية بلا فائدة */
+    if (p.tf && /^[0-9]+s$/.test(String(p.tf))) return;
     var dd = p.dataArr;
     if (!dd || dd.length < 30 || !p.chart) return;
     if (OLDER.loading) {
@@ -9032,12 +9144,21 @@ ApplicationWindow {
             win.lastLen = backend.candlesCount
             return
         }
-        if (backend.assetLabel !== win.lastAsset || backend.tfLabel !== win.lastTf
-                || backend.candlesCount < win.lastLen || backend.candlesCount > win.lastLen + 1) {
+        if (backend.assetLabel !== win.lastAsset || backend.tfLabel !== win.lastTf) {
             win.syncFull()
             return
         }
-        if (backend.candlesCount !== win.lastLen) win.lastLen = backend.candlesCount
+        /* v13.1 (طلب المستخدم: بلا قفزات): عند تراكم أكثر من شمعة بين نبضتين
+           تُدفع دفعة الذيل الأخيرة فقط عبر pushTail نفسها — لا إعادة إرسال
+           المصفوفة كاملة (syncFull كانت تعيد ضبط العرض فتظهر الشموع وكأنها تقفز) */
+        var diff = backend.candlesCount - win.lastLen
+        if (diff < 0 || diff > 60) { win.syncFull(); return }
+        if (diff > 1) {
+            win.lastLen = backend.candlesCount
+            webCall("__badiApp.pushTail(" + backend.tailJsonN(diff) + ")")
+            return
+        }
+        if (diff !== 0) win.lastLen = backend.candlesCount
         /* آخر 3 شموع (الشمعة الحية + إغلاق شمعتين مغلقتين) — دفعة خفيفة بدون
            إعادة ضبط العرض، وتُصلح الشمعة المغلقة داخل المكتبة مباشرة */
         webCall("__badiApp.pushTail(" + backend.tailJson + ")")

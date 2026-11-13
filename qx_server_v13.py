@@ -2869,9 +2869,11 @@ async def fetch_candles_once(asset: Asset, idx=1, total=1):
             while len(all_candles_1s) < target_1s_count and chunks_done < max_chunks:
                 chunk_end = current_end - (chunks_done * chunk_seconds)
                 try:
+                    # v13.1: عبر بوابة الجلب الواحدة — نفس الطلب نفسه بلا اختلاط
                     res_chunk = await asyncio.wait_for(
-                        CLIENT.get_candles(api_name, chunk_end, chunk_seconds, fetch_period),
-                        timeout=20,
+                        qx_fetch_window_raw(api_name, chunk_end, chunk_seconds, fetch_period,
+                                            foreground=False, timeout=20, retries=0),
+                        timeout=25,
                     )
                 except Exception as e:
                     if chunks_done == 0:
@@ -3023,14 +3025,16 @@ async def _bridge_fetch_recent_candles(asset: Asset, existing_candles: list) -> 
                 # هذا يضمن أن الجسر يغطي 75 شمعة 5s — أكثر من كافٍ لأي فجوة
                 bridge_1s_offset = BRIDGE_FETCH_CANDLES * PERIOD_SECONDS * 5
                 try:
+                    # v13.1: عبر بوابة الجلب الواحدة — نفس الطلب نفسه بلا اختلاط
                     bridge_1s = await asyncio.wait_for(
-                        CLIENT.get_candles(
+                        qx_fetch_window_raw(
                             asset.api_symbol,
                             bridge_end_time,
                             bridge_1s_offset,
-                            1  # period=1 (1s candles — مدعوم دائماً من الخادم)
+                            1,  # period=1 (1s candles — مدعوم دائماً من الخادم)
+                            foreground=False, timeout=BRIDGE_FETCH_TIMEOUT, retries=0,
                         ),
-                        timeout=BRIDGE_FETCH_TIMEOUT,
+                        timeout=BRIDGE_FETCH_TIMEOUT + 5,
                     )
                 except asyncio.TimeoutError:
                     logmsg(f"[bridge:{asset.symbol}] 1s fetch timeout (non-fatal)")
@@ -4522,7 +4526,10 @@ class MT4Writer:
             offset_seconds = int(days * 86400)
             # ===== FIX 10: get_candles PERIOD_SECONDS (60s ) =====
             # PERIOD (1 = M1 timeframe)
-            candles = await client.get_candles(api_symbol, time.time(), offset_seconds, PERIOD_SECONDS)
+            # v13.1: عبر بوابة الجلب الواحدة — نفس الطلب نفسه بلا اختلاط
+            candles = await qx_fetch_window_raw(api_symbol, time.time(), offset_seconds,
+                                                PERIOD_SECONDS, foreground=False,
+                                                timeout=FETCH_TIMEOUT, retries=1)
             if candles and len(candles) > 0:
                 # ===== FIX L7: _align_time ( tz_offset + ) =====
                 # `t = int(c.get('time', ...)) + _tz_offset` —
@@ -4635,7 +4642,10 @@ class MT4Writer:
         try:
             # Fetch last GAP_FILL_CANDLES (10) recent candles to replace incomplete ones
             small_days = (GAP_FILL_CANDLES * PERIOD_SECONDS) / 86400.0
-            candles = await client.get_candles(api_symbol, time.time(), int(small_days * 86400), PERIOD_SECONDS)
+            # v13.1: عبر بوابة الجلب الواحدة — لا يختلط جلب سد الثغرات مع أي جلب آخر
+            candles = await qx_fetch_window_raw(
+                api_symbol, time.time(), int(small_days * 86400), PERIOD_SECONDS,
+                foreground=False, timeout=BRIDGE_FETCH_TIMEOUT)
             if not candles:
                 # Fill existing gaps even without new data
                 merged = sorted(state['candles'], key=lambda x: x['time'])[-INITIAL_CANDLES:]
@@ -4822,6 +4832,136 @@ def _get_or_create_asset(api_symbol: str) -> Asset:
     return a
 
 
+# ==============================================================================
+# SECTION 10.5 (v13.1): FETCH GATE — منع اختلاط عمليات الجلب (طلب المستخدم حرفياً)
+# ==============================================================================
+# ما أبلغ عنه المستخدم: «تعليق والاختلاط بين عمليات الجلب — يختلط بين اكتمال
+# كل تلك العملات وجلب عملة نريد الرجوع للخلف فيها» — فراغات في الشموع،
+# شارتات تُفتح بلا شموع، والتمرير للخلف لا يجلب شيئاً.
+#
+# السبب الجذري (من قراءة الكود): CLIENT.get_candles ينتظر الحدث
+# candles_ready_<asset> — وعنصر هذا الحدث هو اسم العملة فقط. أي رسالة حية
+# لنفس العملة تحمل candles (لقطات البث) تُشغّل الحدث قبل وصول رد
+# history/load الحقيقي فيأخذ الانتظار رداً مكسوراً (شموع قليلة/خاطئة)،
+# وطلبَان لنفس العملة في نفس اللحظة يستهلك كل منهما رد الآخر.
+#
+# الحل — وطريقة الجلب نفسها لم تُمَس حرفياً (نفس CLIENT.get_candles ونفس
+# رسالة history/load):
+#   1) بوابة واحدة: طلب جلب واحد فقط في كل لحظة على مستوى الخادم كله —
+#      لا يوجد أي طلبان متزامنان بعد الآن.
+#   2) أولوية أمامية: طلبات المستخدم (تمرير للخلف / جلب عملة فُتح شارتها
+#      فارغة / فريم أعلى للعملة المعروضة) تحمل foreground=True، وحلقة
+#      التحميل المسبق الخلفية تتوقف مؤقتاً ما دام هناك طلب أمامي معلّق.
+#   3) تحقق وإعادة محاولة: إذا كان الرد أقل بوضوح من نافذة الزمن المطلوبة
+#      (يعني رسالة حية سرقت الحدث) يُعاد الطلب بنفس الطريقة الأصلية.
+#   4) debounce: نفس النافذة (عملة/فريم/نهاية) خلال 3 ثوانٍ يعيد النتيجة
+#      المخزنة بدل إرسال طلب مكرر يختلط مع السابق.
+_FETCH_GATE_LOCK: Optional[asyncio.Lock] = None   # تُنشأ في أول استدعاء
+_FETCH_GATE_FG = 0                                # عدد الطلبات الأمامية المعلّقة
+_FETCH_GATE_CACHE: Dict[tuple, tuple] = {}        # (asset,period,end,seconds) -> (ts, raw_res)
+_FETCH_GATE_CACHE_TTL = 3.0                       # ثوانٍ
+
+
+def _fetch_gate_lock() -> asyncio.Lock:
+    global _FETCH_GATE_LOCK
+    if _FETCH_GATE_LOCK is None:
+        _FETCH_GATE_LOCK = asyncio.Lock()
+    return _FETCH_GATE_LOCK
+
+
+def fetch_gate_foreground_pending() -> int:
+    """كم طلب أمامي (من المستخدم) معلّق الآن — حلقة التحميل المسبق تنتظرها."""
+    return _FETCH_GATE_FG
+
+
+async def _fetch_gate_wait_foreground(max_wait: float = 45.0):
+    """ينتظر حتى لا يبقى أي طلب أمامي معلّق (تستعملها الحلقة الخلفية فقط)."""
+    waited = 0.0
+    while _FETCH_GATE_FG > 0 and waited < max_wait:
+        await asyncio.sleep(0.4)
+        waited += 0.4
+
+
+async def qx_fetch_window_raw(api_symbol: str, end_time: int, seconds: int,
+                              period: int, foreground: bool = False,
+                              timeout: float = None, retries: int = 2):
+    """نفس طريقة الجلب الأصلية حرفياً (CLIENT.get_candles → history/load)
+    لكن عبر البوابة المرتبة: طلب واحد في كل لحظة + أولوية أمامية + تحقق.
+
+    يعيد رد الخادم الخام كما هو (نفس عقد CLIENT.get_candles) — التنسيق
+    يبقى في يد المستدعي كما كان تماماً قبل البوابة."""
+    global _FETCH_GATE_FG
+    if CLIENT is None or CLIENT.api is None:
+        return None
+    if timeout is None:
+        timeout = PRELOAD_TIMEOUT
+    end_time = int(end_time)
+    seconds = max(int(period), int(seconds))
+    # 4) debounce: نفس الطلب خلال ثوانٍ → نفس النتيجة بلا طلب مكرر يختلط
+    key = (api_symbol, int(period), end_time, int(seconds))
+    now = time.time()
+    hit = _FETCH_GATE_CACHE.get(key)
+    if hit is not None and (now - hit[0]) < _FETCH_GATE_CACHE_TTL:
+        return hit[1]
+    if foreground:
+        _FETCH_GATE_FG += 1
+    try:
+        # 3) تحقق: الحد الأدنى المقبول من الشموع مقارنة بنافذة الزمن المطلوبة.
+        #    طلب 300 شمعة لا يُقبل بـ 3 شموع — هذا رد حي مكسور يُعاد طلبه.
+        expected = max(1, int(seconds) // max(1, int(period)))
+        min_ok = max(3, min(PRELOAD_MIN_CANDLES, expected // 4))
+        raw = None
+        for attempt in range(max(1, int(retries) + 1)):
+            # 1) البوابة: طلب واحد فقط في كل لحظة على مستوى الخادم كله
+            async with _fetch_gate_lock():
+                raw = await asyncio.wait_for(
+                    CLIENT.get_candles(api_symbol, end_time, int(seconds), period),
+                    timeout=float(timeout) + 5.0,
+                )
+            if raw is None:
+                break
+            try:
+                n_ok = len(_quick_count_candles(raw, period))
+            except Exception:
+                n_ok = expected
+            if n_ok >= min_ok:
+                break
+            # الرد مكسور (رسالة حية سرقت الحدث candles_ready) — أعد بنفس الطريقة
+            logmsg(f"[gate:{api_symbol}] broken response ({n_ok} candles < {min_ok}) "
+                   f"— retry {attempt + 1}/{max(1, int(retries) + 1)}")
+            await asyncio.sleep(0.8)
+        try:
+            _FETCH_GATE_CACHE[key] = (time.time(), raw)
+            if len(_FETCH_GATE_CACHE) > 96:
+                for _k in list(_FETCH_GATE_CACHE.keys())[:48]:
+                    _FETCH_GATE_CACHE.pop(_k, None)
+        except Exception:
+            pass
+        return raw
+    finally:
+        if foreground:
+            _FETCH_GATE_FG = max(0, _FETCH_GATE_FG - 1)
+
+
+def _quick_count_candles(raw, period: int) -> list:
+    """عدّاد سريع لشموع الرد الخام (للتحقق داخل البوابة فقط) — محاذاة على
+    حدود الفريم المطلوب نفسها التي يستعملها التنسيق الرسمي."""
+    out = []
+    if not raw:
+        return out
+    for c in raw:
+        if not isinstance(c, dict):
+            continue
+        try:
+            ts = int(float(c.get("time", c.get("timestamp", 0))))
+            if ts <= 0:
+                continue
+            out.append(ts - (ts % max(1, int(period))))
+        except Exception:
+            continue
+    return set(out)
+
+
 def _cache_tick(api_symbol: str, ts: int, price: float):
     """يخزن تيكاً في الذاكرة فقط (لا يوجد أي ملف تيكات على القرص في v13)."""
     with _TICK_LOCK:
@@ -4967,19 +5107,29 @@ def _format_raw_candles(res) -> list:
     return unique
 
 
-async def _fetch_candle_window(api_symbol: str, end_time: int, seconds: int):
+async def _fetch_candle_window(api_symbol: str, end_time: int, seconds: int,
+                               foreground: bool = False):
     """طلب شموع واحد عبر نفس CLIENT.get_candles الأصلي (نفس طريقة الجلب
-    الرسمية دون أي تعديل): end_time = نهاية النافذة، seconds = طولها بالثواني."""
-    res = await asyncio.wait_for(
-        CLIENT.get_candles(api_symbol, int(end_time), int(seconds), PERIOD_SECONDS),
-        timeout=PRELOAD_TIMEOUT,
+    الرسمية دون أي تعديل): end_time = نهاية النافذة، seconds = طولها بالثواني.
+
+    v13.1: الطلب يمر الآن عبر بوابة الجلب الواحدة (fetch gate) حتى لا يختلط
+    مع أي جلب آخر — foreground=True يعني طلب المستخدم الأمامي (تمرير للخلف
+    أو عملة فُتح شارتها) فيتقدم على التحميل المسبق الخلفي."""
+    res = await qx_fetch_window_raw(
+        api_symbol, int(end_time), int(seconds), PERIOD_SECONDS,
+        foreground=foreground, timeout=PRELOAD_TIMEOUT,
     )
     return res
 
 
 def _apply_candles_to_asset(asset: Asset, candles: list):
     """تخزين الشموع في كل القنوات الرسمية: ذاكرة العملة + ملف HST الأول
-    + sync_state + ملف HST الثاني + قاعدة candles.db."""
+    + sync_state + ملف HST الثاني + قاعدة candles.db.
+
+    v13.1 (طلب المستخدم): آلية سد الثغرات مُشغَّلة الآن عند التخزين نفسه —
+    _fill_missing_slots نفسها بلا أي تغيير تملأ أي فجوة زمنية بشموع مسطحة
+    (إغلاق الشمعة السابقة) حتى لا يظهر فارغ في الشموع أبداً."""
+    candles = _fill_missing_slots(list(candles), PERIOD_SECONDS, max_gap=1440)
     asset.candles = list(candles)
     if candles:
         asset.price = float(candles[-1]['close'])
@@ -5067,6 +5217,41 @@ async def preload_one_asset(api_symbol: str, idx: int = 1, total: int = 1):
     return len(asset.candles) if asset.candles else 0
 
 
+async def ensure_asset_loaded(api_symbol: str) -> int:
+    """v13.1 (طلب المستخدم): جلب فوري بأولوية أمامية لعملة فتح التطبيق شارتها
+    ووجدها بلا شموع — السبب كان أن التحميل المسبق الخلفي يمر على كل العملات
+    واحدة تلو الأخرى (قد يستغرق دقائق)، فتُفتح عملة لم يصل دورها بعد فيُعرض
+    شارت فارغ. هذه الدالة تجلب العملة فوراً عبر نفس المسار الرسمي
+    (preload_one_asset → _fetch_candle_window → البوابة الأمامية) وتشغّل
+    بثها الحي، فتمتلئ الشارت خلال ثوانٍ. تعيد عدد الشموع أو 0."""
+    if CLIENT is None or CLIENT.api is None or not CONNECTION_ALIVE:
+        return 0
+    api_symbol = str(api_symbol or "").strip()
+    if not api_symbol:
+        return 0
+    asset = _get_or_create_asset(api_symbol)
+    if asset.candles and len(asset.candles) >= PRELOAD_MIN_CANDLES:
+        # الشموع موجودة — تأكد فقط أن البث الحي يعمل لها
+        task = asset.stream_task
+        try:
+            running = task is not None and not task.done()
+        except Exception:
+            running = False
+        if not (asset.streaming and running):
+            try:
+                asset.stream_task = asyncio.run_coroutine_threadsafe(
+                    realtime_stream(asset), ASYNC_LOOP)
+            except Exception:
+                pass
+        return len(asset.candles)
+    try:
+        n = await preload_one_asset(api_symbol, 1, 1)
+        return int(n or 0)
+    except Exception as e:
+        logmsg(f"[ensure:{api_symbol}] failed: {e}")
+        return 0
+
+
 async def preload_all_assets():
     """v13: محرك التحميل المسبق الكامل —
     1) BRLUSD_otc فوراً بعد الدخول (لا تنتظر القائمة).
@@ -5131,6 +5316,12 @@ async def preload_all_assets():
                 if CLIENT is None or not CONNECTION_ALIVE:
                     logmsg("[preload] connection lost — cycle aborted (will retry)")
                     break
+                # v13.1: أولوية المستخدم — طلبات التمرير للخلف / فتح عملة فارغة /
+                # جلب فريم أعلى تتقدم دائماً؛ التحميل المسبق الخلفي يتوقف مؤقتاً
+                # حتى تنتهيها (لا اختلاط بين عمليات الجلب بعد الآن — طلب المستخدم)
+                if _FETCH_GATE_FG > 0:
+                    logmsg("[preload] foreground request pending — preload yields ...")
+                    await _fetch_gate_wait_foreground(45.0)
                 if sym in _PRELOADED_INFO:
                     continue
                 try:
@@ -5192,8 +5383,11 @@ async def fetch_older_batch(api_symbol: str, before_time=None, count: int = PAGI
         else:
             before_time = int(time.time()) - PRELOAD_CANDLES * PERIOD_SECONDS
     before_time = int(before_time)
+    # v13.1: التمرير للخلف = طلب أمامي بأولوية عالية (يتقدم على التحميل المسبق
+    # ولا يختلط معه بعد الآن — البوابة الواحدة + أولوية المستخدم)
     res = await _fetch_candle_window(api_symbol, before_time,
-                                     count * PERIOD_SECONDS + PERIOD_SECONDS)
+                                     count * PERIOD_SECONDS + PERIOD_SECONDS,
+                                     foreground=True)
     candles = _format_raw_candles(res)
     older = [c for c in candles if c['time'] < before_time][-count:]
     if not older:
@@ -5232,6 +5426,11 @@ PAGINATION_API = {
     "get_recent_ticks": get_recent_ticks,
     "preload_status": lambda: dict(_PRELOADED_INFO),
     "tick_cache": _TICK_CACHE,
+    # v13.1 (طلب المستخدم): واجهة الجلب المرتبة — التطبيق يستدعيها بدل
+    # CLIENT.get_candles المباشر فلا يختلط أي جلب مع آخر:
+    "ensure_asset_loaded": ensure_asset_loaded,      # جلب فوري لعملة فُتحت بشارت فارغ
+    "fetch_window_raw": qx_fetch_window_raw,         # نفس get_candles عبر البوابة
+    "fetch_gate_pending": fetch_gate_foreground_pending,
 }
 
 
@@ -5300,6 +5499,9 @@ if __name__ == "__main__":
     asyncio.run_coroutine_threadsafe(asset_payout_monitor(), ASYNC_LOOP)
     # v13: BRLUSD_otc فوراً (300 شمعة + بث حي) ثم بقية الأصول المفتوحة واحدة تلو الأخرى:
     asyncio.run_coroutine_threadsafe(preload_all_assets(), ASYNC_LOOP)
+    # v13.1 (طلب المستخدم): آلية سد الثغرات تعمل الآن فعلاً — كانت معرّفة في
+    # الكود بلا تشغيل (لذلك ظهرت فراغات في الشموع). نفس الآلية نفسها بلا أي تغيير:
+    asyncio.run_coroutine_threadsafe(mt4_gap_filler(), ASYNC_LOOP)
     # v13: كاش التيكات في الذاكرة + حذف التيكات الأقدم من 5 دقائق:
     asyncio.run_coroutine_threadsafe(tick_cache_collector(), ASYNC_LOOP)
     asyncio.run_coroutine_threadsafe(tick_retention_loop(), ASYNC_LOOP)
