@@ -49,3 +49,16 @@ AssertionError: FAIL 2b: inline event wrong
 [22:10:46] [v14-endpoint] circuit selftest -> CLOSED
 [22:10:49] [v14-supervisor] loop 'selftest_dying' crashed (run 1, attempt 1): RuntimeError: simulated crash for selftest — restarting
 [22:10:50] [v14-supervisor] loop 'selftest_dying' crashed (run 2, attempt 2): RuntimeError: simulated crash for selftest — restarting
+[12:55:21] FATAL in main thread (top level): source code not available
+Traceback (most recent call last):
+  File "<stdin>", line 34, in <module>
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/inspect.py", line 1285, in getsource
+    lines, lnum = getsourcelines(object)
+                  ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/inspect.py", line 1267, in getsourcelines
+    lines, lnum = findsource(object)
+                  ^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/inspect.py", line 1088, in findsource
+    raise OSError('source code not available')
+OSError: source code not available
+

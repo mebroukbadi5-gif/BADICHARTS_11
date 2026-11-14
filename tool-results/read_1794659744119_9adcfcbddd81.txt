@@ -1,0 +1,589 @@
+     1→     1→# -*- coding: utf-8 -*-
+     2→     2→"""
+     3→     3→build_one_file.py — يبني ملفاً واحداً BadiChartsStudio_live.py:
+     4→     4→  1) يرقّع نسخة المحرك qx_server_v14.py بالإصلاحات الثمانية من تقرير الفحص
+     5→     5→     (قائمة انتظار التيكات + الرد الفارغ يرفع الحدث + فهرس طلب فريد بلا
+     6→     6→     إعادة اشتراك + علامة تجميد صادقة + نافذة سد حتى أقدم شمعة اصطناعية
+     7→     7→     + الدفعة القصيرة لا تمحو الذاكرة).
+     8→     8→  2) يدمج المحرك المرقّع داخل BadiChartsStudio_live.py كنص خام
+     9→     9→     `_QX_ENGINE_SOURCE = r'''...'''` (المحرك لا يحتوي ''' إطلاقاً — تحقق).
+    10→    10→  3) يعيد كتابة _qx_module ليُنفّذ المحرك المدمج — التطبيق لا يحمّل أي
+    11→    11→     ملف ثانٍ (طلب المستخدم: «يجب ان يكون كود واحد وليس يحمل كود ثاني»).
+    12→    12→كل رقعة لها مرساة واحدة فريدة مع تحقق صارم — أي مرساة مفقودة/مكررة = فشل فوري.
+    13→    13→"""
+    14→    14→import sys, io, re
+    15→    15→
+    16→    16→BASE = "/home/z/my-project/download"
+    17→    17→ENGINE_IN = BASE + "/qx_server_v14.py"
+    18→    18→APP_IN = BASE + "/BadiChartsStudio_live.py"
+    19→    19→APP_OUT = BASE + "/BadiChartsStudio_live.py"
+    20→    20→ENGINE_TMP = "/tmp/qx_engine_patched.py"
+    21→    21→
+    22→    22→
+    23→    23→def patch(text, anchor, repl, name, count=1):
+    24→    24→    n = text.count(anchor)
+    25→    25→    if n != count:
+    26→    26→        raise SystemExit(f"[FAIL] anchor '{name}' found {n} times (expected {count})")
+    27→    27→    out = text.replace(anchor, repl, count)
+    28→    28→    print(f"[ok] {name}")
+    29→    29→    return out
+    30→    30→
+    31→    31→
+    32→    32→# ═══════════════════════════════════════════════════════════════════
+    33→    33→# الجزء 1 — رقع المحرك
+    34→    34→# ═══════════════════════════════════════════════════════════════════
+    35→    35→eng = io.open(ENGINE_IN, encoding="utf-8").read()
+    36→    36→assert "'''" not in eng, "engine contains ''' — cannot embed as r''' raw string"
+    37→    37→
+    38→    38→# --- P0: استيراد deque ---
+    39→    39→eng = patch(
+    40→    40→    eng,
+    41→    41→    "from collections import OrderedDict, defaultdict",
+    42→    42→    "from collections import OrderedDict, defaultdict, deque as _v14_deque",
+    43→    43→    "P0 deque import",
+    44→    44→)
+    45→    45→
+    46→    46→# --- P0b: تهيئة قائمة انتظار التيكات في __init__ للم_api ---
+    47→    47→eng = patch(
+    48→    48→    eng,
+    49→    49→    "        self._history_pending: Dict[str, tuple] = {}",
+    50→    50→    """        self._history_pending: Dict[str, tuple] = {}
+    51→    51→        # v14.8 (تقرير الفحص): قائمة انتظار التيكات لكل عملة — كل تيك يُحفظ
+    52→    52→        # ويُعالَج، والتيكات بين قراءتين لا تضيع فتبقى قمم الشموع وقيعانها.
+    53→    53→        self._tick_queue: Dict[str, _v14_deque] = {}
+    54→    54→        self._tick_last_done: Dict[str, tuple] = {}""",
+    55→    55→    "P0b tick queue init",
+    56→    56→)
+    57→    57→
+    58→    58→# --- P1+P2: كل تيكات الرسالة تُحفظ في قائمة الانتظار ---
+    59→    59→eng = patch(
+    60→    60→    eng,
+    61→    61→    """            if isinstance(message, list) and len(message) > 0 and isinstance(message[0], list) and len(message[0]) == 4:
+    62→    62→                asset = message[0][0]
+    63→    63→                self.api.realtime_candles[asset] = message[0]""",
+    64→    64→    """            if isinstance(message, list) and len(message) > 0 and isinstance(message[0], list) and len(message[0]) == 4:
+    65→    65→                asset = message[0][0]
+    66→    66→                self.api.realtime_candles[asset] = message[0]
+    67→    67→                # v14.8 (تقرير الفحص — سبب «أجسام الشموع صغيرة وقممها تضيع»):
+    68→    68→                # كل تيكات الرسالة تُحفظ في قائمة انتظار لكل عملة — التيكات
+    69→    69→                # التي تصل بين قراءتين لا تضيع بعد الآن والبث يقرؤها كلها
+    70→    70→                # (الشرط القديم message[0] كان يتجاهل بقية التيكات).
+    71→    71→                try:
+    72→    72→                    _tq = self.api._tick_queue.setdefault(asset, _v14_deque(maxlen=4096))
+    73→    73→                    for _tk in message:
+    74→    74→                        if isinstance(_tk, list) and len(_tk) == 4:
+    75→    75→                            _tq.append(_tk)
+    76→    76→                except Exception:
+    77→    77→                    pass""",
+    78→    78→    "P1/P2 all ticks queued",
+    79→    79→)
+    80→    80→
+    81→    81→# --- P3a: الرد الفارغ يرفع الحدث ---
+    82→    82→eng = patch(
+    83→    83→    eng,
+    84→    84→    """            if isinstance(message, dict):
+    85→    85→                asset = message.get("asset")
+    86→    86→                if asset and (message.get("candles") or message.get("data") or message.get("history")):
+    87→    87→                    self.api.candle_v2_data[asset] = message
+    88→    88→                    self.api.candles.candles_data = message.get("candles") or message.get("data") or message.get("history")""",
+    89→    89→    """            if isinstance(message, dict):
+    90→    90→                asset = message.get("asset")
+    91→    91→                # v14.8 (تقرير الفحص): الرد الفارغ (candles: []) ردٌّ حقيقي
+    92→    92→                # من الخادم عند فجوة أو عطلة نهاية أسبوع — يُرفع الحدث له
+    93→    93→                # أيضاً حتى لا ينتظر الجالب 30 ثانية كاملة ثم يفشل الجلب
+    94→    94→                # كلها بعد 3 فشلات متتالية وتبقى فجوات في التاريخ.
+    95→    95→                _payload_key = None
+    96→    96→                for _k in ("candles", "data", "history"):
+    97→    97→                    if _k in message:
+    98→    98→                        _payload_key = _k
+    99→    99→                        break
+   100→   100→                if asset and _payload_key is not None:
+   101→   101→                    self.api.candle_v2_data[asset] = message
+   102→   102→                    self.api.candles.candles_data = message.get("candles") or message.get("data") or message.get("history")""",
+   103→   103→    "P3a empty response raises event",
+   104→   104→)
+   105→   105→
+   106→   106→# --- P3b: get_candles بفهرس فريد وبلا إعادة اشتراك ---
+   107→   107→eng = patch(
+   108→   108→    eng,
+   109→   109→    """    async def get_candles(self, asset, end_from_time, offset, period, progressive=False, timeout=30, use_cache=False):
+   110→   110→        if self.api is None: return None
+   111→   111→        if end_from_time is None: end_from_time = time.time()
+   112→   112→        index = calendar.timegm(time.gmtime())
+   113→   113→        self.api.candles.candles_data = None
+   114→   114→        await self.api.event_registry.clear_event(f'candles_ready_{asset}')
+   115→   115→        await self.start_candles_stream(asset, period)
+   116→   116→        self.api.get_candles_ws(asset, index, int(end_from_time), offset, period)
+   117→   117→        try:
+   118→   118→            history_data = await self.api.event_registry.wait_event(f'candles_ready_{asset}', timeout=timeout)
+   119→   119→        except Exception:
+   120→   120→            return None""",
+   121→   121→    """    async def get_candles(self, asset, end_from_time, offset, period, progressive=False, timeout=30, use_cache=False):
+   122→   122→        if self.api is None: return None
+   123→   123→        if end_from_time is None: end_from_time = time.time()
+   124→   124→        # v14.8 (تقرير الفحص): رقم الطلب فريد من عدّاد الطلبات — طلبان في
+   125→   125→        # الثانية نفسها لم يكنا يحملان الرقم نفسه فيتداخل ردّاهما، وكل نداء
+   126→   126→        # ينتظر ردَّه هو فقط عبر الحدث المفهرس (نفس توجيه _fetch_historical_batch).
+   127→   127→        index = next(_request_counter)
+   128→   128→        self.api.candles.candles_data = None
+   129→   129→        _indexed_event = f'candles_ready_{asset}_{index}'
+   130→   130→        await self.api.event_registry.clear_event(_indexed_event)
+   131→   131→        # v14.8: لا إعادة اشتراك في كل نداء — إعادة الاشتراك كانت تغيّر فترة
+   132→   132→        # البث الحي وتتسابق مع رد التاريخ. يُشترَك فقط إذا لم يكن البث الحي
+   133→   133→        # يعمل لهذه العملة أصلاً.
+   134→   134→        try:
+   135→   135→            _already_streaming = False
+   136→   136→            for _sa in ALL_STREAMING_ASSETS:
+   137→   137→                if getattr(_sa, "api_symbol", None) == asset and getattr(_sa, "streaming", False):
+   138→   138→                    _already_streaming = True
+   139→   139→                    break
+   140→   140→        except Exception:
+   141→   141→            _already_streaming = False
+   142→   142→        if not _already_streaming:
+   143→   143→            await self.start_candles_stream(asset, period)
+   144→   144→        self.api.get_candles_ws(asset, index, int(end_from_time), offset, period)
+   145→   145→        try:
+   146→   146→            history_data = await self.api.event_registry.wait_event(_indexed_event, timeout=timeout)
+   147→   147→        except Exception:
+   148→   148→            history_data = None
+   149→   149→        if history_data is None:
+   150→   150→            # تراجع آمن: الحدث العام (يُرفع دائماً لأي رد يحمل index)
+   151→   151→            try:
+   152→   152→                history_data = await self.api.event_registry.wait_event(f'candles_ready_{asset}', timeout=3)
+   153→   153→            except Exception:
+   154→   154→                return None""",
+   155→   155→    "P3b get_candles unique index",
+   156→   156→)
+   157→   157→
+   158→   158→# --- P4a: لا تجميد ما دامت شموع اصطناعية (فحص الدخول) ---
+   159→   159→eng = patch(
+   160→   160→    eng,
+   161→   161→    """        try:
+   162→   162→            is_filled, _last_at = self.candle_store.is_gap_filled(derived_symbol)
+   163→   163→            if is_filled:
+   164→   164→                return    # frozen - keep candles exactly as they were
+   165→   165→        except Exception:
+   166→   166→            pass""",
+   167→   167→    """        try:
+   168→   168→            is_filled, _last_at = self.candle_store.is_gap_filled(derived_symbol)
+   169→   169→            if is_filled:
+   170→   170→                # v14.8 (تقرير الفحص): لا تجميد ما دامت في الخط شموع اصطناعية
+   171→   171→                # (volume=0 خارج الشمعة الحية) — السد الحقيقي يبقى محاولاً
+   172→   172→                # حتى تُستبدل كل الشموع الاصطناعية بشموع حقيقية، فلا تبقى
+   173→   173→                # عملة مجمّدة بثغراتها للأبد.
+   174→   174→                _has_artificial = False
+   175→   175→                try:
+   176→   176→                    _cps = _align_time(int(time.time()))
+   177→   177→                    for _fc in (asset_obj.candles or []):
+   178→   178→                        if _fc.get('time', 0) < _cps and int(_fc.get('volume', 1) or 0) == 0:
+   179→   179→                            _has_artificial = True
+   180→   180→                            break
+   181→   181→                except Exception:
+   182→   182→                    _has_artificial = False
+   183→   183→                if not _has_artificial:
+   184→   184→                    return    # frozen - keep candles exactly as they were
+   185→   185→        except Exception:
+   186→   186→            pass""",
+   187→   187→    "P4a freeze check honesty",
+   188→   188→)
+   189→   189→
+   190→   190→# --- P4b: الرد الفارغ ليس نجاحاً — لا تجميد ---
+   191→   191→eng = patch(
+   192→   192→    eng,
+   193→   193→    """                self._gap_filled[derived_symbol] = True
+   194→   194→                self._gap_filled_at[derived_symbol] = now_ts
+   195→   195→                self.save_snapshot(derived_symbol, merged)
+   196→   196→                # mark as permanently filled in the DB so the next cycle skips
+   197→   197→                self.candle_store.set_gap_filled(derived_symbol, True, now_ts)
+   198→   198→                return""",
+   199→   199→    """                self.save_snapshot(derived_symbol, merged)
+   200→   200→                # v14.8 (تقرير الفحص): الرد الفارغ ليس نجاحاً — لا علامة
+   201→   201→                # تجميد هنا (كانت تُثبَّت حتى عند فشل الجلب أو رد فارغ فتبقى
+   202→   202→                # العملة مجمّدة حتى بعد إعادة التشغيل ولا تُسدّ ثغراتها أبداً).
+   203→   203→                return""",
+   204→   204→    "P4b no freeze on empty",
+   205→   205→)
+   206→   206→
+   207→   207→# --- P4c: علامة التجميد فقط إذا خرج الخط من الشموع الاصطناعية ---
+   208→   208→eng = patch(
+   209→   209→    eng,
+   210→   210→    """            # 9) mark gap as filled
+   211→   211→            self._gap_filled[derived_symbol] = True
+   212→   212→            self._gap_filled_at[derived_symbol] = now_ts
+   213→   213→            # 10) persist candles to the SQLite store (so the next restart
+   214→   214→            # loads them from the DB instead of re-fetching from the API).
+   215→   215→            self.save_snapshot(derived_symbol, merged)
+   216→   216→            # 11) set the permanent freeze flag - subsequent fill_gap_once
+   217→   217→            # calls for this asset will return immediately without touching
+   218→   218→            # the candles. This is the entire fix for the 'flicker' symptom.
+   219→   219→            self.candle_store.set_gap_filled(derived_symbol, True, now_ts)""",
+   220→   220→    """            # 9) mark gap as filled
+   221→   221→            # v14.8 (تقرير الفحص): علامة التجميد تُثبَّت فقط إذا خرج الخط من
+   222→   222→            # الشموع الاصطناعية — ما دامت فيه شموع مسطحة (volume=0) يبقى السد
+   223→   223→            # الحقيقي محاولاً في الدورات التالية حتى تُستبدل كلها.
+   224→   224→            _still_artificial = False
+   225→   225→            try:
+   226→   226→                _cps2 = _align_time(int(time.time()))
+   227→   227→                for _fc in merged:
+   228→   228→                    if _fc.get('time', 0) < _cps2 and int(_fc.get('volume', 1) or 0) == 0:
+   229→   229→                        _still_artificial = True
+   230→   230→                        break
+   231→   231→            except Exception:
+   232→   232→                _still_artificial = False
+   233→   233→            self.save_snapshot(derived_symbol, merged)
+   234→   234→            if not _still_artificial:
+   235→   235→                self._gap_filled[derived_symbol] = True
+   236→   236→                self._gap_filled_at[derived_symbol] = now_ts
+   237→   237→                # 11) set the permanent freeze flag - subsequent fill_gap_once
+   238→   238→                # calls for this asset will return immediately without touching
+   239→   239→                # the candles. This is the entire fix for the 'flicker' symptom.
+   240→   240→                self.candle_store.set_gap_filled(derived_symbol, True, now_ts)""",
+   241→   241→    "P4c freeze only when clean",
+   242→   242→)
+   243→   243→
+   244→   244→# --- P5: نافذة السد حتى أقدم شمعة اصطناعية (حتى 200 شمعة) ---
+   245→   245→eng = patch(
+   246→   246→    eng,
+   247→   247→    """            # Fetch last GAP_FILL_CANDLES (10) recent candles to replace incomplete ones
+   248→   248→            small_days = (GAP_FILL_CANDLES * PERIOD_SECONDS) / 86400.0""",
+   249→   249→    """            # Fetch last GAP_FILL_CANDLES (10) recent candles to replace incomplete ones
+   250→   250→            # v14.8 (تقرير الفحص): النافذة تمتد حتى أقدم شمعة اصطناعية في
+   251→   251→            # الخط (بحد أقصى 200 شمعة) — أي ثغرة أقدم من 10 شموع كانت
+   252→   252→            # مستحيلة الإصلاح في النسخة السابقة لأن السدّ يجلب آخر 10 شموع فقط.
+   253→   253→            _oldest_artificial = 0
+   254→   254→            try:
+   255→   255→                _cps0 = _align_time(int(time.time()))
+   256→   256→                for _fc in state['candles']:
+   257→   257→                    if _fc.get('time', 0) < _cps0 and int(_fc.get('volume', 1) or 0) == 0:
+   258→   258→                        if _oldest_artificial == 0 or _fc['time'] < _oldest_artificial:
+   259→   259→                            _oldest_artificial = _fc['time']
+   260→   260→            except Exception:
+   261→   261→                _oldest_artificial = 0
+   262→   262→            _window_candles = GAP_FILL_CANDLES
+   263→   263→            if _oldest_artificial:
+   264→   264→                try:
+   265→   265→                    _span = int((time.time() - _oldest_artificial) // PERIOD_SECONDS) + 2
+   266→   266→                    _window_candles = min(200, max(GAP_FILL_CANDLES, _span))
+   267→   267→                except Exception:
+   268→   268→                    _window_candles = GAP_FILL_CANDLES
+   269→   269→            small_days = (_window_candles * PERIOD_SECONDS) / 86400.0""",
+   270→   270→    "P5 seal window extends",
+   271→   271→)
+   272→   272→
+   273→   273→# --- P6a: الدمج في المسار الناجح — الدفعة لا تمحو التاريخ الأقدم ---
+   274→   274→eng = patch(
+   275→   275→    eng,
+   276→   276→    """            live_candles = []
+   277→   277→            if asset.candles:
+   278→   278→                hist_times = set(c['time'] for c in candles)
+   279→   279→                for c in asset.candles:
+   280→   280→                    if c['time'] not in hist_times and c['time'] > (candles[-1]['time'] if candles else 0):
+   281→   281→                        live_candles.append(c)
+   282→   282→            asset.candles = candles + live_candles
+   283→   283→            if asset.candles: asset.price = asset.candles[-1]['close']
+   284→   284→            asset.write(force=True)
+   285→   285→            # Update MT4_WRITER.sync_state with the full historical + live candles
+   286→   286→            # so update_candle doesn't overwrite HST with only the few live candles""",
+   287→   287→    """            # v14.8 (سبب «تختفي شموعها»): الدفعة القصيرة لا تمحو التاريخ
+   288→   288→            # المجلوب — كل شمعة أقدم من الدفعة تبقى في الذاكرة كما هي
+   289→   289→            # (لا فقدان للشموع أبداً) والجديد يُدمج فقط.
+   290→   290→            _old_all = list(asset.candles or [])
+   291→   291→            _btimes = set(c['time'] for c in candles)
+   292→   292→            _b_lo = min(c['time'] for c in candles) if candles else 0
+   293→   293→            _b_hi = max(c['time'] for c in candles) if candles else 0
+   294→   294→            _kept_old = [c for c in _old_all if c['time'] < _b_lo and c['time'] not in _btimes]
+   295→   295→            _live_c2 = [c for c in _old_all if c['time'] > _b_hi and c['time'] not in _btimes]
+   296→   296→            asset.candles = sorted(_kept_old + list(candles) + _live_c2, key=lambda x: x['time'])
+   297→   297→            if asset.candles: asset.price = asset.candles[-1]['close']
+   298→   298→            asset.write(force=True)
+   299→   299→            # Update MT4_WRITER.sync_state with the full historical + live candles
+   300→   300→            # so update_candle doesn't overwrite HST with only the few live candles""",
+   301→   301→    "P6a merge keeps history (success)",
+   302→   302→)
+   303→   303→
+   304→   304→# --- P6b: الرد الفارغ/القصير في المسار المنخفض لا يمحو الذاكرة ---
+   305→   305→eng = patch(
+   306→   306→    eng,
+   307→   307→    """        # Merge even for low counts
+   308→   308→        live_candles = []
+   309→   309→        if asset.candles:
+   310→   310→            hist_times = set(c['time'] for c in candles)
+   311→   311→            for c in asset.candles:
+   312→   312→                if c['time'] not in hist_times and c['time'] > (candles[-1]['time'] if candles else 0):
+   313→   313→                    live_candles.append(c)
+   314→   314→        asset.candles = candles + live_candles
+   315→   315→        if asset.candles: asset.price = asset.candles[-1]['close']
+   316→   316→        asset.write(force=True)""",
+   317→   317→    """        # Merge even for low counts
+   318→   318→        # v14.8 (سبب «تختفي شموعها»): الرد الفارغ أو القصير لا يمحو الذاكرة —
+   319→   319→        # الشموع الموجودة تبقى كما هي ولا يُستبدل التاريخ بشيء أقل منه.
+   320→   320→        if candles:
+   321→   321→            _old_all = list(asset.candles or [])
+   322→   322→            _btimes = set(c['time'] for c in candles)
+   323→   323→            _b_lo = min(c['time'] for c in candles)
+   324→   324→            _b_hi = max(c['time'] for c in candles)
+   325→   325→            _kept_old = [c for c in _old_all if c['time'] < _b_lo and c['time'] not in _btimes]
+   326→   326→            _live_c2 = [c for c in _old_all if c['time'] > _b_hi and c['time'] not in _btimes]
+   327→   327→            asset.candles = sorted(_kept_old + list(candles) + _live_c2, key=lambda x: x['time'])
+   328→   328→            if asset.candles: asset.price = asset.candles[-1]['close']
+   329→   329→            asset.write(force=True)""",
+   330→   330→    "P6b merge keeps history (low counts)",
+   331→   331→)
+   332→   332→
+   333→   333→# --- P7: البث يقرأ كل التيكات من قائمة الانتظار ---
+   334→   334→eng = patch(
+   335→   335→    eng,
+   336→   336→    """            candle = None
+   337→   337→            if not candle and hasattr(CLIENT, 'api') and CLIENT.api:
+   338→   338→                candle = CLIENT.api.realtime_candles.get(internal)""",
+   339→   339→    """            candle = None
+   340→   340→            if hasattr(CLIENT, 'api') and CLIENT.api:
+   341→   341→                # v14.8 (تقرير الفحص): تُقرأ كل التيكات المتراكمة من قائمة
+   342→   342→                # الانتظار لكل عملة — لا تيك يضيع بين قراءتين فتبقى قمم
+   343→   343→                # الشموع وقيعانها كاملة.
+   344→   344→                try:
+   345→   345→                    _tq = CLIENT.api._tick_queue.get(internal)
+   346→   346→                    candle = _tq.popleft() if _tq else None
+   347→   347→                except Exception:
+   348→   348→                    candle = None
+   349→   349→                if candle is None:
+   350→   350→                    _rc = CLIENT.api.realtime_candles.get(internal)
+   351→   351→                    try:
+   352→   352→                        _sig = (int(_rc[1]), float(_rc[2])) if isinstance(_rc, list) and len(_rc) >= 3 else None
+   353→   353→                    except Exception:
+   354→   354→                        _sig = None
+   355→   355→                    if _rc is not None and _sig is not None:
+   356→   356→                        try:
+   357→   357→                            _done = CLIENT.api._tick_last_done.get(internal)
+   358→   358→                        except Exception:
+   359→   359→                            _done = None
+   360→   360→                        if _done != _sig:
+   361→   361→                            candle = _rc""",
+   362→   362→    "P7 stream drains tick queue",
+   363→   363→)
+   364→   364→
+   365→   365→# --- P7b: تسجيل آخر تيك مُعالَج ---
+   366→   366→eng = patch(
+   367→   367→    eng,
+   368→   368→    """                if price > 0 and ts > 0:
+   369→   369→                    # ===== FIX 10: MT4_WRITER.update_candle asset.mark_dirty =====""",
+   370→   370→    """                if price > 0 and ts > 0:
+   371→   371→                    try:
+   372→   372→                        CLIENT.api._tick_last_done[internal] = (ts, price)
+   373→   373→                    except Exception:
+   374→   374→                        pass
+   375→   375→                    # ===== FIX 10: MT4_WRITER.update_candle asset.mark_dirty =====""",
+   376→   376→    "P7b last-done marker",
+   377→   377→)
+   378→   378→
+   379→   379→io.open(ENGINE_TMP, "w", encoding="utf-8").write(eng)
+   380→   380→print(f"[ok] patched engine written -> {ENGINE_TMP} ({len(eng)} chars)")
+   381→   381→
+   382→   382→# ═══════════════════════════════════════════════════════════════════
+   383→   383→# الجزء 2 — الدمج في التطبيق (كود واحد)
+   384→   384→# ═══════════════════════════════════════════════════════════════════
+   385→   385→app = io.open(APP_IN, encoding="utf-8").read()
+   386→   386→
+   387→   387→# --- A0: تعليق الرأس ---
+   388→   388→app = patch(
+   389→   389→    app,
+   390→   390→    "# التطبيق يشغّل خادم Quotex الخاص بنا (qx_server_v14.py) الموجود بجانبه مباشرة:",
+   391→   391→    "# المحرك مدمج داخل هذا الملف (كود واحد — v14.8): لا يحتاج أي ملف ثانٍ بجانبه.",
+   392→   392→    "A0 header comment",
+   393→   393→)
+   394→   394→
+   395→   395→# --- A1: استبدال الحمّال بالحمّال المدمج + النص الخام للمحرك ---
+   396→   396→LOADER_ANCHOR = """_QX_MOD = None
+   397→   397→
+   398→   398→
+   399→   399→def _qx_module():
+   400→   400→    \"\"\"تحميل محرك الخادم من بجانب التطبيق (يُحمَّل مرة واحدة).
+   401→   401→
+   402→   402→    v14: يحمّل qx_server_v14 (الخادم المقوّى: تفرز الطلبات + سد الثغرات على
+   403→   403→    كل عملة مفتوحة + التكس لا ينام + دون انهيار الخوادم) — ولو لم يوجد
+   404→   404→    يرجع لـ qx_server_v13 كما كان تماماً (لا شيء محذوف من التطبيق).\"\"\"
+   405→   405→    global _QX_MOD
+   406→   406→    if _QX_MOD is not None:
+   407→   407→        return _QX_MOD or None
+   408→   408→    try:
+   409→   409→        _app_dir = os.path.dirname(os.path.abspath(__file__))
+   410→   410→        if _app_dir not in sys.path:
+   411→   411→            sys.path.insert(0, _app_dir)
+   412→   412→        try:
+   413→   413→            # v14 أولاً: الخادم المقوّى (نفس الدخول ونفس جلب الشموع حرفياً)
+   414→   414→            _QX_MOD = importlib.import_module("qx_server_v14")
+   415→   415→        except Exception:
+   416→   416→            # تراجع آمن للنسخة السابقة — نفس المسار القديم حرفياً
+   417→   417→            _QX_MOD = importlib.import_module("qx_server_v13")
+   418→   418→        try:
+   419→   419→            _QX_MOD.DEBUG_LOGS = False
+   420→   420→        except Exception:
+   421→   421→            pass
+   422→   422→    except Exception as _e:
+   423→   423→        try:
+   424→   424→            print("[QX] qx_server_v14/v13 load failed: " + str(_e))
+   425→   425→        except Exception:
+   426→   426→            pass
+   427→   427→        _QX_MOD = False
+   428→   428→    return _QX_MOD or None"""
+   429→   429→
+   430→   430→LOADER_NEW = """# ═════════════ v14.8: كود واحد — المحرك مدمج داخل هذا الملف ═════════════
+   431→   431→# طلب المستخدم حرفياً: «يجب ان يكون كود واحد وليس يحمل كود ثاني».
+   432→   432→# كل كود محرك Quotex موجود أدناه في النص الخام _QX_ENGINE_SOURCE ويُنفَّذ
+   433→   433→# في مساحة أسماء وحدّة عند الإقلاع — التطبيق لا يحمّل أي ملف ثانٍ ولا
+   434→   434→# يحتاج qx_server_v14.py أو qx_server_v13.py بجانبه أبداً.
+   435→   435→_QX_MOD = None
+   436→   436→
+   437→   437→
+   438→   438→def _qx_module():
+   439→   439→    \"\"\"المحرك المدمج (كود واحد): يُنفَّذ مرة واحدة في مساحة أسماء معزولة
+   440→   440→    ويعيد وحدة تحمل كل رموز المحرك (CLIENT, ASYNC_LOOP, MT4_WRITER,
+   441→   441→    get_historical_candles, _fill_missing_slots, ...) دون أي ملف خارجي.\"\"\"
+   442→   442→    global _QX_MOD
+   443→   443→    if _QX_MOD is not None:
+   444→   444→        return _QX_MOD or None
+   445→   445→    try:
+   446→   446→        import types as _types
+   447→   447→        _mod = _types.ModuleType("qx_embedded_engine")
+   448→   448→        _mod.__file__ = os.path.abspath(__file__)
+   449→   449→        _mod.__name__ = "qx_embedded_engine"
+   450→   450→        exec(compile(_QX_ENGINE_SOURCE, "qx_embedded_engine", "exec"), _mod.__dict__)
+   451→   451→        sys.modules["qx_embedded_engine"] = _mod
+   452→   452→        try:
+   453→   453→            _mod.DEBUG_LOGS = False
+   454→   454→        except Exception:
+   455→   455→            pass
+   456→   456→        _QX_MOD = _mod
+   457→   457→    except Exception as _e:
+   458→   458→        try:
+   459→   459→            print("[QX] embedded engine init failed: " + str(_e))
+   460→   460→        except Exception:
+   461→   461→            pass
+   462→   462→        _QX_MOD = False
+   463→   463→    return _QX_MOD or None
+   464→   464→
+   465→   465→
+   466→   466→# ═══════════════════════ _QX_ENGINE_SOURCE ═══════════════════════
+   467→   467→# المحرك الكامل (qx_server_v14 + إصلاحات تقرير الفحص v14.8) كنص خام —
+   468→   468→# لا يحتوي ''' أبداً فالمحدد آمن. هذا هو «الكود الثاني» القديم أصبح جزءاً
+   469→   469→# من هذا الملف الواحد."""
+   470→   470→
+   471→   471→app = patch(app, LOADER_ANCHOR, LOADER_NEW, "A1 loader rewrite")
+   472→   472→
+   473→   473→# --- A2: إدراج نص المحرك بعد الحمّال مباشرة ---
+   474→   474→INSERT_AFTER = LOADER_NEW
+   475→   475→assert app.count(INSERT_AFTER) == 1
+   476→   476→app = app.replace(
+   477→   477→    INSERT_AFTER,
+   478→   478→    INSERT_AFTER + "\n\n_QX_ENGINE_SOURCE = r'''" + eng + "'''\n",
+   479→   479→    1,
+   480→   480→)
+   481→   481→print("[ok] A2 engine source embedded")
+   482→   482→
+   483→   483→# --- A3: رسالة qxFEngine الترجمة (لا ملف خارجي بعد الآن) ---
+   484→   484→app = patch(
+   485→   485→    app,
+   486→   486→    '"qxEngine": "QX engine not found — keep qx_server_v14.py beside the app",',
+   487→   487→    '"qxEngine": "QX engine error — restart the app",',
+   488→   488→    "A3 en message",
+   489→   489→)
+   490→   490→app = patch(
+   491→   491→    app,
+   492→   492→    '"qxEngine": "محرك الخادم غير موجود — أبقِ qx_server_v14.py بجانب التطبيق",',
+   493→   493→    '"qxEngine": "خطأ في محرك الخادم — أعد تشغيل التطبيق",',
+   494→   494→    "A3 ar message",
+   495→   495→)
+   496→   496→
+   497→   497→# --- A4: إصلاح الخلل القاتل — اسم واحد لمتغير ولدالة (_hist_days) ---
+   498→   498→# في الواجهة كان self._hist_days متغير إعدادات (float) والدالة def _hist_days(self)
+   499→   499→# تحملان الاسم نفسه — المتغير يحجب الدالة فكل نداء self._hist_days() يفشل
+   500→   500→# بخطأ «float غير قابل للاستدعاء» وتسقط سلسلة جلب التاريخ من أساسها صامتة.
+   501→   501→app = patch(
+   502→   502→    app,
+   503→   503→    """    # ---------- v14.3: دفعات التاريخ المتسلسلة عند فتح العملة (300 ثم 300) ----------
+   504→   504→    def _hist_days(self):
+   505→   505→        \"\"\"عدد أيام شموع التاريخ المضبوط من الإعدادات (0.5 حتى 30، الافتراضي 2).\"\"\"
+   506→   506→        try:
+   507→   507→            return max(0.5, min(30.0, float(self._hist_days)))
+   508→   508→        except Exception:
+   509→   509→            return 2.0""",
+   510→   510→    """    # ---------- v14.3: دفعات التاريخ عند فتح العملة (دفعة مباشرة) ----------
+   511→   511→    def _hist_days_cfg(self):
+   512→   512→        \"\"\"عدد أيام شموع التاريخ المضبوط من الإعدادات (0.5 حتى 30، الافتراضي 2).
+   513→   513→
+   514→   514→        v14.8 (سبب موت سلسلة جلب التاريخ من أساسها): كانت الدالة تحمل الاسم
+   515→   515→        نفسه `_hist_days` الذي يحمله متغير الإعدادات، فكان المتغير يحجب
+   516→   516→        الدالة وكل نداء `self._hist_days()` يفشل بخطأ «float غير قابل
+   517→   517→        للاستدعاء» وتسقط سلسلة الجلب صامتة داخل try/except. الدالة الآن
+   518→   518→        `_hist_days_cfg` والمتغير يبقى `_hist_days` — لا تعارض بعد الآن.\"\"\"
+   519→   519→        try:
+   520→   520→            return max(0.5, min(30.0, float(self._hist_days)))
+   521→   521→        except Exception:
+   522→   522→            return 2.0""",
+   523→   523→    "A4 method rename",
+   524→   524→)
+   525→   525→app = patch(app, "            days = self._hist_days()", "            days = self._hist_days_cfg()", "A4 call site 1")
+   526→   526→app = patch(app, "qx.QX_HISTORY_DAYS = self._hist_days()", "qx.QX_HISTORY_DAYS = self._hist_days_cfg()", "A4 call site 2")
+   527→   527→
+   528→   528→# --- A5: الشارت — لا إعادة ضبط أبداً لنفس العملة/الفريم (سبب اختفاء الشموع) ---
+   529→   529→app = patch(
+   530→   530→    app,
+   531→   531→    """        var diff = backend.candlesCount - win.lastLen
+   532→   532→        if (diff < 0 || diff > 60) { win.syncFull(); return }""",
+   533→   533→    """        var diff = backend.candlesCount - win.lastLen
+   534→   534→        /* v14.8 (سبب اختفاء الشموع): لنفس العملة والفريم لا إعادة ضبط
+   535→   535→           للشارت إطلاقاً (لا syncFull ولا setCandles):
+   536→   536→           - نقص العدّاد = الصفحة تمتلك شموعاً أكثر من الغذاء المقتطع —
+   537→   537→             العدّاد فقط يتزامن ولا يُلمس العرض.
+   538→   538→           - زيادة كبيرة = دمج في مكانها عبر patchCandles — بلا setData.
+   539→   539→           الزوم والموضع يبقيان حرين ولا تُفقد شمعة واحدة. */
+   540→   540→        if (diff < 0) { win.lastLen = backend.candlesCount; return }
+   541→   541→        if (diff > 60) { win.lastLen = backend.candlesCount;
+   542→   542→            webCall("__badiApp.patchCandles(" + backend.candlesJson + ")"); return }""",
+   543→   543→    "A5 no reset same asset",
+   544→   544→)
+   545→   545→
+   546→   546→# --- A6: دفعة تملأ ثغرة داخل المدى تُدمج في مكانها (لا دفعة تضيع) ---
+   547→   547→app = patch(
+   548→   548→    app,
+   549→   549→    """                            function (res) {
+   550→   550→                                /* مزامنة عدّاد الشموع حتى لا تُعاد تهيئة الشارت
+   551→   551→                                   بعد دمج الدفعة — العرض يبقى ثابتاً تماماً */
+   552→   552→                                var n = parseInt(res || "0", 10) || 0
+   553→   553→                                if (n > 0) {
+   554→   554→                                    win.prependAt = Date.now()
+   555→   555→                                    win.lastLen = backend.candlesCount
+   556→   556→                                }
+   557→   557→                            })
+   558→   558→                return""",
+   559→   559→    """                            function (res) {
+   560→   560→                                /* مزامنة عدّاد الشموع حتى لا تُعاد تهيئة الشارت
+   561→   561→                                   بعد دمج الدفعة — العرض يبقى ثابتاً تماماً */
+   562→   562→                                var n = parseInt(res || "0", 10) || 0
+   563→   563→                                if (n > 0) {
+   564→   564→                                    win.prependAt = Date.now()
+   565→   565→                                    win.lastLen = backend.candlesCount
+   566→   566→                                    return
+   567→   567→                                }
+   568→   568→                                /* v14.8: دفعة تملأ ثغرة داخل المدى (ليست
+   569→   569→                                   أقدم من أول شمعة) — تُدمج في مكانها عبر
+   570→   570→                                   patchCandles بلا setData ولا إعادة ضبط
+   571→   571→                                   — لا دفعة تضيع بعد الآن */
+   572→   572→                                win.webCall("__badiApp.patchCandles("
+   573→   573→                                            + JSON.stringify(e.candles || []) + ")",
+   574→   574→                                            function (res2) {
+   575→   575→                                                var n2 = parseInt(res2 || "0", 10) || 0
+   576→   576→                                                if (n2 > 0) {
+   577→   577→                                                    win.prependAt = Date.now()
+   578→   578→                                                    win.lastLen = backend.candlesCount
+   579→   579→                                                }
+   580→   580→                                            })
+   581→   581→                            })
+   582→   582→                return""",
+   583→   583→    "A6 older fallback patchCandles",
+   584→   584→)
+   585→   585→
+   586→   586→io.open(APP_OUT, "w", encoding="utf-8").write(app)
+   587→   587→print(f"[ok] ONE-FILE app written -> {APP_OUT} ({len(app)} chars)")
+   588→   588→print("DONE")
+   589→   589→
