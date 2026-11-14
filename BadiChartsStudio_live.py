@@ -9317,34 +9317,85 @@ async def asset_payout_monitor():
         await asyncio.sleep(PAYOUT_REFRESH_INTERVAL)
 
 # ═══ 3) مرصد instruments فوق on_message الأصلي ═══
-# الأصل يعمل كاملاً أولاً حرفياً (_qx_orig_on_message(self, wss, msg)) ثم نلتقط
-# فقط 451-["instruments/list",[...]] لنوقظ من ينتظره — نفس كتلة v10 حرفياً.
+# الأصل يعمل كاملاً أولاً حرفياً (_qx_orig_on_message(self, wss, msg)) ثم نطبّق
+# **على مرحلتين** (نفس كتلة v14 المُجرّبة حرفياً — سبب ظهور قائمة العملات فارغة
+# في v15.0 كان أن المرصد هنا كان يعالج الصيغة المضمّنة فقط):
+#   الرد الرسمي على 42["instruments/get"] يصل كما يلي (سلوك المكتبة الرسمية):
+#     المرحلة 1: 451-["instruments/list",{...,"_placeholder":true,"num":0}]
+#                (رسالة تحكم تحمل placeholder فقط — بلا بيانات)
+#     المرحلة 2: إطار منفصل يحتوي JSON القائمة الفعلية
+# v15.1: المساران معاً — كما في v14 حرفياً.
 _qx_orig_on_message = WebsocketClient.on_message
 
 def _qx_on_message_with_instruments(self, wss, msg):
     _qx_orig_on_message(self, wss, msg)      # الأصل حرفياً — كل شيء كما هو
     try:
         msg_str = msg.decode("utf-8", errors="ignore") if isinstance(msg, bytes) else str(msg)
-        if "instruments/list" not in msg_str:
+
+        if "instruments/list" in msg_str and "_placeholder" in msg_str:
+            # المرحلة 1: نتذكر أننا ننتظر الإطار التالي الذي يحمل البيانات الفعلية
+            try:
+                self.api._temp_status = msg_str
+            except Exception:
+                pass
             return
-        _idx = msg_str.find('["')
-        if _idx == -1:
-            return
-        _payload = json.loads(msg_str[_idx:])
-        _data = _payload[1] if isinstance(_payload, list) and len(_payload) >= 2 else None
-        if isinstance(_data, dict) and "list" in _data:
-            _data = _data["list"]
-        if isinstance(_data, list) and _data:
-            self.api.instruments = _data
-            _loop = getattr(self.api, "_async_loop", None)
-            if _loop is not None and _loop.is_running():
-                asyncio.run_coroutine_threadsafe(
-                    self.api.event_registry.set_event("instruments_ready", _data),
-                    _loop,
-                )
-            logger.info(f"Instruments list received: {len(_data)} assets")
+
+        if "instruments/list" in msg_str:
+            # الصيغة المضمّنة (القائمة كاملة داخل نفس الرسالة) — خطة بديلة
+            try:
+                _idx = msg_str.find('["')
+                if _idx != -1:
+                    _payload = json.loads(msg_str[_idx:])
+                    _data = _payload[1] if isinstance(_payload, list) and len(_payload) >= 2 else None
+                    if isinstance(_data, dict) and "list" in _data:
+                        _data = _data["list"]
+                    if isinstance(_data, list) and _data:
+                        self.api.instruments = _data
+                        try:
+                            self.api._temp_status = ""
+                        except Exception:
+                            pass
+                        _loop = getattr(self.api, "_async_loop", None)
+                        if _loop is not None and _loop.is_running():
+                            asyncio.run_coroutine_threadsafe(
+                                self.api.event_registry.set_event("instruments_ready", _data),
+                                _loop,
+                            )
+                        logger.info(f"Instruments list received: {len(_data)} assets")
+            except Exception as _e:
+                logger.debug(f"instruments/list parse error: {_e}")
+
+        # المرحلة 2: تسليم القائمة الفعلية بعد placeholder (نفس سلوك المكتبة الرسمية)
+        try:
+            if getattr(self.api, "_temp_status", "") and "instruments/list" in self.api._temp_status:
+                _first_char = msg_str[0] if msg_str else ""
+                if _first_char and not _first_char.isdigit():
+                    _sidx = -1
+                    for _ci, _cc in enumerate(msg_str):
+                        if _cc in ("[", "{"):
+                            _sidx = _ci
+                            break
+                    if _sidx != -1:
+                        _payload = json.loads(msg_str[_sidx:])
+                        if (isinstance(_payload, list) and len(_payload) == 1
+                                and isinstance(_payload[0], (list, dict))):
+                            _payload = _payload[0]
+                        if isinstance(_payload, dict) and "list" in _payload:
+                            _payload = _payload["list"]
+                        if isinstance(_payload, list) and _payload:
+                            self.api.instruments = _payload
+                            self.api._temp_status = ""
+                            _loop = getattr(self.api, "_async_loop", None)
+                            if _loop is not None and _loop.is_running():
+                                asyncio.run_coroutine_threadsafe(
+                                    self.api.event_registry.set_event("instruments_ready", _payload),
+                                    _loop,
+                                )
+                            logger.info(f"Instruments list received: {len(_payload)} assets")
+        except Exception as _e:
+            logger.debug(f"instruments payload fulfillment error: {_e}")
     except Exception as _e:
-        logger.debug(f"instruments/list parse error: {_e}")
+        logger.debug(f"instruments/list observer error: {_e}")
 
 WebsocketClient.on_message = _qx_on_message_with_instruments
 
@@ -9359,6 +9410,11 @@ PRELOAD_FIRST_SYMBOL = ASSET_LIST[0] if ASSET_LIST else "BRLUSD_otc"
 _PRELOADED_INFO = {}
 V14_DEEP_REPAIRED = {}
 _QX_WINDOW_BUSY = False
+# v15.1 (طلب المستخدم): دائرة تحميل عند تحميل الشموع — حالة التحميل المسبق
+# المتسلسل (92 عملة واحدة تلو الأخرى) تُحدَّث هنا وترفعها المضخة للواجهة
+# حتى تختفي الدائرة عند انتهاء جلب الشموع.
+_QX_PRELOAD_STATUS = {"active": False, "idx": 0, "total": 0, "loaded": 0,
+                      "finished_at": 0.0}
 
 def apply_history_days(days_val):
     """تطبيق عدد أيام التاريخ بنفس آلية قائمة الأصل حرفياً (STAGE 3 وقائمة
@@ -9801,6 +9857,15 @@ async def preload_all_assets():
     total = len(symbols)
     logmsg(f"[preload] sequential preload: {total} assets, ONE after another "
            f"(history window {FETCH_DURATION_SECONDS}s each)")
+    # v15.1: بدء التحميل المسبق — الدائرة تظهر في الواجهة من هذه اللحظة
+    try:
+        _QX_PRELOAD_STATUS["active"] = True
+        _QX_PRELOAD_STATUS["idx"] = 0
+        _QX_PRELOAD_STATUS["total"] = int(total)
+        _QX_PRELOAD_STATUS["loaded"] = 0
+        _QX_PRELOAD_STATUS["finished_at"] = 0.0
+    except Exception:
+        pass
     loaded = 0
     streak = 0
     for idx, sym in enumerate(symbols, 1):
@@ -9838,10 +9903,24 @@ async def preload_all_assets():
         else:
             loaded += 1
         _PRELOADED_INFO[sym] = {"candles": len(asset.candles), "at": time.time()}
+        # v15.1: تحديث حالة الدائرة بعد كل عملة (واحدة تلو الأخرى)
+        try:
+            _QX_PRELOAD_STATUS["idx"] = int(idx)
+            _QX_PRELOAD_STATUS["loaded"] = int(loaded)
+        except Exception:
+            pass
         if idx % 10 == 0:
             logmsg(f"[preload] progress: {idx}/{total} assets ({loaded} loaded)")
         # فاصل بين عملة وأخرى — نفس الأصل: واحدة تلو الأخرى بلا تسرّع
         await asyncio.sleep(1.0 if PERIOD_SECONDS < 60 else FETCH_ASSET_DELAY)
+    # v15.1: انتهاء التحميل المسبق — الدائرة تختفي من الواجهة
+    try:
+        _QX_PRELOAD_STATUS["active"] = False
+        _QX_PRELOAD_STATUS["idx"] = int(total)
+        _QX_PRELOAD_STATUS["loaded"] = int(loaded)
+        _QX_PRELOAD_STATUS["finished_at"] = time.time()
+    except Exception:
+        pass
     logmsg(f"[preload] done: {loaded}/{total} assets loaded sequentially")
     return loaded
 
@@ -13950,7 +14029,17 @@ class Backend(QObject):
         if _tick_new:
             self._qx_tick_stamp = _stamp
         _board_due = (_now - getattr(self, "_qx_board_at", 0.0)) >= 2.0
-        if not _tick_new and not _board_due and not getattr(self, "_qx_resync_pending", False):
+        # v15.1 (طلب المستخدم): دائرة تحميل الشموع — أثناء التحميل المسبق
+        # المتسلسل المضخة تعمل (نبضة كل ثانية) حتى بلا تيك جديد، وبعدها 3 ثوانٍ
+        # لتضمن إخفاء الدائرة.
+        try:
+            _ps0 = getattr(qx, "_QX_PRELOAD_STATUS", {}) or {}
+            _pre_want = bool(_ps0.get("active")) or (
+                _now - float(_ps0.get("finished_at") or 0.0) <= 3.0)
+        except Exception:
+            _pre_want = False
+        if (not _tick_new and not _board_due and not _pre_want
+                and not getattr(self, "_qx_resync_pending", False)):
             return
         if _board_due:
             self._qx_board_at = _now
@@ -14006,6 +14095,29 @@ class Backend(QObject):
                     msg = (f"QX preload: {len(info)} assets loaded, {n_stream} streaming live"
                            + (f" | opener {opener}: {o['candles']} candles" if o else ""))
                     self._log("info", msg)
+        except Exception:
+            pass
+        # 4) v15.1 (طلب المستخدم): حالة دائرة تحميل الشموع — التحميل المسبق
+        #    المتسلسل (92 عملة واحدة تلو الأخرى). تُدفع للواجهة عند أي تغيير
+        #    + نبضة كل ثانية أثناء العمل، ونبضة أخيرة بعد الانتهاء حتى تختفي
+        #    الدائرة فوراً.
+        try:
+            _pst = dict(getattr(qx, "_QX_PRELOAD_STATUS", {}) or {})
+            _sig = (bool(_pst.get("active")), int(_pst.get("idx") or 0),
+                    int(_pst.get("total") or 0), int(_pst.get("loaded") or 0))
+            _emit_it = _sig != getattr(self, "_qx_pre_sig", None)
+            if not _emit_it and _sig[0]:
+                _emit_it = (_now - getattr(self, "_qx_pre_ev_at", 0.0)) >= 1.0
+            if not _emit_it and not _sig[0]:
+                _fin = float(_pst.get("finished_at") or 0.0)
+                if (_fin and _now - _fin <= 3.0
+                        and _now - getattr(self, "_qx_pre_ev_at", 0.0) >= 1.0):
+                    _emit_it = True
+            if _emit_it:
+                self._qx_pre_ev_at = _now
+                self._qx_pre_sig = _sig
+                self._emit_qx({"type": "preload", "active": _sig[0],
+                               "idx": _sig[1], "total": _sig[2], "loaded": _sig[3]})
         except Exception:
             pass
 
@@ -15273,12 +15385,45 @@ function chartLoadEl(pr) {
       CHLOAD.el.hidden = true;
     }
     var ar = window.__BADI_LANG__ === "ar";
+    var _sub = (PRELOAD.active && PRELOAD.total > 0)
+      ? ((ar ? "العملة " : "asset ") + Math.max(1, PRELOAD.idx) + "/" + PRELOAD.total)
+      : "700 candles";
     CHLOAD.el.innerHTML = '<div class="bl-ring"></div><div class="bl-txt">'
       + (ar ? "جارٍ جلب الشموع من الخادم…" : "Loading candles from server…")
-      + '</div><div class="bl-sub">300 candles</div>';
+      + '</div><div class="bl-sub">' + _sub + '</div>';
     var host = pr && pr.el ? pr.el.querySelector(".pane-cv") : null;
     if (host && CHLOAD.el.parentNode !== host) host.appendChild(CHLOAD.el);
     return CHLOAD.el;
+  } catch (e) { return null; }
+}
+/* ═══ v15.1 (طلب المستخدم): دائرة تحميل حتى ينتهي الخادم من جلب الشموع ═══
+   أثناء التحميل المسبق المتسلسل (92 عملة واحدة تلو الأخرى) تظهر دائرة صغيرة
+   في زاوية الشارت مع التقدّم (12/92) وتختفي عند الانتهاء. وعندما يكون الشارت
+   نفسه بلا شموع بعد تظهر دائرة الوسط أيضاً أثناء التحميل المسبق. */
+var PRELOAD = { active: false, idx: 0, total: 0, loaded: 0 };
+var PREBADGE = null;
+function preloadBadge(pr) {
+  try {
+    if (!PREBADGE) {
+      var st = document.createElement("style");
+      st.textContent = ".badi-pre{position:absolute;top:8px;right:10px;display:flex;align-items:center;gap:8px;z-index:7;pointer-events:none;background:rgba(10,14,22,.55);border:1px solid rgba(128,140,170,.25);border-radius:999px;padding:5px 12px 5px 8px}"
+        + ".badi-pre .bp-ring{width:18px;height:18px;border-radius:50%;border:2.5px solid rgba(128,140,170,.3);border-top-color:#3B8BFF;animation:badispin .9s linear infinite;flex:0 0 auto}"
+        + ".badi-pre .bp-txt{font:600 11px/1 system-ui,-apple-system,Segoe UI,sans-serif;letter-spacing:.3px;opacity:.85;white-space:nowrap}"
+        + "@keyframes badispin{to{transform:rotate(360deg)}}";
+      document.head.appendChild(st);
+      PREBADGE = document.createElement("div");
+      PREBADGE.className = "badi-pre";
+      PREBADGE.hidden = true;
+    }
+    var ar = window.__BADI_LANG__ === "ar";
+    var txt = PRELOAD.total > 0
+      ? (ar ? ("جارٍ جلب الشموع " + Math.max(1, PRELOAD.idx) + "/" + PRELOAD.total + "…")
+            : ("Loading candles " + Math.max(1, PRELOAD.idx) + "/" + PRELOAD.total + "…"))
+      : (ar ? "جارٍ جلب الشموع…" : "Loading candles…");
+    PREBADGE.innerHTML = '<div class="bp-ring"></div><div class="bp-txt">' + esc(txt) + '</div>';
+    var host = pr && pr.el ? pr.el.querySelector(".pane-cv") : null;
+    if (host && PREBADGE.parentNode !== host) host.appendChild(PREBADGE);
+    return PREBADGE;
   } catch (e) { return null; }
 }
 function renderChartLoading() {
@@ -15286,7 +15431,9 @@ function renderChartLoading() {
     var pr = window.__badiPrimary ? window.__badiPrimary() : null;
     var empty = !pr || !pr.dataArr || pr.dataArr.length === 0;
     var el = chartLoadEl(pr);
-    if (el) el.hidden = !(CHLOAD.on && empty);
+    if (el) el.hidden = !((CHLOAD.on || PRELOAD.active) && empty);
+    var bg = preloadBadge(pr);
+    if (bg) bg.hidden = !PRELOAD.active;
   } catch (e) {}
 }
 window.__badiMaybeLoadOlder = function (p, auto) {
@@ -16117,6 +16264,18 @@ function defineBadiApp() {
          العملة الحالية تُجلب من الخادم وتختفي فور وصولها — لا شارت أسود فارغ */
       try {
         CHLOAD.on = !!on;
+        renderChartLoading();
+      } catch (e) {}
+    },
+    setPreload: function (st) {
+      /* v15.1 (طلب المستخدم): دائرة تحميل عند تحميل الشموع — تبقى حتى ينتهي
+         الخادم من جلب شموع كل العملات واحدة تلو الأخرى ثم تختفي */
+      try {
+        st = st || {};
+        PRELOAD.active = !!st.active;
+        PRELOAD.idx = Number(st.idx || 0);
+        PRELOAD.total = Number(st.total || 0);
+        PRELOAD.loaded = Number(st.loaded || 0);
         renderChartLoading();
       } catch (e) {}
     },
@@ -17105,6 +17264,15 @@ ApplicationWindow {
             }
             if (e.type === "board") {
                 win.webCall("__badiApp.setBoard(" + JSON.stringify(e.board) + ")")
+                return
+            }
+            if (e.type === "preload") {
+                /* v15.1 (طلب المستخدم): دائرة تحميل عند تحميل الشموع — تبقى
+                   ظاهرة حتى ينتهي الخادم من جلب شموع كل العملات واحدة تلو
+                   الأخرى، ثم تختفي */
+                win.webCall("__badiApp.setPreload(" + JSON.stringify(
+                    { active: !!e.active, idx: e.idx || 0,
+                      total: e.total || 0, loaded: e.loaded || 0 }) + ")")
                 return
             }
             if (e.type === "resync") {
