@@ -1,0 +1,767 @@
+     1→# ═══════════════════════════════════════════════════════════════════════════
+     2→# ═══ طبقة ربط التطبيق (APP GLUE) — v15.0 «الأصل هو الخادم»                  ═══
+     3→# ═══════════════════════════════════════════════════════════════════════════
+     4→# هذا القسم يُضاف **فوق** كود الخادم الأصلي (الملصق حرفياً) دون تعديل أي سطر
+     5→# فيه. كل ما يلي ليس منطقاً جديداً ولا منطقاً معدّلاً — إنه مجرد جسور تمرّر
+     6→# طلبات التطبيق إلى آلة الخادم الأصلية نفسها كما هي حرفياً:
+     7→#   fetch_candles_with_retry / realtime_stream / MT4_WRITER.fill_gap_once /
+     8→#   _fill_missing_slots / _align_time / CLIENT.get_candles /
+     9→#   CLIENT._fetch_historical_batch / WriterThread / mt4_gap_filler ...
+    10→# (كود الخادم الأصلي أعلاه لم يُمَس بايت واحد — وهذا القسم يبدأ بعده مباشرة)
+    11→# ═══════════════════════════════════════════════════════════════════════════
+    12→
+    13→# ─── استيرادات الطبقة فقط (المحرك الأصلي لم يُمَس) ───
+    14→from collections import deque as _qx_deque
+    15→
+    16→# ═══ 1) النطاقات + البلد (نفس كتلة v10 الرسمية حرفياً) ═══
+    17→DEFAULT_DOMAIN_GLOBAL = "quotex.com"
+    18→DEFAULT_DOMAIN_BANGLADESH = "market-qx.info"
+    19→_GEO_CACHE = {"country": None, "checked_at": 0.0}
+    20→
+    21→def detect_country_code(timeout: float = 4.0):
+    22→    """يرجع رمز البلد فقط (مثل BD / SA / EG) عبر IP العام. لا يجلب أي موقع دقيق."""
+    23→    if _GEO_CACHE["country"] and time.time() - _GEO_CACHE["checked_at"] < 3600:
+    24→        return _GEO_CACHE["country"]
+    25→    endpoints = [
+    26→        ("http://ip-api.com/json/?fields=status,countryCode", lambda d: (d or {}).get("countryCode")),
+    27→        ("https://ipapi.co/json/", lambda d: (d or {}).get("country_code")),
+    28→        ("https://api.ip.sb/geoip", lambda d: (d or {}).get("country_code")),
+    29→    ]
+    30→    for url, extract in endpoints:
+    31→        try:
+    32→            r = requests.get(url, timeout=timeout, headers={"User-Agent": USER_AGENT})
+    33→            code = extract(r.json())
+    34→            if code:
+    35→                _GEO_CACHE["country"] = str(code).upper()
+    36→                _GEO_CACHE["checked_at"] = time.time()
+    37→                return _GEO_CACHE["country"]
+    38→        except Exception:
+    39→            continue
+    40→    return None
+    41→
+    42→def resolve_qx_host() -> str:
+    43→    """يحدد النطاق تلقائياً حسب البلد ويضبط QX_HOST العام:
+    44→    بنغلاديش -> market-qx.info ، أي دولة أخرى (أو فشل التعرف) -> quotex.com."""
+    45→    global QX_HOST
+    46→    country = detect_country_code()
+    47→    if country == "BD":
+    48→        QX_HOST = DEFAULT_DOMAIN_BANGLADESH
+    49→    else:
+    50→        QX_HOST = DEFAULT_DOMAIN_GLOBAL
+    51→    return QX_HOST
+    52→
+    53→# ═══ 2) قائمة العملات الكاملة + الدفع + الحالة (نفس كتلة v10 حرفياً) ═══
+    54→PAYOUT_REFRESH_INTERVAL = 60
+    55→try:
+    56→    ASSETS_PAYOUT_FILE = Path("qx_assets_payouts.json")
+    57→except Exception:
+    58→    ASSETS_PAYOUT_FILE = Path("qx_assets_payouts.json")
+    59→
+    60→def _instruments_snapshot():
+    61→    """يبني قائمة الأصول الكاملة (الاسم + نسبة الدفع + الحالة) من instruments."""
+    62→    if CLIENT is None or CLIENT.api is None:
+    63→        return []
+    64→    insts = getattr(CLIENT.api, "instruments", None) or []
+    65→    out = []
+    66→    for i in insts:
+    67→        try:
+    68→            if not isinstance(i, (list, tuple)) or len(i) < 6:
+    69→                continue
+    70→            entry = {
+    71→                "asset": str(i[1]) if len(i) > 1 else "",
+    72→                "name": str(i[2]).replace("\n", " ").strip() if len(i) > 2 else "",
+    73→                "payout": i[5] if len(i) > 5 else None,
+    74→            }
+    75→            try:
+    76→                entry["id"] = str(i[0])
+    77→            except Exception:
+    78→                entry["id"] = ""
+    79→            try:
+    80→                entry["turbo_payout"] = i[18] if len(i) > 18 else None
+    81→            except Exception:
+    82→                entry["turbo_payout"] = None
+    83→            try:
+    84→                entry["open"] = bool(i[14]) if len(i) > 14 else None
+    85→            except Exception:
+    86→                entry["open"] = None
+    87→            try:
+    88→                entry["profit_24h"] = i[-10]
+    89→            except Exception:
+    90→                entry["profit_24h"] = None
+    91→            try:
+    92→                entry["profit_1m"] = i[-9]
+    93→            except Exception:
+    94→                entry["profit_1m"] = None
+    95→            try:
+    96→                entry["profit_5m"] = i[-8]
+    97→            except Exception:
+    98→                entry["profit_5m"] = None
+    99→            out.append(entry)
+   100→        except Exception:
+   101→            continue
+   102→    return out
+   103→
+   104→def _save_assets_payout_file(entries):
+   105→    """يحفظ لقطة كاملة إلى qx_assets_payouts.json بجانب الملف."""
+   106→    try:
+   107→        payload = {
+   108→            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+   109→            "host": QX_HOST,
+   110→            "count": len(entries),
+   111→            "open_count": sum(1 for e in entries if e.get("open")),
+   112→            "closed_count": sum(1 for e in entries if e.get("open") is False),
+   113→            "assets": entries,
+   114→        }
+   115→        ASSETS_PAYOUT_FILE.write_text(
+   116→            json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+   117→        return True
+   118→    except Exception as e:
+   119→        logmsg(f"[payout] failed to save {ASSETS_PAYOUT_FILE}: {e}")
+   120→        return False
+   121→
+   122→async def fetch_instruments_now(timeout: float = 12.0):
+   123→    """طريقة pyquotex الرسمية: إرسال 42["instruments/get"] عبر نفس WebSocket
+   124→    والانتظار حتى وصول 451-["instruments/list"] ثم تخزينها في CLIENT.api.instruments.
+   125→    طريقة الدخول وطريقة جلب الشموع لا تتأثر إطلاقاً."""
+   126→    if CLIENT is None or CLIENT.api is None:
+   127→        return []
+   128→    try:
+   129→        await CLIENT.api.event_registry.clear_event("instruments_ready")
+   130→    except Exception:
+   131→        pass
+   132→    try:
+   133→        CLIENT.api.send_websocket_request('42["instruments/get"]')
+   134→    except Exception as e:
+   135→        logmsg(f"[payout] instruments request failed: {e}")
+   136→    data = await CLIENT.api.event_registry.wait_event("instruments_ready", timeout=timeout)
+   137→    if isinstance(data, dict) and data.get("_placeholder"):
+   138→        data = await CLIENT.api.event_registry.wait_event("instruments_ready", timeout=5.0)
+   139→    if isinstance(data, list) and data:
+   140→        CLIENT.api.instruments = data
+   141→    return list(getattr(CLIENT.api, "instruments", None) or [])
+   142→
+   143→def _print_payout_table(entries):
+   144→    """طباعة الجدول الكامل: العملة / نسبة الدفع / الحالة (مفتوح أو مغلق)."""
+   145→    open_entries = [e for e in entries if e.get("open")]
+   146→    closed_entries = [e for e in entries if e.get("open") is False]
+   147→    print(f"\n{Colors.CYAN}{'═' * 72}{Colors.RESET}")
+   148→    print(f"{Colors.BOLD}  FULL ASSET LIST — PAYOUT % — OPEN/CLOSED{Colors.RESET}")
+   149→    print(f"  Total: {len(entries)}  |  {Colors.GREEN}OPEN: {len(open_entries)}{Colors.RESET}"
+   150→          f"  |  {Colors.RED}CLOSED: {len(closed_entries)}{Colors.RESET}"
+   151→          f"  |  Domain: {QX_HOST}")
+   152→    print(f"{Colors.CYAN}{'─' * 72}{Colors.RESET}")
+   153→    print(f"  {'ASSET':<16}{'PAYOUT':>7}  {'TURBO':>6}  {'1M':>5}  {'5M':>5}  STATUS")
+   154→    print(f"{Colors.DIM}{'─' * 72}{Colors.RESET}")
+   155→    for e in entries:
+   156→        name = (e.get("asset") or "?")[:16]
+   157→        payout = e.get("payout")
+   158→        turbo = e.get("turbo_payout")
+   159→        p1 = e.get("profit_1m")
+   160→        p5 = e.get("profit_5m")
+   161→        payout_str = f"{payout}%" if isinstance(payout, (int, float)) else "-"
+   162→        turbo_str = f"{turbo}%" if isinstance(turbo, (int, float)) else "-"
+   163→        p1_str = f"{p1}%" if isinstance(p1, (int, float)) else "-"
+   164→        p5_str = f"{p5}%" if isinstance(p5, (int, float)) else "-"
+   165→        if e.get("open"):
+   166→            status = f"{Colors.GREEN}OPEN{Colors.RESET}"
+   167→        else:
+   168→            status = f"{Colors.RED}CLOSED{Colors.RESET}"
+   169→        print(f"  {name:<16}{payout_str:>7}  {turbo_str:>6}  {p1_str:>5}  {p5_str:>5}  {status}")
+   170→    print(f"{Colors.CYAN}{'═' * 72}{Colors.RESET}")
+   171→
+   172→async def asset_payout_monitor():
+   173→    """يجلب قائمة العملات الكاملة + نسبة الدفع + حالة الزوج (مفتوح/مغلق) مباشرة
+   174→    بعد تسجيل الدخول، يطبع الجدول مرة واحدة، يحفظ لقطة JSON، ثم يحدّث بهدوء
+   175→    كل PAYOUT_REFRESH_INTERVAL ثانية."""
+   176→    await asyncio.sleep(2.0)
+   177→    first = True
+   178→    last_signature = None
+   179→    while True:
+   180→        try:
+   181→            if CLIENT is None or CLIENT.api is None or not CONNECTION_ALIVE:
+   182→                await asyncio.sleep(5.0)
+   183→                continue
+   184→            entries = []
+   185→            try:
+   186→                await fetch_instruments_now(timeout=12.0)
+   187→                entries = _instruments_snapshot()
+   188→            except Exception as e:
+   189→                logmsg(f"[payout] refresh failed: {e}")
+   190→            if entries:
+   191→                _save_assets_payout_file(entries)
+   192→                signature = tuple(sorted(
+   193→                    (e.get("asset"), str(e.get("payout")), str(e.get("open")))
+   194→                    for e in entries))
+   195→                if first:
+   196→                    try:
+   197→                        _print_payout_table(entries)
+   198→                    except Exception:
+   199→                        pass
+   200→                    first = False
+   201→                elif signature != last_signature:
+   202→                    open_n = sum(1 for e in entries if e.get("open"))
+   203→                    closed_n = sum(1 for e in entries if e.get("open") is False)
+   204→                    logmsg(f"[payout] updated: {len(entries)} assets "
+   205→                           f"({open_n} open / {closed_n} closed) — snapshot saved")
+   206→                last_signature = signature
+   207→        except Exception as e:
+   208→            log_exception("asset_payout_monitor", e)
+   209→        await asyncio.sleep(PAYOUT_REFRESH_INTERVAL)
+   210→
+   211→# ═══ 3) مرصد instruments فوق on_message الأصلي ═══
+   212→# الأصل يعمل كاملاً أولاً حرفياً (_qx_orig_on_message(self, wss, msg)) ثم نلتقط
+   213→# فقط 451-["instruments/list",[...]] لنوقظ من ينتظره — نفس كتلة v10 حرفياً.
+   214→_qx_orig_on_message = WebsocketClient.on_message
+   215→
+   216→def _qx_on_message_with_instruments(self, wss, msg):
+   217→    _qx_orig_on_message(self, wss, msg)      # الأصل حرفياً — كل شيء كما هو
+   218→    try:
+   219→        msg_str = msg.decode("utf-8", errors="ignore") if isinstance(msg, bytes) else str(msg)
+   220→        if "instruments/list" not in msg_str:
+   221→            return
+   222→        _idx = msg_str.find('["')
+   223→        if _idx == -1:
+   224→            return
+   225→        _payload = json.loads(msg_str[_idx:])
+   226→        _data = _payload[1] if isinstance(_payload, list) and len(_payload) >= 2 else None
+   227→        if isinstance(_data, dict) and "list" in _data:
+   228→            _data = _data["list"]
+   229→        if isinstance(_data, list) and _data:
+   230→            self.api.instruments = _data
+   231→            _loop = getattr(self.api, "_async_loop", None)
+   232→            if _loop is not None and _loop.is_running():
+   233→                asyncio.run_coroutine_threadsafe(
+   234→                    self.api.event_registry.set_event("instruments_ready", _data),
+   235→                    _loop,
+   236→                )
+   237→            logger.info(f"Instruments list received: {len(_data)} assets")
+   238→    except Exception as _e:
+   239→        logger.debug(f"instruments/list parse error: {_e}")
+   240→
+   241→WebsocketClient.on_message = _qx_on_message_with_instruments
+   242→
+   243→# ═══ 4) إعدادات التطبيق على المحرك (نفس آلية قائمة الأصل نفسها) ═══
+   244→# القيم الافتراضية حسب طلب المستخدم: دفعة 700 شمعة (حتى 1000 من الإعدادات)
+   245→# وتاريخ 0.80 يوم لكل عملة.
+   246→PRELOAD_CANDLES = 700
+   247→PAGINATION_BATCH = 700
+   248→QX_HISTORY_DAYS = 0.80
+   249→ASSET_MAX_CANDLES = 45000
+   250→PRELOAD_FIRST_SYMBOL = ASSET_LIST[0] if ASSET_LIST else "BRLUSD_otc"
+   251→_PRELOADED_INFO = {}
+   252→V14_DEEP_REPAIRED = {}
+   253→_QX_WINDOW_BUSY = False
+   254→
+   255→def apply_history_days(days_val):
+   256→    """تطبيق عدد أيام التاريخ بنفس آلية قائمة الأصل حرفياً (STAGE 3 وقائمة
+   257→    «Change History days» في الكود الأصلي): هامش +15% على المدى، INITIAL_CANDLES
+   258→    من الأيام، وFETCH_DURATION_SECONDS من المدى مع الهامش — نفس الثلاثي الأصلي."""
+   259→    global HISTORY_DAYS, INITIAL_CANDLES, FETCH_DURATION_SECONDS, QX_HISTORY_DAYS
+   260→    try:
+   261→        d = float(days_val)
+   262→    except Exception:
+   263→        d = 0.80
+   264→    d = max(0.05, d)
+   265→    days_with_margin = d * 1.15
+   266→    try:
+   267→        INITIAL_CANDLES = max(int((d * 86400) / max(1, PERIOD_SECONDS)), 100)
+   268→    except Exception:
+   269→        INITIAL_CANDLES = 1000
+   270→    HISTORY_DAYS = days_with_margin
+   271→    FETCH_DURATION_SECONDS = int(86400 * days_with_margin)
+   272→    QX_HISTORY_DAYS = d
+   273→    return QX_HISTORY_DAYS
+   274→
+   275→# ═══ 5) سجل الأصول: نفس Asset الأصلي حرفياً (بلا أي حقن) ═══
+   276→def _get_or_create_asset(api):
+   277→    """يجلب أصل العملة من سجل البث أو ينشئه بـ Asset الأصلي نفسه."""
+   278→    sym = str(api or "").strip()
+   279→    if not sym:
+   280→        return None
+   281→    for a in ALL_STREAMING_ASSETS:
+   282→        try:
+   283→            if a.api_symbol == sym:
+   284→                return a
+   285→        except Exception:
+   286→            continue
+   287→    a = Asset(sym)
+   288→    ALL_STREAMING_ASSETS.append(a)
+   289→    return a
+   290→
+   291→def _apply_candles_to_asset(asset, unique):
+   292→    """كتابة الخط الكامل في ذاكرة الأصل (Asset الأصلي) + السعر الحي."""
+   293→    try:
+   294→        asset.candles = list(unique or [])
+   295→        if asset.candles:
+   296→            asset.price = asset.candles[-1]["close"]
+   297→        asset.mark_dirty()
+   298→    except Exception:
+   299→        pass
+   300→
+   301→async def ensure_asset_loaded(api):
+   302→    """عملة فُتح شارتها: البث الحي فوراً (realtime_stream الأصلية) ثم الجلب
+   303→    المباشر الأصلي fetch_candles_with_retry (كل ما يجلب فيه الأصل من تاريخ +
+   304→    جسر + سد فجوات + كتابة HST كما هي حرفياً). تعيد عدد الشموع في الذاكرة."""
+   305→    if CLIENT is None or CLIENT.api is None:
+   306→        return 0
+   307→    asset = _get_or_create_asset(api)
+   308→    if asset is None:
+   309→        return 0
+   310→    try:
+   311→        st = getattr(asset, "stream_task", None)
+   312→        if st is not None and hasattr(st, "done") and not st.done():
+   313→            pass
+   314→        else:
+   315→            asset.streaming = False
+   316→            asset.stream_task = asyncio.ensure_future(realtime_stream(asset))
+   317→    except Exception:
+   318→        try:
+   319→            asset.streaming = False
+   320→            asset.stream_task = asyncio.ensure_future(realtime_stream(asset))
+   321→        except Exception:
+   322→            pass
+   323→    if len(asset.candles) >= MIN_CANDLES_THRESHOLD:
+   324→        return len(asset.candles)
+   325→    try:
+   326→        await fetch_candles_with_retry(asset, max_retries=MAX_FETCH_RETRIES, idx=1, total=1)
+   327→    except Exception as e:
+   328→        logmsg(f"[ensure:{api}] fetch failed: {e}")
+   329→    return len(asset.candles)
+   330→
+   331→# ═══ 6) جسور الجلب — نفس دوال الأصل حرفياً ═══
+   332→def _format_raw_candles(raw):
+   333→    """تنسيق رد الخادم الرسمي: تحليل _parse_raw_candles الأصلي + محاذاة
+   334→    _align_time الأصلية + إزالة تكرار وترتيب — نفس حلقة التنسيق في
+   335→    fetch_candles_once الأصلية."""
+   336→    if not raw:
+   337→        return []
+   338→    parsed = _parse_raw_candles(raw)          # الأصل حرفياً
+   339→    formatted = []
+   340→    for c in parsed:
+   341→        try:
+   342→            aligned = _align_time(int(c["time"]))
+   343→            formatted.append({"time": aligned, "open": c["open"], "high": c["high"],
+   344→                              "low": c["low"], "close": c["close"],
+   345→                              "volume": int(c.get("volume", 0) or 0)})
+   346→        except Exception:
+   347→            continue
+   348→    seen, unique = set(), []
+   349→    for c in formatted:
+   350→        if c["time"] not in seen:
+   351→            seen.add(c["time"])
+   352→            unique.append(c)
+   353→    unique.sort(key=lambda x: x["time"])
+   354→    return unique
+   355→
+   356→async def qx_fetch_window_raw(api, end_ts, seconds, tf_sec, foreground=False, timeout=45.0):
+   357→    """بوابة الجلب الأمامية الواحدة — نداء CLIENT.get_candles الأصلي نفسه
+   358→    (المُجرّب والآمن). foreground يمنع اختلاط طلب العرض الحالي مع التحميل المسبق."""
+   359→    global _QX_WINDOW_BUSY
+   360→    if CLIENT is None or CLIENT.api is None:
+   361→        return []
+   362→    if foreground:
+   363→        for _ in range(int(max(1.0, float(timeout) * 10))):
+   364→            if not _QX_WINDOW_BUSY:
+   365→                break
+   366→            await asyncio.sleep(0.1)
+   367→    _QX_WINDOW_BUSY = True
+   368→    try:
+   369→        res = await asyncio.wait_for(
+   370→            CLIENT.get_candles(api, int(end_ts), int(max(60, seconds)), int(tf_sec)),
+   371→            timeout=float(timeout))
+   372→        return list(res or [])
+   373→    except Exception:
+   374→        return []
+   375→    finally:
+   376→        _QX_WINDOW_BUSY = False
+   377→
+   378→async def fetch_older_batch(api, before_ts, batch=300):
+   379→    """دفعة أقدم للتمرير للخلف — نداء CLIENT.get_candles الأصلي بمرساة before_ts،
+   380→    والدمج في ذاكرة الأصل بلا تقليص (setdefault: القديم الناقص فقط يُضاف)."""
+   381→    if CLIENT is None or CLIENT.api is None:
+   382→        return 0
+   383→    psec = max(1, int(PERIOD_SECONDS))
+   384→    batch = max(50, int(batch or 300))
+   385→    try:
+   386→        res = await asyncio.wait_for(
+   387→            CLIENT.get_candles(api, int(before_ts), batch * psec, psec), timeout=45.0)
+   388→    except Exception:
+   389→        return 0
+   390→    if not res:
+   391→        return 0
+   392→    candles = [c for c in res
+   393→               if isinstance(c, dict) and int(c.get("time", 0) or 0) < int(before_ts)]
+   394→    if not candles:
+   395→        return 0
+   396→    asset = _get_or_create_asset(api)
+   397→    if asset is None:
+   398→        return 0
+   399→    merged_map = {c["time"]: c for c in asset.candles}
+   400→    for c in candles:
+   401→        merged_map.setdefault(c["time"], c)
+   402→    merged = sorted(merged_map.values(), key=lambda x: x["time"])
+   403→    asset.candles = merged[-int(ASSET_MAX_CANDLES):]
+   404→    if asset.candles:
+   405→        asset.price = asset.candles[-1]["close"]
+   406→    asset.mark_dirty()
+   407→    return len(candles)
+   408→
+   409→async def qx_get_historical_batches(asset, amount_of_seconds, period, timeout=30,
+   410→                                    max_workers=5, batch_callback=None):
+   411→    """نفس طريقة الأصل get_historical_candles بكل تفاصيلها (نفس
+   412→    CLIENT._fetch_historical_batch الأصلية، نفس chunk=period×FETCH_CHUNK_SIZE،
+   413→    نفس عدد العمال max_workers، نفس الرجوع للخلف ونفس قاعدة 3 فشل، نفس
+   414→    FETCH_BATCH_DELAY) — الفرق الوحيد: كل دفعة تُسلَّم فور وصولها عبر
+   415→    batch_callback(batch, worker_id) ليرفعها التطبيق إلى الشارت حية."""
+   416→    if CLIENT is None or CLIENT.api is None:
+   417→        return []
+   418→    max_workers = max_workers or 1
+   419→    chunk_seconds = period * FETCH_CHUNK_SIZE
+   420→    all_candles = {}
+   421→    current_time = int(time.time())
+   422→    target_start_time = current_time - amount_of_seconds
+   423→    block_size = max(1, amount_of_seconds // max_workers)
+   424→    semaphore = asyncio.Semaphore(max_workers)
+   425→
+   426→    async def worker(start_t, end_t, worker_id):
+   427→        worker_candles = {}
+   428→        async with semaphore:
+   429→            oldest_t = start_t
+   430→            consecutive_failures_in_worker = 0
+   431→            while oldest_t > end_t:
+   432→                if not CLIENT or not getattr(getattr(CLIENT, "api", None), "state", None) \
+   433→                        or not getattr(CLIENT.api.state, "check_accepted_connection", False):
+   434→                    break
+   435→                index = next(_request_counter)
+   436→                batch_data = await CLIENT._fetch_historical_batch(
+   437→                    asset, oldest_t, chunk_seconds, period, index, timeout)
+   438→                if not batch_data:
+   439→                    oldest_t -= chunk_seconds
+   440→                    consecutive_failures_in_worker += 1
+   441→                    if consecutive_failures_in_worker >= 3:
+   442→                        break
+   443→                    await asyncio.sleep(FETCH_BATCH_DELAY * 2)
+   444→                    continue
+   445→                consecutive_failures_in_worker = 0
+   446→                new_batch = CLIENT._parse_historical_candles(batch_data)
+   447→                if not new_batch:
+   448→                    oldest_t -= chunk_seconds
+   449→                    continue
+   450→                batch_times = []
+   451→                for c in new_batch:
+   452→                    ts = c["time"]
+   453→                    if ts >= end_t and ts <= start_t:
+   454→                        worker_candles[ts] = c
+   455→                        batch_times.append(ts)
+   456→                if not batch_times:
+   457→                    oldest_t -= chunk_seconds
+   458→                    continue
+   459→                batch_times.sort()
+   460→                new_oldest = batch_times[0]
+   461→                if batch_callback:
+   462→                    try:
+   463→                        batch_callback([worker_candles[t] for t in batch_times], worker_id)
+   464→                    except Exception:
+   465→                        pass
+   466→                oldest_t = new_oldest if new_oldest < oldest_t else oldest_t - chunk_seconds
+   467→                await asyncio.sleep(FETCH_BATCH_DELAY)
+   468→        return list(worker_candles.values())
+   469→
+   470→    try:
+   471→        await CLIENT.start_candles_stream(asset, period)
+   472→    except Exception:
+   473→        pass
+   474→    tasks = []
+   475→    for i in range(max_workers):
+   476→        s = current_time - (i * block_size)
+   477→        e = max(target_start_time, s - block_size)
+   478→        tasks.append(worker(s, e, i))
+   479→    results = await asyncio.gather(*tasks)
+   480→    for batch in results:
+   481→        for c in batch:
+   482→            all_candles[c["time"]] = c
+   483→    return sorted(all_candles.values(), key=lambda x: x["time"])
+   484→
+   485→async def v14_deep_gap_seal(api, reason=""):
+   486→    """السد العميق: مرساة عند أقدم شمعة اصطناعية (volume==0) — نداء الجلب
+   487→    الأصلي CLIENT.get_candles يعيد شموعاً حقيقية تُستبدل بالشرطات المسطحة داخل
+   488→    نافذة محدودة (حتى 200 شمعة) دون لمس الشمعة الحية ولا تقليص الذاكرة."""
+   489→    if CLIENT is None or CLIENT.api is None:
+   490→        return 0
+   491→    asset = _get_or_create_asset(api)
+   492→    if asset is None or len(asset.candles) < 2:
+   493→        return 0
+   494→    psec = max(1, int(PERIOD_SECONDS))
+   495→    cur_start = _align_time(int(time.time()))
+   496→    art = [c for c in asset.candles
+   497→           if int(c.get("volume", 1) or 0) == 0 and c["time"] < cur_start]
+   498→    if not art:
+   499→        return 0
+   500→    oldest = min(c["time"] for c in art)
+   501→    span = max(1, (cur_start - oldest) // psec)
+   502→    window = min(200, span + 10)
+   503→    try:
+   504→        res = await asyncio.wait_for(
+   505→            CLIENT.get_candles(api, cur_start + psec, window * psec, psec),
+   506→            timeout=30.0)
+   507→    except Exception:
+   508→        return 0
+   509→    if not res:
+   510→        return 0
+   511→    real = {}
+   512→    for c in res:
+   513→        if isinstance(c, dict) and int(c.get("time", 0) or 0) > 0:
+   514→            real[int(c["time"])] = c
+   515→    if not real:
+   516→        return 0
+   517→    merged = []
+   518→    for c in asset.candles:
+   519→        if c["time"] >= cur_start:
+   520→            merged.append(c)                      # الشمعة الحية لا تُلمس
+   521→            continue
+   522→        r = real.get(c["time"])
+   523→        if r is not None and int(c.get("volume", 1) or 0) == 0:
+   524→            merged.append(dict(r))
+   525→        else:
+   526→            merged.append(c)
+   527→    have = {c["time"] for c in merged}
+   528→    for t, r in real.items():
+   529→        if t not in have and t < cur_start:
+   530→            merged.append(dict(r))
+   531→    merged.sort(key=lambda x: x["time"])
+   532→    asset.candles = merged[-int(ASSET_MAX_CANDLES):]
+   533→    if asset.candles:
+   534→        asset.price = asset.candles[-1]["close"]
+   535→    asset.mark_dirty()
+   536→    V14_DEEP_REPAIRED[api] = time.time()
+   537→    return len(real)
+   538→
+   539→# ═══ 7) التيكات في الذاكرة (فريمات الثواني S5..S30) — الأصل لم يُمَس ═══
+   540→_TICK_CACHE = {}
+   541→_TICK_QUEUE_MAX = 4096
+   542→_TICK_MAX_AGE = 300.0      # 5 دقائق — ذاكرة فقط
+   543→
+   544→async def tick_cache_collector():
+   545→    """يلتقط كل تيك يصل (realtime_candles الأصلية — يتحدث عند كل تيك) في ذاكرة
+   546→    كل عملة بث حي، بلا أي كتابة على القرص. يبني منه التطبيق فريمات الثواني."""
+   547→    while True:
+   548→        try:
+   549→            if CLIENT is not None and getattr(CLIENT, "api", None) is not None:
+   550→                rc = getattr(CLIENT.api, "realtime_candles", {}) or {}
+   551→                for sym, tick in list(rc.items()):
+   552→                    if not isinstance(tick, (list, tuple)) or len(tick) < 3:
+   553→                        continue
+   554→                    try:
+   555→                        ts, price = int(tick[1]), float(tick[2])
+   556→                    except Exception:
+   557→                        continue
+   558→                    if price <= 0 or ts <= 0:
+   559→                        continue
+   560→                    q = _TICK_CACHE.get(sym)
+   561→                    if q is None:
+   562→                        q = _qx_deque(maxlen=_TICK_QUEUE_MAX)
+   563→                        _TICK_CACHE[sym] = q
+   564→                    if q and q[-1][0] == ts and q[-1][1] == price:
+   565→                        continue
+   566→                    q.append((ts, price))
+   567→        except Exception:
+   568→            pass
+   569→        await asyncio.sleep(0.05)
+   570→
+   571→async def tick_retention_loop():
+   572→    """حذف التيكات الأقدم من 5 دقائق (ذاكرة فقط)."""
+   573→    while True:
+   574→        try:
+   575→            now = time.time()
+   576→            for sym, q in list(_TICK_CACHE.items()):
+   577→                while q and (now - q[0][0]) > _TICK_MAX_AGE:
+   578→                    q.popleft()
+   579→                if not q:
+   580→                    _TICK_CACHE.pop(sym, None)
+   581→        except Exception:
+   582→            pass
+   583→        await asyncio.sleep(30.0)
+   584→
+   585→async def candlestore_trim_loop():
+   586→    """تشذيب candles.db بهدوء: الاحتفاظ بأحدث 5000 شمعة لكل رمز معروف
+   587→    + نقطة تحقق WAL كل ساعات — حماية القرص دون أي مساس بالجلب."""
+   588→    while True:
+   589→        try:
+   590→            store = MT4_WRITER.candle_store
+   591→            conn = store._get_write_conn()
+   592→            try:
+   593→                syms = set()
+   594→                try:
+   595→                    syms.update(str(k) for k in MT4_WRITER._gap_filled.keys())
+   596→                except Exception:
+   597→                    pass
+   598→                for a in list(ALL_STREAMING_ASSETS):
+   599→                    try:
+   600→                        syms.add(str(a.symbol))
+   601→                    except Exception:
+   602→                        pass
+   603→                for sym in syms:
+   604→                    try:
+   605→                        conn.execute(
+   606→                            "DELETE FROM candles WHERE symbol=? AND time <= "
+   607→                            "(SELECT time FROM candles WHERE symbol=? "
+   608→                            "ORDER BY time DESC LIMIT 1 OFFSET 5000)",
+   609→                            (sym, sym))
+   610→                    except Exception:
+   611→                        pass
+   612→                conn.commit()
+   613→            finally:
+   614→                try:
+   615→                    conn.close()
+   616→                except Exception:
+   617→                    pass
+   618→        except Exception:
+   619→            pass
+   620→        await asyncio.sleep(6 * 3600.0)
+   621→
+   622→# ═══ 8) علامات تجمّد السد — نفس مخازن الأصل حرفياً ═══
+   623→def clear_gap_flag_any(variants):
+   624→    """رفع علامة التجمّد عن رمز بأي صيغة تخزين ممكنة (الذاكرة + candles.db)."""
+   625→    syms = [str(v or "").strip() for v in (variants or []) if str(v or "").strip()]
+   626→    for sym in syms:
+   627→        try:
+   628→            MT4_WRITER._gap_filled[sym] = False
+   629→        except Exception:
+   630→            pass
+   631→        try:
+   632→            MT4_WRITER._gap_filled_at.pop(sym, None)
+   633→        except Exception:
+   634→            pass
+   635→        try:
+   636→            MT4_WRITER.candle_store.set_gap_filled(sym, False)
+   637→        except Exception:
+   638→            pass
+   639→
+   640→def reset_gap_flags():
+   641→    """تصفير علامات التجمّد في الذاكرة (نفس مخازن MT4_WRITER الأصلية)."""
+   642→    try:
+   643→        for sym in list(MT4_WRITER._gap_filled.keys()):
+   644→            MT4_WRITER._gap_filled[sym] = False
+   645→    except Exception:
+   646→        pass
+   647→    try:
+   648→        MT4_WRITER._gap_filled_at.clear()
+   649→    except Exception:
+   650→        pass
+   651→
+   652→# ═══ 9) التحميل المسبق المتسلسل — «ضع كل العملات واحدة تلو الأخرى» ═══
+   653→async def preload_all_assets():
+   654→    """التحميل المسبق المتسلسل لكل العملات المفتوحة **واحدة تلو الأخرى** —
+   655→    نفس تدفق الكتلة الرئيسية للأصل حرفياً لكل عملة:
+   656→      realtime_stream أولاً (يجمع التيك أثناء الجلب) ← fetch_candles_with_retry
+   657→      الأصلية (تاريخ FETCH_DURATION_SECONDS + الجسر + سد الفجوات + HST) ←
+   658→      فاصل بين عملة وأخرى.
+   659→    فاتحة الشارت أولاً (BRLUSD_otc) ثم بقية العملات المفتوحة من instruments
+   660→    بالترتيب. كل عملة تُسجَّل في _PRELOADED_INFO لحالة التحميل في الواجهة."""
+   661→    if CLIENT is None or CLIENT.api is None:
+   662→        return 0
+   663→    # اطلب قائمة instruments مرة واحدة (الطريقة الرسمية) وانتظر وصولها باختصار
+   664→    try:
+   665→        await fetch_instruments_now(timeout=12.0)
+   666→    except Exception:
+   667→        pass
+   668→    try:
+   669→        await wait_until(lambda: bool(_instruments_snapshot()),
+   670→                         timeout=15.0, poll_interval=0.5)
+   671→    except asyncio.TimeoutError:
+   672→        pass
+   673→    symbols, seen = [], set()
+   674→    opener = PRELOAD_FIRST_SYMBOL
+   675→    if opener:
+   676→        symbols.append(opener)
+   677→        seen.add(opener)
+   678→    entries = _instruments_snapshot()
+   679→    for e in entries:
+   680→        sym = str((e or {}).get("asset") or "").strip()
+   681→        if not sym or sym in seen:
+   682→            continue
+   683→        if e.get("open") is False:
+   684→            continue        # المغلقة الآن لا بث حي لها — تُحمّل عند فتح شارتها
+   685→        symbols.append(sym)
+   686→        seen.add(sym)
+   687→    if len(symbols) <= 1:
+   688→        # fallback: قائمة الأصل الافتراضية ASSET_LIST كما هي
+   689→        for sym in list(ASSET_LIST):
+   690→            if sym not in seen:
+   691→                symbols.append(sym)
+   692→                seen.add(sym)
+   693→    total = len(symbols)
+   694→    logmsg(f"[preload] sequential preload: {total} assets, ONE after another "
+   695→           f"(history window {FETCH_DURATION_SECONDS}s each)")
+   696→    loaded = 0
+   697→    streak = 0
+   698→    for idx, sym in enumerate(symbols, 1):
+   699→        if not CONNECTION_ALIVE or CLIENT is None or CLIENT.api is None:
+   700→            logmsg(f"[preload] connection lost at {idx}/{total}; waiting reconnect…")
+   701→            try:
+   702→                await wait_until(
+   703→                    lambda: CONNECTION_ALIVE and CLIENT is not None and CLIENT.api is not None,
+   704→                    timeout=30.0, poll_interval=0.5)
+   705→            except asyncio.TimeoutError:
+   706→                streak += 1
+   707→                if streak >= MAX_RECONNECTS_DURING_FETCH:
+   708→                    logmsg("[preload] giving up after repeated disconnects")
+   709→                    break
+   710→                continue
+   711→        streak = 0
+   712→        asset = _get_or_create_asset(sym)
+   713→        if asset is None:
+   714→            continue
+   715→        try:
+   716→            st = getattr(asset, "stream_task", None)
+   717→            if st is None or (hasattr(st, "done") and st.done()):
+   718→                asset.streaming = False
+   719→                asset.stream_task = asyncio.ensure_future(realtime_stream(asset))
+   720→        except Exception:
+   721→            pass
+   722→        if len(asset.candles) < MIN_CANDLES_THRESHOLD:
+   723→            try:
+   724→                n, _att = await fetch_candles_with_retry(
+   725→                    asset, max_retries=MAX_FETCH_RETRIES, idx=idx, total=total)
+   726→                if n >= MIN_CANDLES_THRESHOLD:
+   727→                    loaded += 1
+   728→            except Exception as e:
+   729→                logmsg(f"[preload] {sym}: {str(e)[:80]}")
+   730→        else:
+   731→            loaded += 1
+   732→        _PRELOADED_INFO[sym] = {"candles": len(asset.candles), "at": time.time()}
+   733→        if idx % 10 == 0:
+   734→            logmsg(f"[preload] progress: {idx}/{total} assets ({loaded} loaded)")
+   735→        # فاصل بين عملة وأخرى — نفس الأصل: واحدة تلو الأخرى بلا تسرّع
+   736→        await asyncio.sleep(1.0 if PERIOD_SECONDS < 60 else FETCH_ASSET_DELAY)
+   737→    logmsg(f"[preload] done: {loaded}/{total} assets loaded sequentially")
+   738→    return loaded
+   739→
+   740→def v14_print_banner():
+   741→    try:
+   742→        print("[QX] engine = الخادم الأصلي مدمجاً حرفياً + طبقة ربط التطبيق "
+   743→              "(منطق الخادم لم يُغيَّر)")
+   744→    except Exception:
+   745→        pass
+   746→
+   747→def v14_build_background_loops():
+   748→    """كل حلقات الأصل الخلفية تعمل أصلاً (health_monitor/auto_reconnect/
+   749→    keepalive_loop/stale_message_watchdog/asset_payout_monitor/preload/
+   750→    mt4_gap_filler/tick_cache_collector/...) — لا حلقات إضافية هنا."""
+   751→    return []
+   752→
+   753→def v14_supervise(name, factory):
+   754→    """مشرف مباشر: يُمرّر كوروتين الحلقة كما هو (احتياط — لا يُستدعى حالياً)."""
+   755→    async def _sup():
+   756→        try:
+   757→            coro = factory()
+   758→            if coro is not None:
+   759→                await coro
+   760→        except Exception as e:
+   761→            try:
+   762→                logmsg(f"[supervise:{name}] {e}")
+   763→            except Exception:
+   764→                pass
+   765→    return _sup()
+   766→
+   767→
