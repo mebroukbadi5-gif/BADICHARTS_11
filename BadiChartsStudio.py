@@ -363,8 +363,9 @@ svg{vertical-align:middle;flex-shrink:0}
 .am-row .aflag{width:24px;height:13px;flex-shrink:0}
 .am-row b{flex:1;min-width:0;font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .am-row .apay{font-style:normal;font-size:10px;font-weight:800;color:var(--ok);flex-shrink:0}
-.am-tog{display:grid;width:20px;height:20px;flex-shrink:0;place-items:center;border-radius:6px;border:1px solid var(--border2);color:var(--t-dim)}
+.am-tog{display:grid;width:20px;height:20px;flex-shrink:0;place-items:center;border-radius:6px;border:1px solid var(--border2);color:var(--t-dim);cursor:pointer}
 .am-tog.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.am-tog:hover{border-color:var(--accent)}
 </style>
 </head>
 <body>
@@ -2171,7 +2172,8 @@ function openAssetChart(name) {
   }
 }
 const pickAsset = openAssetChart;           /* bridge compat alias */
-/* currency list popup (+ button): search box + add/remove rows */
+/* currency list popup (+ button): click a currency row = add it to the bar AND open its chart
+   (طلب المستخدم: الاثنان معًا لا إضافة فقط) — the small tog icon toggles the strip only */
 function renderAssetMenu() {
   const box = $("amList");
   if (!box) return;
@@ -2181,12 +2183,18 @@ function renderAssetMenu() {
   box.innerHTML = rows.map((it) => {
     const on = addedNames().indexOf(it.name) >= 0;
     const open = (typeof badiMarketOpen === "function") ? badiMarketOpen(it.name) : true;
-    return '<button class="am-row" data-am="' + esc(it.name) + '" title="' + (on ? "Remove from the bar" : "Add to the bar") + '">'
+    /* الضغط على العملة نفسها في القائمة = الاثنان معًا: تُضاف إلى الشريط إن لم تكن عليه ثم يُفتح شارتها (طلب المستخدم).
+       أيقونة التبديل الصغيرة تبقى لإضافة/إزالة العملة من الشريط فقط دون فتح الشارت. */
+    const rowT = ar ? ("افتح شارت " + it.name + " ويُضاف إلى الشريط") : ("Open the " + it.name + " chart and add it to the bar");
+    const togT = ar ? (on ? "إزالة " + it.name + " من الشريط" : "إضافة " + it.name + " إلى الشريط")
+                    : (on ? "Remove " + it.name + " from the bar" : "Add " + it.name + " to the bar");
+    return '<button class="am-row" data-am="' + esc(it.name) + '" title="' + esc(rowT) + '">'
       + (it.flag ? '<img class="aflag" src="' + it.flag + '" alt="">' : "")
       + "<b>" + esc(it.name) + "</b>"
       + '<i class="apay">' + Number(it.payout || 0) + "%</i>"
       + '<i class="amstate ' + (open ? "open" : "closed") + '">' + (ar ? (open ? "مفتوح" : "مغلوق") : (open ? "Open" : "Closed")) + "</i>"
-      + '<span class="am-tog' + (on ? " on" : "") + '">' + icon(on ? "check" : "plus", 11) + "</span></button>";
+      + '<span class="am-tog' + (on ? " on" : "") + '" data-amtog="' + esc(it.name) + '" title="' + esc(togT) + '">'
+      + icon(on ? "check" : "plus", 11) + "</span></button>";
   }).join("") || '<p class="aempty" style="padding:8px">No currency matches the search</p>';
 }
 function assetMenuOpen() { $("assetMenu").hidden = false; renderAssetMenu(); try { $("amSearch").focus(); } catch (e) {} }
@@ -2446,7 +2454,8 @@ function bindEvents() {
     const c = e.target.closest("[data-asset]");
     if (c) openAssetChart(c.dataset.asset);
   });
-  /* currency list popup: + opener, search box, add/remove rows, click-outside closes */
+  /* currency list popup: + opener, search box, row click = add to the bar + open chart,
+     tog icon = strip only, click-outside closes */
   $("assetAdd").addEventListener("click", function (e) {
     e.stopPropagation();
     if ($("assetMenu").hidden) assetMenuOpen(); else assetMenuClose();
@@ -2455,7 +2464,14 @@ function bindEvents() {
   $("amSearch").addEventListener("input", renderAssetMenu);
   $("amList").addEventListener("click", function (e) {
     const r = e.target.closest("[data-am]");
-    if (r) toggleAsset(r.dataset.am);
+    if (!r) return;
+    const n = r.dataset.am;
+    /* أيقونة التبديل الصغيرة = إضافة/إزالة من الشريط فقط بلا فتح الشارت */
+    if (e.target.closest("[data-amtog]")) { toggleAsset(n); return; }
+    /* الضغط على العملة نفسها = الاثنان معًا: تُضاف إلى الشريط إن لم تكن عليه ثم يُفتح شارتها فورًا (طلب المستخدم) */
+    if (addedNames().indexOf(n) < 0) toggleAsset(n);
+    assetMenuClose();
+    openAssetChart(n);
   });
   document.addEventListener("click", function (e) {
     if (!$("assetMenu").hidden && !e.target.closest("#assetMenu") && !e.target.closest("#assetAdd")) assetMenuClose();
