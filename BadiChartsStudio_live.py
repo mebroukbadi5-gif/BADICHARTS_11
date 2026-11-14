@@ -3282,39 +3282,64 @@ from PySide6.QtWebEngineQuick import QtWebEngineQuick
 #     لكل عملة+فريم، ودمج الدفعة موسوماً بالعملة والفريم فلا يختلط، وإعادة
 #     طلب تلقائية ما دمت متعمقاً في التاريخ.
 #   • التيكات في الذاكرة فقط وتُحذف بعد 5 دقائق (سياسة الخادم نفسها).
-# ═════════════ v14.8: كود واحد — المحرك مدمج داخل هذا الملف ═════════════
-# طلب المستخدم حرفياً: «يجب ان يكون كود واحد وليس يحمل كود ثاني».
-# كل كود محرك Quotex موجود أدناه في النص الخام _QX_ENGINE_SOURCE ويُنفَّذ
-# في مساحة أسماء وحدّة عند الإقلاع — التطبيق لا يحمّل أي ملف ثانٍ ولا
-# يحتاج qx_server_v14.py أو qx_server_v13.py بجانبه أبداً.
+# ═════════════ v16: «الدمج الأصلي البسيط» — محرك واحد بلا طبقات ═════════════
+# طلب المستخدم حرفياً: «عليك ان تدمج هذا الكود بالتطبيق انزع اي جزء محرك
+# شموع اخر او الية سد ثغرات اخرى فقط ابقي اكتشاف اي نطاق يعمل به وابقي طريقة
+# جلب قائمة العملات وادمج هذا به ونزع جزء mt4 وفقط دون تعقيد».
+#
+# ما في هذا الملف الآن:
+#   • المحرك الأصلي المدمج كاملاً (_QX_ENGINE_SOURCE أدناه) — دوال الجلب
+#     (fetch_candles_with_retry / get_historical_candles المتوازية 5 عمال /
+#     الجسر / دمج التيك) وآلة السد (fill_gap_once / _fill_missing_slots)
+#     مطابقة byte-by-byte للكود الأصلي المرفوع — لا تغيير أبداً.
+#   • نزع جزء MT4 كلياً: لا نوافذ MT4 ولا HST ولا WriterThread ولا
+#     mt4_config.json/mt4_digits.json — لا يُكتب أي ملف شموع على القرص.
+#   • نزع كل محرك شموع آخر وكل آلية سد أخرى من طبقة الربط: لا سلسلة دفعات
+#     (chain)، لا سد عميق، لا محاولات سد متكررة، لا تحميل مسبق خلفي.
+#   • المسار الواحد لكل عملة تُفتح: دائرة تحميل فوق الشارت ← البث الحي
+#     الأصلي ← الجلب الأصلي (700 افتراضياً حتى 1000 — آلية STAGE 3 الأصلية
+#     INITIAL_CANDLES + هامش +15%) ← سد الأصل fill_gap_once نداء واحد ←
+#     ثم فقط تُدفع الشموع للشارت وتُطفأ الدائرة (لا شموع قبل اكتمال الاثنين).
+#   • المُبقي كما هو: اكتشاف النطاق (resolve_qx_host + DOMAINS) وطريقة جلب
+#     قائمة العملات (_instruments_snapshot) — لم تُمَس بايت واحد.
+#   • حفظ البريد «تذكّرني»: إصلاح v15.2 باقٍ + تهيئة المحرك مبكراً بخيط
+#     خلفي + إشارة QML تملأ الحقل فور جاهزية المحرك.
+#   • كود واحد: كل كود المحرك في النص الخام _QX_ENGINE_SOURCE ويُنفَّذ
+#     في مساحة أسماء وحدّة عند الإقلاع — لا ملف ثانٍ بجانبه أبداً.
 _QX_MOD = None
+_QX_INIT_LOCK = threading.Lock()   # v16: تهيئة واحدة فقط حتى مع خيوط متعددة
 
 
 def _qx_module():
     """المحرك المدمج (كود واحد): يُنفَّذ مرة واحدة في مساحة أسماء معزولة
     ويعيد وحدة تحمل كل رموز المحرك (CLIENT, ASYNC_LOOP, MT4_WRITER,
-    get_historical_candles, _fill_missing_slots, ...) دون أي ملف خارجي."""
+    get_historical_candles, _fill_missing_slots, ...) دون أي ملف خارجي.
+    v16: قفل تهيئة — خيط التهيئة المبكرة (البريد المحفوظ) وواجهة QML لا
+    ينفّذان الوحدة مرتين أبداً."""
     global _QX_MOD
     if _QX_MOD is not None:
         return _QX_MOD or None
-    try:
-        import types as _types
-        _mod = _types.ModuleType("qx_embedded_engine")
-        _mod.__file__ = os.path.abspath(__file__)
-        _mod.__name__ = "qx_embedded_engine"
-        exec(compile(_QX_ENGINE_SOURCE, "qx_embedded_engine", "exec"), _mod.__dict__)
-        sys.modules["qx_embedded_engine"] = _mod
+    with _QX_INIT_LOCK:
+        if _QX_MOD is not None:
+            return _QX_MOD or None
         try:
-            _mod.DEBUG_LOGS = False
-        except Exception:
-            pass
-        _QX_MOD = _mod
-    except Exception as _e:
-        try:
-            print("[QX] embedded engine init failed: " + str(_e))
-        except Exception:
-            pass
-        _QX_MOD = False
+            import types as _types
+            _mod = _types.ModuleType("qx_embedded_engine")
+            _mod.__file__ = os.path.abspath(__file__)
+            _mod.__name__ = "qx_embedded_engine"
+            exec(compile(_QX_ENGINE_SOURCE, "qx_embedded_engine", "exec"), _mod.__dict__)
+            sys.modules["qx_embedded_engine"] = _mod
+            try:
+                _mod.DEBUG_LOGS = False
+            except Exception:
+                pass
+            _QX_MOD = _mod
+        except Exception as _e:
+            try:
+                print("[QX] embedded engine init failed: " + str(_e))
+            except Exception:
+                pass
+            _QX_MOD = False
     return _QX_MOD or None
 
 
@@ -5431,72 +5456,17 @@ def suppress_terminal_output():
             for l, lvl, dis in _old_levels: l.setLevel(lvl); l.disabled = dis
             for l, hs in _old_handlers: l.handlers = hs
 
-WINAPI_AVAILABLE = False
-if platform.system() == "Windows":
-    try:
-        import ctypes
-        from ctypes import wintypes
-        user32 = ctypes.windll.user32
-        WM_COMMAND = 0x0111
-        MT4_REFRESH_CHART = 33324
-        GA_ROOT = 2
-        user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
-        user32.PostMessageW.restype = wintypes.BOOL
-        user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
-        user32.GetAncestor.restype = wintypes.HWND
-        user32.IsWindowVisible.argtypes = [wintypes.HWND]
-        user32.IsWindowVisible.restype = wintypes.BOOL
-        user32.IsWindow.argtypes = [wintypes.HWND]
-        user32.IsWindow.restype = wintypes.BOOL
-        user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, wintypes.INT]
-        user32.GetWindowTextW.restype = wintypes.INT
-        user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
-        user32.GetWindowTextLengthW.restype = wintypes.INT
-        WINAPI_AVAILABLE = True
-    except Exception: pass
+WINAPI_AVAILABLE = False   # MT4 part removed (user request «نزع جزء mt4»)
 
-_MT4_HWND = None
-_MT4_HWND_LAST_SEARCH = 0
-_LAST_GLOBAL_REFRESH = 0
-_ENUM_PROC_REF = None
-
+# MT4 part removed (user request «نزع جزء mt4»): the app never talks to an
+# MT4 terminal — no window enumeration, no WM_COMMAND chart refresh.
 def find_mt4_window():
-    global _MT4_HWND, _MT4_HWND_LAST_SEARCH, _ENUM_PROC_REF
-    if not WINAPI_AVAILABLE: return None
-    now = time.time()
-    if _MT4_HWND and (now - _MT4_HWND_LAST_SEARCH < 30):
-        if user32.IsWindow(_MT4_HWND): return _MT4_HWND
-    _MT4_HWND = None
-    _MT4_HWND_LAST_SEARCH = now
-    found = []
-    @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
-    def enum_callback(hwnd, lparam):
-        if user32.IsWindowVisible(hwnd):
-            length = user32.GetWindowTextLengthW(hwnd)
-            if length > 0:
-                buf = ctypes.create_unicode_buffer(length + 1)
-                user32.GetWindowTextW(hwnd, buf, length + 1)
-                if "MetaTrader 4" in buf.value or "MetaTrader4" in buf.value: found.append(hwnd)
-                return False
-        return True
-    _ENUM_PROC_REF = enum_callback
-    user32.EnumWindows(enum_callback, 0)
-    _MT4_HWND = found[0] if found else None
-    return _MT4_HWND
+    return None
 
 REFRESH_INTERVAL = 1.0
+
 def refresh_mt4():
-    global _LAST_GLOBAL_REFRESH
-    if not WINAPI_AVAILABLE: return False
-    now = time.time()
-    if now - _LAST_GLOBAL_REFRESH < REFRESH_INTERVAL: return False
-    _LAST_GLOBAL_REFRESH = now
-    hwnd = find_mt4_window()
-    if not hwnd: return False
-    root = user32.GetAncestor(hwnd, GA_ROOT)
-    target = root if root else hwnd
-    user32.PostMessageW(target, WM_COMMAND, MT4_REFRESH_CHART, 0)
-    return True
+    return False
 
 class Colors:
     GREEN = '\033[92m'; RED = '\033[91m'; BLUE = '\033[94m'; YELLOW = '\033[93m'
@@ -5533,39 +5503,16 @@ def pretty_asset_name(symbol: str, period_label: str = None) -> str:
     return f"({pretty}),{period_label}"
 
 user_home = os.path.expanduser('~')
-MT4_CONFIG_FILE = Path("mt4_config.json")
-# ===== FIX J: digits — =====
-# : " " —
-# .
-# mt4_digits.json:
-# {
-# "global_digits": null, // null = ; ( 5)
-# "overrides": {
-# "USDIDR-OTC": 4,
-# "USDPKR-OTC": 5
-# }
-# }
-DIGITS_CONFIG_FILE = Path("mt4_digits.json")
+# MT4 part removed (user request «نزع جزء mt4»): no mt4_config.json and no
+# mt4_digits.json files. The pure auto-calculation in _resolve_digits below
+# is kept exactly as-is (it never read any file itself).
+DIGITS_CONFIG_FILE = Path("mt4_digits.json")   # legacy name only — never read
 _digits_config_cache = None
 _digits_config_loaded = False
 
 def load_digits_config() -> dict:
-    """ mt4_digits.json . ."""
-    global _digits_config_cache, _digits_config_loaded
-    try:
-        if DIGITS_CONFIG_FILE.exists():
-            mtime = DIGITS_CONFIG_FILE.stat().st_mtime
-            if not _digits_config_loaded or _digits_config_cache.get('_mtime', 0) < mtime:
-                _digits_config_cache = json.loads(DIGITS_CONFIG_FILE.read_text(encoding='utf-8', errors='replace'))
-                _digits_config_cache['_mtime'] = mtime
-                _digits_config_loaded = True
-        elif _digits_config_loaded:
-            # —
-            _digits_config_cache = None
-            _digits_config_loaded = False
-    except Exception:
-        return {}
-    return _digits_config_cache if _digits_config_cache else {}
+    # MT4 part removed (user request): no external digits file.
+    return {}
 
 def _resolve_digits(symbol: str, price: float = 0.0) -> int:
     """ .
@@ -5627,75 +5574,11 @@ def _resolve_digits(symbol: str, price: float = 0.0) -> int:
     if any(x in sym_upper for x in ["IDR", "COP", "ARS", "NGN", "PKR", "DZD", "EGP", "MXN", "PHP", "INR", "BDT", "ZAR", "BRL"]):
         return 3  # FIX J: was 2
     return 5
-SYSTEM_FOLDERS = {"default", "downloads", "mailbox", "signals", "symbolsets", "deleted", "templates", "profiles", "mql4", "logs", "config", "history_backup"}
-
-def _validate_mt4_path(path: str) -> bool:
-    if not path or not os.path.exists(path): return False
-    try:
-        test_file = os.path.join(path, ".write_test.tmp")
-        with open(test_file, 'w') as f: f.write("test")
-        os.remove(test_file)
-        return True
-    except Exception: return False
-
-def _save_mt4_path(path: str):
-    try:
-        config = json.loads(MT4_CONFIG_FILE.read_text(encoding='utf-8', errors='replace')) if MT4_CONFIG_FILE.exists() else {}
-        config["mt4_history_path"] = path
-        config["saved_at"] = int(time.time())
-        MT4_CONFIG_FILE.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding='utf-8')
-    except Exception: pass
-
-def find_mt4_history_path() -> str:
-    appdata = os.environ.get('APPDATA', '') or os.environ.get('HOME', '')
-    common_path = os.path.join(appdata, 'MetaQuotes', 'Terminal', 'Common', 'Files', 'qx_hst')
-    try:
-        os.makedirs(common_path, exist_ok=True)
-        return common_path
-    except Exception:
-        pass
-    
-    base_terminal = os.path.join(user_home, "AppData", "Roaming", "MetaQuotes", "Terminal")
-    if not os.path.exists(base_terminal): return ""
-    all_servers = []
-    try:
-        for terminal_id in os.listdir(base_terminal):
-            history_path = os.path.join(base_terminal, terminal_id, "history")
-            if not os.path.exists(history_path): continue
-            for server_name in os.listdir(history_path):
-                server_lower = server_name.lower()
-                if server_lower in SYSTEM_FOLDERS or server_lower.startswith(".") or server_lower.startswith("_"): continue
-                server_path = os.path.join(history_path, server_name)
-                if not os.path.isdir(server_path): continue
-                try:
-                    hst_files = [f for f in os.listdir(server_path) if f.endswith('.hst')]
-                    all_servers.append({"terminal_id": terminal_id, "server_name": server_name, "full_path": server_path, "has_hst": len(hst_files) > 0, "hst_count": len(hst_files), "is_writable": _validate_mt4_path(server_path)})
-                except Exception: pass
-    except Exception: pass
-    if not all_servers: return ""
-    if MT4_CONFIG_FILE.exists():
-        try:
-            saved_path = json.loads(MT4_CONFIG_FILE.read_text(encoding='utf-8', errors='replace')).get("mt4_history_path", "")
-            if saved_path and os.path.exists(saved_path):
-                for srv in all_servers:
-                    if srv["full_path"] == saved_path and srv["is_writable"]: return saved_path
-        except Exception: pass
-    writable_servers = [s for s in all_servers if s["is_writable"]]
-    if not writable_servers: return ""
-    servers_with_hst = [s for s in writable_servers if s["has_hst"]]
-    if servers_with_hst:
-        servers_with_hst.sort(key=lambda x: (-x["hst_count"], x["server_name"]))
-        chosen = servers_with_hst[0]
-        _save_mt4_path(chosen["full_path"])
-        return chosen["full_path"]
-    chosen = writable_servers[0]
-    _save_mt4_path(chosen["full_path"])
-    return chosen["full_path"]
-
-MT4_HISTORY_PATH = find_mt4_history_path()
-if not MT4_HISTORY_PATH:
-    MT4_HISTORY_PATH = os.path.join(user_home, "Desktop", "MT4_History_Fallback")
-    os.makedirs(MT4_HISTORY_PATH, exist_ok=True)
+# MT4 part removed (user request «نزع جزء mt4»): no MT4 terminal scanning,
+# no mt4_config.json, no Desktop fallback. A local folder keeps legacy path
+# references valid without ever writing HST files.
+MT4_HISTORY_PATH = os.path.join(str(Path.cwd()), "hst_out")
+os.makedirs(MT4_HISTORY_PATH, exist_ok=True)
 
 # Credentials, session state and login state now live in app_data.db
 # (see SECTION 2B). The three constants below are kept only as legacy
@@ -6168,131 +6051,14 @@ class Asset:
     def mark_dirty(self): self.dirty = True
 
     def write(self, force=False):
-        if not force and not self.has_new_data(): return False
-        temp = self.path + ".tmp"
-        # For sub-minute timeframes, write period=1 (M1) in the header so MT4 opens it
-        header_period = 1 if PERIOD_SECONDS < 60 else self.period
-        try:
-            with open(temp, 'wb') as f:
-                f.write(struct.pack('<i', 400))
-                f.write(b"(C)opyright 2003, MetaQuotes Software Corp.".ljust(64, b'\0'))
-                f.write(self.symbol.encode('ascii').ljust(12, b'\0')[:12])
-                f.write(struct.pack('<i', header_period))
-                first_price = self.candles[0]['close'] if self.candles else self.price
-                f.write(struct.pack('<i', self.digits(first_price)))
-                f.write(struct.pack('<i', int(time.time())))
-                f.write(struct.pack('<i', int(time.time())))
-                f.write(b'\0' * 52)
-                for c in self.candles:
-                    f.write(struct.pack('<i', c['time']))
-                    f.write(struct.pack('<d', c['open']))
-                    f.write(struct.pack('<d', c['low']))
-                    f.write(struct.pack('<d', c['high']))
-                    f.write(struct.pack('<d', c['close']))
-                    f.write(struct.pack('<q', int(c.get('volume', 0))))
-            # ===== FIX 4: WinError 5 (Access Denied) + WinError 32 =====
-            # WinError 32. WinError 5 (Access Denied)
-            # MT4 ( ).
-            # : retry WinError 5 + 32 + fallback.
-            def _is_lock_error(err_str):
-                err_str = err_str.lower()
-                return (
-                    "winerror 32" in err_str or
-                    "used by another process" in err_str or
-                    "winerror 5" in err_str or
-                    "access denied" in err_str or
-                    "accès refusé" in err_str or
-                    "acces refusé" in err_str or
-                    "permission" in err_str
-                )
-            replaced = False
-            for attempt in range(8):  # 8 5
-                try:
-                    os.replace(temp, self.path)
-                    replaced = True
-                    break
-                except (PermissionError, OSError) as e:
-                    err_str = str(e)
-                    if _is_lock_error(err_str):
-                        # : 50ms, 100ms, 150ms, 200ms, 250ms...
-                        time.sleep(0.05 + 0.05 * attempt)
-                        continue
-                    raise
-            if not replaced:
-                # ===== FIX 4: fallback — rename =====
-                # os.replace 8 .
-                try:
-                    with open(self.path, 'wb') as f:
-                        # (header + candles)
-                        with open(temp, 'rb') as src:
-                            f.write(src.read())
-                    replaced = True
-                except Exception as fallback_err:
-                    if not _is_lock_error(str(fallback_err)):
-                        logmsg(f"[write:{self.symbol}] fallback write failed: {fallback_err}")
-            try:
-                if os.path.exists(temp): os.remove(temp)
-            except Exception: pass
-            if replaced:
-                self.last_write = time.time()
-                if self.candles:
-                    self.last_saved_close = self.candles[-1]['close']
-                    self.last_saved_candle_time = self.candles[-1]['time']
-                    self.last_saved_candle_count = len(self.candles)
-                self.dirty = False
-                return True
-            return False
-        except Exception as e:
-            err_str = str(e).lower()
-            # ===== FIX 8: WinError 2 (file not found) + WinError 5 + 32 =====
-            # — retry .
-            if not any(x in err_str for x in [
-                'winerror 2', 'winerror 5', 'winerror 32', 'winerror 13',
-                'introuvable', 'refusé', 'access', 'permission', 'used by another',
-                'ebusy', 'eperm', 'no such file'
-            ]):
-                logmsg(f"[write:{self.symbol}] write failed: {e}")
-            try:
-                if os.path.exists(temp): os.remove(temp)
-            except Exception: pass
-            return False
+        # MT4 part removed (user request «نزع جزء mt4»): no HST file writing.
+        # Candle state keeps flowing in memory exactly like the original server
+        # (fetch_candles_with_retry / fill_gap_once / realtime_stream untouched).
+        return False
 
-class WriterThread(threading.Thread):
-    """FIX 11: WriterThread — HST 500ms Asset.write.
- 
- : (1000 4s).
- :
- - fetch_candles_with_retry (1000 )
- - Asset.write HST {derived_symbol}{PERIOD}.hst (AUDJPY-OTC1.hst)
- - WriterThread asset.dirty 100ms + HST 500ms
- 
- FIX 10 ( ) realtime_stream MT4_WRITER.update_candle.
- Asset.write WriterThread MT4_WRITER
- .
- """
-    def __init__(self):
-        super().__init__(daemon=True, name="WriterThread")
-        self.running = True
-    def run(self):
-        while self.running:
-            try:
-                now = time.time()
-                dirty_count = 0
-                for asset in ALL_STREAMING_ASSETS:
-                    # ===== FIX 11: MT4_WRITER =====
-                    # ( — )
-                    if asset.symbol in MT4_WRITER.sync_state:
-                        continue
-                    if asset.dirty and (now - asset.last_write >= WRITE_INTERVAL):
-                        if asset.write(): dirty_count += 1
-                if dirty_count > 0: refresh_mt4()
-                time.sleep(0.1)
-            except Exception as e:
-                logmsg(f"[WriterThread] loop error: {e}")
-                time.sleep(0.5)
-
-writer_thread = WriterThread()
-writer_thread.start()
+# WriterThread (the MT4 HST writer thread) removed (user request) — it belonged
+# to the MT4 part. Nothing writes HST files anymore.
+writer_thread = None
 
 async def connect_quotex(email, password, force_fresh=False, max_attempts=3):
     global CLIENT, CONNECTION_ALIVE, EMAIL, PASSWORD
@@ -6968,65 +6734,8 @@ def _subsecond_align(ts: int) -> int:
     return ((int(ts) + tz) // SUBSECOND_SECONDS) * SUBSECOND_SECONDS
 
 def _subsecond_write_hst(asset_symbol: str, candles: list):
-    """Write subsecond HST file. Period field = 1 (MT4 minimum).
-    Filename: {asset_symbol}1.hst (e.g., AUDUSD-5S-OTC1.hst)
-    """
-    if not candles:
-        return
-    file_name = f"{asset_symbol}1.hst"
-    file_path = os.path.join(MT4_HISTORY_PATH, file_name)
-    temp_path = file_path + '.tmp'
-    try:
-        os.makedirs(MT4_HISTORY_PATH, exist_ok=True)
-    except Exception:
-        pass
-    try:
-        header = bytearray(148)
-        struct.pack_into('<I', header, 0, 400)
-        struct.pack_into('64s', header, 4, b'MetaQuotes Software Corp.'.ljust(64, b'\x00'))
-        struct.pack_into('12s', header, 68, asset_symbol[:12].encode('ascii').ljust(12, b'\x00'))
-        struct.pack_into('<I', header, 80, 1)  # period = 1 (M1, MT4 minimum)
-        first_price = candles[0]['close'] if candles else 0.0
-        digits = _resolve_digits(asset_symbol, first_price)
-        struct.pack_into('<I', header, 84, digits)
-        struct.pack_into('<I', header, 88, 0)
-        struct.pack_into('<I', header, 92, 0)
-        body_size = len(candles) * 44
-        buffer = bytearray(148 + body_size)
-        buffer[:148] = header
-        offset = 148
-        for c in candles:
-            struct.pack_into('<I', buffer, offset, int(c['time']))
-            struct.pack_into('<d', buffer, offset + 4, float(c['open']))
-            struct.pack_into('<d', buffer, offset + 12, float(c['low']))
-            struct.pack_into('<d', buffer, offset + 20, float(c['high']))
-            struct.pack_into('<d', buffer, offset + 28, float(c['close']))
-            struct.pack_into('<Q', buffer, offset + 36, int(c.get('volume', 0)))
-            offset += 44
-        with open(temp_path, 'wb') as f:
-            f.write(buffer)
-        # atomic replace with retry
-        replaced = False
-        for attempt in range(5):
-            try:
-                os.replace(temp_path, file_path)
-                replaced = True
-                break
-            except (PermissionError, OSError):
-                time.sleep(0.05)
-                continue
-        if not replaced:
-            try:
-                with open(file_path, 'wb') as f:
-                    f.write(buffer)
-            except Exception:
-                pass
-    except Exception:
-        pass
-    finally:
-        if os.path.exists(temp_path):
-            try: os.remove(temp_path)
-            except Exception: pass
+    # MT4 part removed (user request «نزع جزء mt4»): no HST writing.
+    return
 
 async def fetch_subsecond_history(asset: Asset, idx=1, total=1):
     """Fetch historical subsecond candles by fetching 1s candles and aggregating.
@@ -7985,67 +7694,10 @@ class MT4Writer:
             state['last_write'] = now
 
     def write_to_file(self, asset: str, period: int, candles: list):
-        """ HST {asset}{period}.hst ( AUDJPY-OTC1.hst).
- 
- Args:
- asset: derived_symbol ( "AUDJPY-OTC")
- period: MT4 timeframe (PERIOD=1 for M1)
- """
-        if asset in self._writing_queue: return
-        self._writing_queue.add(asset)
-        file_name = f"{asset}{period}.hst"
-        file_path = os.path.join(self.mt4_history_path, file_name)
-        temp_path = file_path + '.tmp'
-        # / +
-        def _is_silent_error(err_str):
-            err_str = err_str.lower()
-            return any(x in err_str for x in [
-                'winerror 2', 'winerror 5', 'winerror 32', 'winerror 13',
-                'introuvable', 'refusé', 'acces refusé', 'access denied',
-                'permission', 'used by another', 'ebusy', 'eperm',
-                'no such file', 'not found', 'does not exist'
-            ])
-        # ( WinError 2)
-        try:
-            os.makedirs(self.mt4_history_path, exist_ok=True)
-        except Exception:
-            pass
-        try:
-            buffer = self.generate_hst_buffer(asset, period, candles)
-            with open(temp_path, 'wb') as f:
-                f.write(buffer)
-            # retry WinError 5 + 32
-            replaced = False
-            for attempt in range(8):
-                try:
-                    os.replace(temp_path, file_path)
-                    replaced = True
-                    break
-                except (PermissionError, OSError) as e:
-                    if _is_silent_error(str(e)):
-                        time.sleep(0.05 + 0.05 * attempt)
-                        continue
-                    raise
-            if not replaced:
-                # fallback —
-                try:
-                    with open(file_path, 'wb') as f:
-                        f.write(buffer)
-                    replaced = True
-                except Exception as fallback_err:
-                    if not _is_silent_error(str(fallback_err)):
-                        logmsg(f"MT4 Write Error for {asset} (fallback): {fallback_err}")
-        except OSError as e:
-            if not _is_silent_error(str(e)):
-                logmsg(f"MT4 Write Error for {asset}: {e}")
-        except Exception as e:
-            if not _is_silent_error(str(e)):
-                logmsg(f"MT4 Write Error for {asset}: {e}")
-        finally:
-            self._writing_queue.discard(asset)
-            if os.path.exists(temp_path):
-                try: os.remove(temp_path)
-                except Exception: pass
+        # MT4 part removed (user request «نزع جزء mt4»): no HST writing.
+        # fill_gap_once still runs exactly the same — only the MT4 file output
+        # is gone; the candle merge logic and its call sites are untouched.
+        return
 
     async def seed_history(self, client, asset_obj, period: int, days: float = 0.75):
         """ + HST ( ).
@@ -9114,7 +8766,7 @@ if __name__ == "__main__":
 # طلبات التطبيق إلى آلة الخادم الأصلية نفسها كما هي حرفياً:
 #   fetch_candles_with_retry / realtime_stream / MT4_WRITER.fill_gap_once /
 #   _fill_missing_slots / _align_time / CLIENT.get_candles /
-#   CLIENT._fetch_historical_batch / WriterThread / mt4_gap_filler ...
+#   CLIENT._fetch_historical_batch / mt4_gap_filler ...
 # (كود الخادم الأصلي أعلاه لم يُمَس بايت واحد — وهذا القسم يبدأ بعده مباشرة)
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -9407,15 +9059,6 @@ PAGINATION_BATCH = 700
 QX_HISTORY_DAYS = 0.80
 ASSET_MAX_CANDLES = 45000
 PRELOAD_FIRST_SYMBOL = ASSET_LIST[0] if ASSET_LIST else "BRLUSD_otc"
-_PRELOADED_INFO = {}
-V14_DEEP_REPAIRED = {}
-_QX_WINDOW_BUSY = False
-# v15.1 (طلب المستخدم): دائرة تحميل عند تحميل الشموع — حالة التحميل المسبق
-# المتسلسل (92 عملة واحدة تلو الأخرى) تُحدَّث هنا وترفعها المضخة للواجهة
-# حتى تختفي الدائرة عند انتهاء جلب الشموع.
-_QX_PRELOAD_STATUS = {"active": False, "idx": 0, "total": 0, "loaded": 0,
-                      "finished_at": 0.0}
-
 def apply_history_days(days_val):
     """تطبيق عدد أيام التاريخ بنفس آلية قائمة الأصل حرفياً (STAGE 3 وقائمة
     «Change History days» في الكود الأصلي): هامش +15% على المدى، INITIAL_CANDLES
@@ -9435,6 +9078,21 @@ def apply_history_days(days_val):
     FETCH_DURATION_SECONDS = int(86400 * days_with_margin)
     QX_HISTORY_DAYS = d
     return QX_HISTORY_DAYS
+
+
+def apply_candles_target(n):
+    """حجم الجلب عند فتح العملة — نفس آلية الأصل (STAGE 3) حرفياً:
+    INITIAL_CANDLES = العدد المطلوب (700 افتراضياً، حتى 1000 من بطاقة الإعدادات)
+    وFETCH_DURATION_SECONDS بمعامل الهامش +15% الأصلي. الجلب الأصلي
+    fetch_candles_with_retry يقرأ هذين المتغيرين لحظة التنفيذ كما هو."""
+    global INITIAL_CANDLES, FETCH_DURATION_SECONDS
+    try:
+        n = max(100, min(1000, int(n)))
+    except Exception:
+        n = 700
+    INITIAL_CANDLES = n
+    FETCH_DURATION_SECONDS = int(n * max(1, int(PERIOD_SECONDS)) * 1.15)
+    return INITIAL_CANDLES
 
 # ═══ 5) سجل الأصول: نفس Asset الأصلي حرفياً (بلا أي حقن) ═══
 def _get_or_create_asset(api):
@@ -9523,28 +9181,6 @@ def _format_raw_candles(raw):
     unique.sort(key=lambda x: x["time"])
     return unique
 
-async def qx_fetch_window_raw(api, end_ts, seconds, tf_sec, foreground=False, timeout=45.0):
-    """بوابة الجلب الأمامية الواحدة — نداء CLIENT.get_candles الأصلي نفسه
-    (المُجرّب والآمن). foreground يمنع اختلاط طلب العرض الحالي مع التحميل المسبق."""
-    global _QX_WINDOW_BUSY
-    if CLIENT is None or CLIENT.api is None:
-        return []
-    if foreground:
-        for _ in range(int(max(1.0, float(timeout) * 10))):
-            if not _QX_WINDOW_BUSY:
-                break
-            await asyncio.sleep(0.1)
-    _QX_WINDOW_BUSY = True
-    try:
-        res = await asyncio.wait_for(
-            CLIENT.get_candles(api, int(end_ts), int(max(60, seconds)), int(tf_sec)),
-            timeout=float(timeout))
-        return list(res or [])
-    except Exception:
-        return []
-    finally:
-        _QX_WINDOW_BUSY = False
-
 async def fetch_older_batch(api, before_ts, batch=300):
     """دفعة أقدم للتمرير للخلف — نداء CLIENT.get_candles الأصلي بمرساة before_ts،
     والدمج في ذاكرة الأصل بلا تقليص (setdefault: القديم الناقص فقط يُضاف)."""
@@ -9575,141 +9211,6 @@ async def fetch_older_batch(api, before_ts, batch=300):
         asset.price = asset.candles[-1]["close"]
     asset.mark_dirty()
     return len(candles)
-
-async def qx_get_historical_batches(asset, amount_of_seconds, period, timeout=30,
-                                    max_workers=5, batch_callback=None):
-    """نفس طريقة الأصل get_historical_candles بكل تفاصيلها (نفس
-    CLIENT._fetch_historical_batch الأصلية، نفس chunk=period×FETCH_CHUNK_SIZE،
-    نفس عدد العمال max_workers، نفس الرجوع للخلف ونفس قاعدة 3 فشل، نفس
-    FETCH_BATCH_DELAY) — الفرق الوحيد: كل دفعة تُسلَّم فور وصولها عبر
-    batch_callback(batch, worker_id) ليرفعها التطبيق إلى الشارت حية."""
-    if CLIENT is None or CLIENT.api is None:
-        return []
-    max_workers = max_workers or 1
-    chunk_seconds = period * FETCH_CHUNK_SIZE
-    all_candles = {}
-    current_time = int(time.time())
-    target_start_time = current_time - amount_of_seconds
-    block_size = max(1, amount_of_seconds // max_workers)
-    semaphore = asyncio.Semaphore(max_workers)
-
-    async def worker(start_t, end_t, worker_id):
-        worker_candles = {}
-        async with semaphore:
-            oldest_t = start_t
-            consecutive_failures_in_worker = 0
-            while oldest_t > end_t:
-                if not CLIENT or not getattr(getattr(CLIENT, "api", None), "state", None) \
-                        or not getattr(CLIENT.api.state, "check_accepted_connection", False):
-                    break
-                index = next(_request_counter)
-                batch_data = await CLIENT._fetch_historical_batch(
-                    asset, oldest_t, chunk_seconds, period, index, timeout)
-                if not batch_data:
-                    oldest_t -= chunk_seconds
-                    consecutive_failures_in_worker += 1
-                    if consecutive_failures_in_worker >= 3:
-                        break
-                    await asyncio.sleep(FETCH_BATCH_DELAY * 2)
-                    continue
-                consecutive_failures_in_worker = 0
-                new_batch = CLIENT._parse_historical_candles(batch_data)
-                if not new_batch:
-                    oldest_t -= chunk_seconds
-                    continue
-                batch_times = []
-                for c in new_batch:
-                    ts = c["time"]
-                    if ts >= end_t and ts <= start_t:
-                        worker_candles[ts] = c
-                        batch_times.append(ts)
-                if not batch_times:
-                    oldest_t -= chunk_seconds
-                    continue
-                batch_times.sort()
-                new_oldest = batch_times[0]
-                if batch_callback:
-                    try:
-                        batch_callback([worker_candles[t] for t in batch_times], worker_id)
-                    except Exception:
-                        pass
-                oldest_t = new_oldest if new_oldest < oldest_t else oldest_t - chunk_seconds
-                await asyncio.sleep(FETCH_BATCH_DELAY)
-        return list(worker_candles.values())
-
-    try:
-        await CLIENT.start_candles_stream(asset, period)
-    except Exception:
-        pass
-    tasks = []
-    for i in range(max_workers):
-        s = current_time - (i * block_size)
-        e = max(target_start_time, s - block_size)
-        tasks.append(worker(s, e, i))
-    results = await asyncio.gather(*tasks)
-    for batch in results:
-        for c in batch:
-            all_candles[c["time"]] = c
-    return sorted(all_candles.values(), key=lambda x: x["time"])
-
-async def v14_deep_gap_seal(api, reason=""):
-    """السد العميق: مرساة عند أقدم شمعة اصطناعية (volume==0) — نداء الجلب
-    الأصلي CLIENT.get_candles يعيد شموعاً حقيقية تُستبدل بالشرطات المسطحة داخل
-    نافذة محدودة (حتى 200 شمعة) دون لمس الشمعة الحية ولا تقليص الذاكرة."""
-    if CLIENT is None or CLIENT.api is None:
-        return 0
-    asset = _get_or_create_asset(api)
-    if asset is None or len(asset.candles) < 2:
-        return 0
-    psec = max(1, int(PERIOD_SECONDS))
-    cur_start = _align_time(int(time.time()))
-    art = [c for c in asset.candles
-           if int(c.get("volume", 1) or 0) == 0 and c["time"] < cur_start]
-    if not art:
-        return 0
-    oldest = min(c["time"] for c in art)
-    span = max(1, (cur_start - oldest) // psec)
-    window = min(200, span + 10)
-    try:
-        res = await asyncio.wait_for(
-            CLIENT.get_candles(api, cur_start + psec, window * psec, psec),
-            timeout=30.0)
-    except Exception:
-        return 0
-    if not res:
-        return 0
-    real = {}
-    for c in res:
-        if isinstance(c, dict) and int(c.get("time", 0) or 0) > 0:
-            real[int(c["time"])] = c
-    if not real:
-        return 0
-    merged = []
-    for c in asset.candles:
-        if c["time"] >= cur_start:
-            merged.append(c)                      # الشمعة الحية لا تُلمس
-            continue
-        r = real.get(c["time"])
-        if r is not None and int(c.get("volume", 1) or 0) == 0:
-            merged.append(dict(r))
-        else:
-            merged.append(c)
-    have = {c["time"] for c in merged}
-    for t, r in real.items():
-        if t not in have and t < cur_start:
-            merged.append(dict(r))
-    merged.sort(key=lambda x: x["time"])
-    asset.candles = merged[-int(ASSET_MAX_CANDLES):]
-    if asset.candles:
-        asset.price = asset.candles[-1]["close"]
-    asset.mark_dirty()
-    V14_DEEP_REPAIRED[api] = time.time()
-    return len(real)
-
-# ═══ 7) التيكات في الذاكرة (فريمات الثواني S5..S30) — الأصل لم يُمَس ═══
-_TICK_CACHE = {}
-_TICK_QUEUE_MAX = 4096
-_TICK_MAX_AGE = 300.0      # 5 دقائق — ذاكرة فقط
 
 async def tick_cache_collector():
     """يلتقط كل تيك يصل (realtime_candles الأصلية — يتحدث عند كل تيك) في ذاكرة
@@ -9790,23 +9291,6 @@ async def candlestore_trim_loop():
         await asyncio.sleep(6 * 3600.0)
 
 # ═══ 8) علامات تجمّد السد — نفس مخازن الأصل حرفياً ═══
-def clear_gap_flag_any(variants):
-    """رفع علامة التجمّد عن رمز بأي صيغة تخزين ممكنة (الذاكرة + candles.db)."""
-    syms = [str(v or "").strip() for v in (variants or []) if str(v or "").strip()]
-    for sym in syms:
-        try:
-            MT4_WRITER._gap_filled[sym] = False
-        except Exception:
-            pass
-        try:
-            MT4_WRITER._gap_filled_at.pop(sym, None)
-        except Exception:
-            pass
-        try:
-            MT4_WRITER.candle_store.set_gap_filled(sym, False)
-        except Exception:
-            pass
-
 def reset_gap_flags():
     """تصفير علامات التجمّد في الذاكرة (نفس مخازن MT4_WRITER الأصلية)."""
     try:
@@ -9820,156 +9304,6 @@ def reset_gap_flags():
         pass
 
 # ═══ 9) التحميل المسبق المتسلسل — «ضع كل العملات واحدة تلو الأخرى» ═══
-async def preload_all_assets():
-    """التحميل المسبق المتسلسل لكل العملات المفتوحة **واحدة تلو الأخرى** —
-    نفس تدفق الكتلة الرئيسية للأصل حرفياً لكل عملة:
-      realtime_stream أولاً (يجمع التيك أثناء الجلب) ← fetch_candles_with_retry
-      الأصلية (تاريخ FETCH_DURATION_SECONDS + الجسر + سد الفجوات + HST) ←
-      فاصل بين عملة وأخرى.
-    فاتحة الشارت أولاً (BRLUSD_otc) ثم بقية العملات المفتوحة من instruments
-    بالترتيب. كل عملة تُسجَّل في _PRELOADED_INFO لحالة التحميل في الواجهة."""
-    if CLIENT is None or CLIENT.api is None:
-        return 0
-    # اطلب قائمة instruments مرة واحدة (الطريقة الرسمية) وانتظر وصولها باختصار
-    try:
-        await fetch_instruments_now(timeout=12.0)
-    except Exception:
-        pass
-    try:
-        await wait_until(lambda: bool(_instruments_snapshot()),
-                         timeout=15.0, poll_interval=0.5)
-    except asyncio.TimeoutError:
-        pass
-    symbols, seen = [], set()
-    opener = PRELOAD_FIRST_SYMBOL
-    if opener:
-        symbols.append(opener)
-        seen.add(opener)
-    entries = _instruments_snapshot()
-    for e in entries:
-        sym = str((e or {}).get("asset") or "").strip()
-        if not sym or sym in seen:
-            continue
-        if e.get("open") is False:
-            continue        # المغلقة الآن لا بث حي لها — تُحمّل عند فتح شارتها
-        symbols.append(sym)
-        seen.add(sym)
-    if len(symbols) <= 1:
-        # fallback: قائمة الأصل الافتراضية ASSET_LIST كما هي
-        for sym in list(ASSET_LIST):
-            if sym not in seen:
-                symbols.append(sym)
-                seen.add(sym)
-    total = len(symbols)
-    logmsg(f"[preload] sequential preload: {total} assets, ONE after another "
-           f"(history window {FETCH_DURATION_SECONDS}s each)")
-    # v15.1: بدء التحميل المسبق — الدائرة تظهر في الواجهة من هذه اللحظة
-    try:
-        _QX_PRELOAD_STATUS["active"] = True
-        _QX_PRELOAD_STATUS["idx"] = 0
-        _QX_PRELOAD_STATUS["total"] = int(total)
-        _QX_PRELOAD_STATUS["loaded"] = 0
-        _QX_PRELOAD_STATUS["finished_at"] = 0.0
-    except Exception:
-        pass
-    loaded = 0
-    streak = 0
-    for idx, sym in enumerate(symbols, 1):
-        if not CONNECTION_ALIVE or CLIENT is None or CLIENT.api is None:
-            logmsg(f"[preload] connection lost at {idx}/{total}; waiting reconnect…")
-            try:
-                await wait_until(
-                    lambda: CONNECTION_ALIVE and CLIENT is not None and CLIENT.api is not None,
-                    timeout=30.0, poll_interval=0.5)
-            except asyncio.TimeoutError:
-                streak += 1
-                if streak >= MAX_RECONNECTS_DURING_FETCH:
-                    logmsg("[preload] giving up after repeated disconnects")
-                    break
-                continue
-        streak = 0
-        asset = _get_or_create_asset(sym)
-        if asset is None:
-            continue
-        try:
-            st = getattr(asset, "stream_task", None)
-            if st is None or (hasattr(st, "done") and st.done()):
-                asset.streaming = False
-                asset.stream_task = asyncio.ensure_future(realtime_stream(asset))
-        except Exception:
-            pass
-        if len(asset.candles) < MIN_CANDLES_THRESHOLD:
-            try:
-                n, _att = await fetch_candles_with_retry(
-                    asset, max_retries=MAX_FETCH_RETRIES, idx=idx, total=total)
-                if n >= MIN_CANDLES_THRESHOLD:
-                    loaded += 1
-            except Exception as e:
-                logmsg(f"[preload] {sym}: {str(e)[:80]}")
-        else:
-            loaded += 1
-        _PRELOADED_INFO[sym] = {"candles": len(asset.candles), "at": time.time()}
-        # v15.1: تحديث حالة الدائرة بعد كل عملة (واحدة تلو الأخرى)
-        try:
-            _QX_PRELOAD_STATUS["idx"] = int(idx)
-            _QX_PRELOAD_STATUS["loaded"] = int(loaded)
-        except Exception:
-            pass
-        if idx % 10 == 0:
-            logmsg(f"[preload] progress: {idx}/{total} assets ({loaded} loaded)")
-        # فاصل بين عملة وأخرى — نفس الأصل: واحدة تلو الأخرى بلا تسرّع
-        await asyncio.sleep(1.0 if PERIOD_SECONDS < 60 else FETCH_ASSET_DELAY)
-    # v15.1: انتهاء التحميل المسبق — الدائرة تختفي من الواجهة
-    try:
-        _QX_PRELOAD_STATUS["active"] = False
-        _QX_PRELOAD_STATUS["idx"] = int(total)
-        _QX_PRELOAD_STATUS["loaded"] = int(loaded)
-        _QX_PRELOAD_STATUS["finished_at"] = time.time()
-    except Exception:
-        pass
-    logmsg(f"[preload] done: {loaded}/{total} assets loaded sequentially")
-    return loaded
-
-def v14_print_banner():
-    try:
-        print("[QX] engine = الخادم الأصلي مدمجاً حرفياً + طبقة ربط التطبيق "
-              "(منطق الخادم لم يُغيَّر)")
-    except Exception:
-        pass
-
-def v14_build_background_loops():
-    """كل حلقات الأصل الخلفية تعمل أصلاً (health_monitor/auto_reconnect/
-    keepalive_loop/stale_message_watchdog/asset_payout_monitor/preload/
-    mt4_gap_filler/tick_cache_collector/...) — لا حلقات إضافية هنا."""
-    return []
-
-def v14_supervise(name, factory):
-    """مشرف مباشر: يُمرّر كوروتين الحلقة كما هو (احتياط — لا يُستدعى حالياً)."""
-    async def _sup():
-        try:
-            coro = factory()
-            if coro is not None:
-                await coro
-        except Exception as e:
-            try:
-                logmsg(f"[supervise:{name}] {e}")
-            except Exception:
-                pass
-    return _sup()
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# ═══ v15.2: إصلاح حفظ البريد («تذكّرني») — في طبقة الربط، الأصل لم يُمَس ═══
-# ═══════════════════════════════════════════════════════════════════════════
-# سبب «ميزة حفض الايميل لماذا لا تعمل» (طلب المستخدم): كود الأصل في
-# SessionManager._save_state يمرر **7 قيم** لعبارة INSERT بها **6 علامات ؟**
-# فقط (VALUES (1, ?, ?, ?, ?, ?, ?) — العمود id مكتوب قيمةً حرفية والكود
-# يمرر 1 أيضاً) فترفع sqlite الخطأ «Incorrect number of bindings supplied.
-# The current statement uses 6, and there are 7 supplied» وexcept الصامت
-# يبتلعه — النتيجة: البريد/كلمة السر/الحالة لا تُكتب في app_data.db أبداً،
-# ولا يظهر البريد في واجهة تسجيل الدخول عند الإقلاع التالي.
-# الإصلاح: نفس الكود الأصلي حرفياً بعدد الروابط الصحيح فقط (6 قيم بعد id
-# الحرفي) — لا أي تغيير في منطق آخر، وكود الأصل أعلاه لم يُمَس بايت واحد.
 def _v152_session_save_state(self):
     try:
         with _db_lock:
@@ -12291,14 +11625,6 @@ class Backend(QObject):
         self._qx_load_lock = threading.Lock()
         self._qx_load_busy = False     # عامل الطابور يعمل الآن
         self._qx_sealed = set()        # v15.3: العملات التي سُدّت ثغراتها — آلة الأصل مرة واحدة لكل فتح
-        # v14.5 (طلب المستخدم): طلب واحد بمدى الأيام كاملاً — الخادم يجيبه على
-        # دفعات وكل دفعة (300 شمعة) تُرفع إلى الشارت فور وصولها بعد المعالجة.
-        # لا طلب 300 شمعة جديدة في كل مرة (كان يعيد نفس الدفعة الأولى).
-        self._qx_chain_gen = {}        # مولّد لكل مفتاح (عملة، فريم) — يُجهض السلسلة القديمة عند بدء أحدث
-        self._qx_chain_running = {}    # المفتاح -> مولّد السلسلة الجارية (لحالة histChainActive)
-        self._qx_chain_done = set()    # عملات/فريمات بلغت هدف الأيام أو نفد تاريخها
-        self._qx_chain_lock = threading.Lock()
-        self._qx_chain_active = False  # سلسلة التاريخ تعمل للعملة/الفريم المعروضين الآن
         self._files = self._load_files()
         _ensure_badi_dirs()
         self.syncDiskFiles(emit=False)     # استيراد أي ملفات وضعها المستخدم في مجلد BadiCharts
@@ -13258,8 +12584,22 @@ class Backend(QObject):
                          name="qxLoadQueue").start()
 
     def _qx_load_worker(self):
-        """عامل طابور الجلب: يجلب عملاً واحداً في كل مرة مع فاصل ثابت بين
-        عملة وأخرى (طلب المستخدم: واحدة تلو الأخرى وليس بسرعة)."""
+        """عامل التحميل — المسار الأصلي الواحد حرفياً (v16 «محرك واحد بلا طبقات»،
+        طلب المستخدم: «انزع اي جزء محرك شموع اخر او الية سد ثغرات اخرى فقط
+        دون تعقيد» و«يجلب يسد الثغرات ولا ينام الكود»):
+
+        لكل عملة يُفتح شارتها، واحدة تلو الأخرى:
+          1) realtime_stream الأصلية (البث يجمع التيك أثناء الجلب — كما في الأصل)
+          2) fetch_candles_with_retry الأصلية (get_historical_candles المتوازية
+             5 عمال × دفعة 200 + جسر آخر 15 شمعة + دمج التيك الحي) — نفس
+             نداءات الخادم الأصلي حرفياً، 700/1000 شمعة في ثوانٍ
+          3) سد الثغرات الأصلي fill_gap_once — نداء واحد كما في الخادم الأصلي
+             (تصفير علامة التجمّد بنفس طريقة refetch_all_candles الأصلية:
+             candle_store.clear_symbol)
+          4) بعد اكتمال الجلب **والسد** فقط تُدفع الشموع إلى الشارت وتُطفأ
+             دائرة التحميل (طلب المستخدم حرفياً — لا شموع قبل اكتمال الاثنين).
+
+        لا نوم مضاف ولا خنق ولا طبقات سد أخرى — المحرك الأصلي كما هو."""
         qx = _qx_module()
         while True:
             api = None
@@ -13271,19 +12611,21 @@ class Backend(QObject):
                     return
             if not qx:
                 continue
+            # حجم الجلب من بطاقة الإعدادات (700 افتراضياً حتى 1000) —
+            # نفس آلية الأصل INITIAL_CANDLES + هامش +15% (STAGE 3)
+            try:
+                qx.apply_candles_target(self._batch_candles)
+            except Exception:
+                pass
             try:
                 fut = asyncio.run_coroutine_threadsafe(
                     qx.ensure_asset_loaded(api), qx.ASYNC_LOOP)
-                n = fut.result(timeout=120)
+                n = fut.result(timeout=180)
                 if n:
-                    self._log("ok", f"{api}: {n} candles loaded (original fetch) + live stream ON")
+                    self._log("ok", f"{api}: {n} candles (original fetch) + live stream ON")
                     self._qx_ensure_fail[api] = 0
                     self._qx_last_sig = None   # المضخة تدفع الغذاء الجديد فوراً
-                    # v15.4 (طلب المستخدم حرفياً: «لا نريد ارسال الشموع الى
-                    # الشارت حتا يكتمل جلب شموع تلك العملة ويكتمل سد الثغرات»):
-                    # سد الثغرات — آلة الأصل نفسها fill_gap_once كما هي بلا أي
-                    # تغيير — يُكتمل هنا **قبل** أي دفع للشارت، ثم تُدفع الشموع
-                    # وتُطفأ دائرة التحميل فيظهر الشارت مكتملاً (جلب + سد).
+                    # سد الثغرات — آلة الأصل نفسها fill_gap_once قبل أي دفع للشارت
                     try:
                         if (api, "1m") not in getattr(self, "_qx_sealed", set()):
                             self._qx_sealed.add((api, "1m"))
@@ -13293,14 +12635,17 @@ class Backend(QObject):
                     self._qx_push_feed_now(api)
                 else:
                     self._qx_ensure_fail[api] = self._qx_ensure_fail.get(api, 0) + 1
+                    self._log("info", f"{api}: no candles from fetch — retry on next open")
+                    self._qx_push_feed_now(api)   # إخفاء الدائرة — لا شموع تُعرض
             except Exception as e:
                 self._qx_ensure_fail[api] = self._qx_ensure_fail.get(api, 0) + 1
                 self._log("err", f"ensure {api}: {str(e)[:100]}")
+                self._qx_push_feed_now(api)       # إخفاء الدائرة عند الفشل أيضاً
             finally:
                 with self._qx_load_lock:
                     self._qx_load_pending.discard(api)
-            # v13.2: فاصل بين عملة وأخرى — الجلب واحداً تلو الآخر بلا تسرّع
-            time.sleep(1.0)
+            # فاصل الأصل بين عملة وأخرى (FETCH_ASSET_DELAY = 0.1s) — لا نوم مضاف
+            time.sleep(0.1)
 
     # ---------- v14.3: دفعات التاريخ عند فتح العملة (دفعة مباشرة) ----------
     def _hist_days_cfg(self):
@@ -13352,6 +12697,10 @@ class Backend(QObject):
                 qx.PAGINATION_BATCH = n     # حجم كل دفعة تُرفع إلى الشارت
             except Exception:
                 pass
+            try:
+                qx.apply_candles_target(n)   # حجم الجلب الأصلي (STAGE 3: +15% هامش)
+            except Exception:
+                pass
         self._log("ok", T[self._lang].get("batchSaved", "Batch candles saved"))
         # v15.4: أعد جلب العملة الحالية بالجلب الأصلي fetch_candles_with_retry
         # بالمدى الجديد ثم سد الأصل قبل الدفع للشارت
@@ -13363,7 +12712,7 @@ class Backend(QObject):
         يبقا حر ولا يتاثر ولا نريد فقدان الشموع»): صفحة الويب تعرف من هذه
         الخاصية أن دفعات التاريخ تجري الآن — فلا تعيد ضبط الشارت أبداً أثناءها
         (لا syncFull) — الزوم والموضع يبقيان حرين والشموع لا تُفقد."""
-        return bool(self._qx_chain_active)
+        return False   # v16: سلسلة دفعات التاريخ أُزيلت — محرك جلب واحد أصلي فقط
 
     @Slot(str)
     def setHistDays(self, v):
@@ -13410,13 +12759,6 @@ class Backend(QObject):
             except Exception:
                 pass
             try:
-                with self._qx_chain_lock:
-                    self._qx_chain_done.discard((api, self._tf))
-                    if self._tf != "1m":
-                        self._qx_chain_done.discard((api, "1m"))
-            except Exception:
-                pass
-            try:
                 self._qx_ensure_fail[api] = 0   # تغيير إعدادات = محاولة جديدة فوراً
             except Exception:
                 pass
@@ -13432,146 +12774,20 @@ class Backend(QObject):
         self._qx_loading_arm()
         self._qx_load_feed(force=True)
 
-    def _qx_start_history_chain(self, api, tf_label="1m"):
-        """v14.5 (طلب المستخدم حرفياً): «المحرك خليه يجلب شمعة تلك العملة حتا ل
-        2 يوم وليس كل مرة يطلب 300 شمعة بل يرفع الى الشارت 300 شمعة كل دفعة اما
-        طريقة الجلب يجلب 2 يوم ... اي دفعة جلبها يرفعها الى الشارت».
-
-        تعمل عند فتح العملة وفقط: طلب **واحد** بمدى الأيام كاملاً عبر نفس
-        طريقة الجلب الأصلية (CLIENT.get_candles → history/load)، والخادم يرفع
-        الرد على دفعات — كل دفعة تُعالج وتُرفع إلى الشارت فوراً (300 شمعة لكل
-        دفعة) دون انتظار انتهاء الجلب كله. لا طلب 300 شمعة جديدة بمرساة متحركة
-        — كان يعيد نفس الدفعة الأولى. طريقة الرجوع للخلف (التمرير) أُلغيت."""
-        qx = _qx_module()
-        if not qx or not api or not self._qx_logged:
-            return
-        tf_sec = dict(TFS).get(tf_label, 60)
-        if tf_sec < 60:
-            return   # فريمات الثواني تُبنى من التيك الحي (سياسة الخادم) — لا تاريخ مطلب
-        key = (api, tf_label)
-        with self._qx_chain_lock:
-            if key in self._qx_chain_done:
-                return
-            gen = int(self._qx_chain_gen.get(key, 0)) + 1
-            self._qx_chain_gen[key] = gen     # يُجهض أي سلسلة قديمة لنفس المفتاح
-            self._qx_chain_running[key] = gen
-        threading.Thread(target=self._qx_chain_worker, args=(api, tf_label, gen),
-                         daemon=True, name="qxHistChain").start()
-
-    def _qx_chain_set_active(self, active):
-        if bool(active) != bool(self._qx_chain_active):
-            self._qx_chain_active = bool(active)
-            try:
-                self.histChainChanged.emit()
-            except Exception:
-                pass
-
-    def _qx_chain_push_message(self, api, tf_label, tf_sec, raw,
-                               horizon, pushed_t, viewing):
-        """معالجة دفعة وصلت من الخادم: تنسيق + دمج في ذاكرة المحرك نفسها +
-        رفع 300 شمعة لكل دفعة إلى الشارت فوراً (prepend بلا إعادة ضبط).
-        تعيد عدد الشموع المرفوعة فعلاً."""
-        qx = _qx_module()
-        if not qx or not raw:
-            return 0
-        if tf_sec == 60:
-            eng_all = qx._format_raw_candles(raw)               # تنسيق الخادم الرسمي
-            app_all = self._fmt_engine_candles(list(eng_all))
-        else:
-            app_all = self._qx_fmt_raw(raw, tf_sec)
-            eng_all = []
-        new_c = [c for c in app_all
-                 if (horizon <= 0 or c["t"] < horizon) and c["t"] not in pushed_t]
-        if not new_c:
-            return 0
-        new_c.sort(key=lambda x: x["t"])
-        cap = int(getattr(qx, "PAGINATION_BATCH", 700))
-        n_pushed = 0
-        i = 0
-        while i < len(new_c):
-            chunk = new_c[i:i + cap]
-            i += len(chunk)
-            for c in chunk:
-                pushed_t.add(c["t"])
-            # دمج الدفعة في ذاكرة المحرك نفسها (نفس دمج fetch_older_batch الأصلية)
-            if tf_sec == 60 and eng_all:
-                try:
-                    # v14.6: حماية الشمعة الحية — نفس حماية fill_gap_once الأصلية
-                    # في الكود المرجعي (t >= current_period_start → لا تُلمس):
-                    # دفعة التاريخ لا تعيد الشمعة الحية المتشكلة من البث إلى الخلف
-                    # (كان هذا يُظهر الشموع وكأنها تقفز أثناء وصول الدفعات)
-                    cur_start = qx._align_time(int(time.time()))
-                    t_lo, t_hi = chunk[0]["t"], chunk[-1]["t"]
-                    eng_chunk = [c for c in eng_all
-                                 if t_lo <= c["time"] <= t_hi and c["time"] < cur_start]
-                    asset = qx._get_or_create_asset(api)
-                    merged = list(eng_chunk) + list(asset.candles or [])
-                    seen, unique = set(), []
-                    for c in merged:
-                        if c["time"] not in seen:
-                            seen.add(c["time"])
-                            unique.append(c)
-                    unique.sort(key=lambda x: x["time"])
-                    unique = unique[-int(getattr(qx, "ASSET_MAX_CANDLES", 45000)):]
-                    qx._apply_candles_to_asset(asset, unique)
-                except Exception:
-                    pass
-            n_pushed += len(chunk)
-            if not viewing():
-                continue   # العملة/الفريم تغيّرا — يُكمل دمج المحرك دون رفع للصفحة
-            # مزامنة غذاء بايثون — الصفحة تدمج الدفعة عبر prependCandles
-            # (بلا إعادة ضبط ولا قفزة: الزوم والموضع يبقيان كما هما)
-            self._candles = chunk + self._candles
-            seen_t = set()
-            merged_app = []
-            for c in self._candles:
-                if c["t"] not in seen_t:
-                    seen_t.add(c["t"])
-                    merged_app.append(c)
-            merged_app.sort(key=lambda x: x["t"])
-            self._candles = merged_app[-self._QX_FEED_CAP:]
-            _tail = self._candles[-3:]
-            self._qx_last_sig = ((len(self._candles),) + tuple(
-                (c["t"], round(float(c["o"]), 10), round(float(c["h"]), 10),
-                 round(float(c["l"]), 10), round(float(c["c"]), 10)) for c in _tail)) if _tail else None
-            self._emit_qx({"type": "older", "candles": chunk,
-                           "asset": self._asset, "tf": tf_label})
-            self.candlesChanged.emit()
-            time.sleep(0.12)
-        return n_pushed
-
-    @staticmethod
-    def _qx_gap_holes(candles, period_seconds):
-        """عدد الثغرات الحقيقية في خط الشموع: فترات زمنية بلا أي شمعة (حتى
-        الشموع المسطحة المملوءة تُحسب شموعاً). تُستخدم للتحقق أن آلة السد
-        فعلت شيئاً فعلاً قبل/بعد كل محاولة."""
-        try:
-            if not candles or len(candles) < 2 or period_seconds <= 0:
-                return 0
-            ts = sorted({int(c["time"]) for c in candles})
-            holes = 0
-            for i in range(1, len(ts)):
-                g = (ts[i] - ts[i - 1]) // period_seconds
-                if g > 1:
-                    holes += int(g) - 1
-            return holes
-        except Exception:
-            return 0
-
     def _qx_seal_gaps(self, api):
-        """سد ثغرات العملة — الآلة الأصلية حرفياً من qx_server_v10.py
-        (MT4_WRITER.fill_gap_once كما هي، نفس نداء mt4_gap_filler الأصلي).
+        """سد ثغرات العملة — آلة الأصل حرفياً (MT4_WRITER.fill_gap_once كما هي،
+        نفس نداء mt4_gap_filler الأصلي) — نداء واحد بلا أي طبقات إضافية:
 
-        لماذا لم تكن تعمل مع كل العملات؟ علامة التجمّد المحفوظة
-        (gap_state.filled=1 في candles.db) كانت تجعل الآلة تعود فوراً بلا سد
-        لأي عملة جمّدتها جلسة سابقة — فتبقى مثقوبة. هنا تُرفع العلامة عن هذه
-        العملة وحدها **بكل أشكال الرمز الممكنة** (v14.6: الرمز كان مخزّناً
-        بصيغة مختلفة عن الصيغتين المطلوبتين فلا تُرفع العلامة ولا يحدث سد —
-        سبب «بعضها لا تسد ثغرات»)، ثم تُنفَّذ الخوارزمية الأصلية نفسها كما هي
-        (سد أقل من ثانية: جلب آخر 10 شموع حقيقية واستبدال الناقص منها) مع
-        إعادة محاولة تحققية حتى 3 مرات حتى تصبح الخط بلا ثغرات فعلية. وبعد
-        السد يُعاد الخطر الكامل للذاكرة حتى لا يقص السد التاريخ المجلوب
-        (v10 كان يحتفظ بآخر 1000 شمعة فقط — v14 يحتفظ بكل دفعات التاريخ)."""
+        - تصفير علامة التجمّد بنفس طريقة refetch_all_candles الأصلية
+          (candle_store.clear_symbol للرمز) حتى يعمل السد عند كل فتح
+        - نداء fill_gap_once واحد: يجلب آخر 10 شموع حقيقية (GAP_FILL_CANDLES)،
+          يستبدل المغلقة الناقصة، يضيف المفقود، ويملأ الأمداد بـ
+          _fill_missing_slots الأصلية (سقف يوم كامل) — كل ذلك داخل الآلة
+          الأصلية نفسها دون أي تغيير.
+
+        (v16 طلب المستخدم: «انزع اي جزء محرك شموع اخر او الية سد ثغرات اخرى
+        فقط دون تعقيد» — السد العميق v14 ومحاولات التحقق الثلاث ودمج
+        الاستعادة كلها أُزيلت؛ هذه هي آلية السد الأصلية الوحيدة)."""
         qx = _qx_module()
         if not qx or getattr(qx, "CLIENT", None) is None:
             return
@@ -13579,292 +12795,31 @@ class Backend(QObject):
             asset = qx._get_or_create_asset(api)
         except Exception:
             return
-        period_seconds = int(getattr(qx, "PERIOD_SECONDS", 60) or 60)
-
-        # كل أشكال الرمز الممكنة (v14.6): صيغ الـ db قد تختلف عن رمز الذاكرة
-        variants = set()
-        for s in (api, getattr(asset, "symbol", ""), getattr(asset, "api_symbol", "")):
-            s = str(s or "").strip()
-            if not s:
-                continue
-            for v in (s, s.upper(), s.lower(),
-                      s.replace("_", "-"), s.replace("-", "_"),
-                      s.upper().replace("_", "-"), s.upper().replace("-", "_"),
-                      s.lower().replace("_", "-"), s.lower().replace("-", "_")):
-                variants.add(v)
-
-        def _clear_freeze():
-            try:
-                qx.clear_gap_flag_any(list(variants))
-            except Exception:
-                pass
-            for sym in {str(getattr(asset, "symbol", "") or api)}:
-                try:
-                    qx.MT4_WRITER._gap_filled[sym] = False
-                except Exception:
-                    pass
-                try:
-                    qx.MT4_WRITER._gap_filled_at.pop(sym, None)
-                except Exception:
-                    pass
-
-        full_before = list(asset.candles or [])
-        holes_before = self._qx_gap_holes(full_before, period_seconds)
-        # v14.6: حتى 3 محاولات تحققية — الأصلية نفسها بلا أي تغيير، فقط نتحقق
-        # بعد كل محاولة أن الثغرات انخفضت فعلاً (إذا فشل جلب الرد مرة واحدة
-        # بسبب ضغط البث لا تبقى العملة مثقوبة للأبد)
-        for _attempt in range(3):
-            _clear_freeze()
-            try:
-                fut = asyncio.run_coroutine_threadsafe(
-                    qx.MT4_WRITER.fill_gap_once(qx.CLIENT, asset,
-                                                int(getattr(qx, "PERIOD", 1))),
-                    qx.ASYNC_LOOP)
-                fut.result(timeout=30)
-            except Exception:
-                break
-            holes_after = self._qx_gap_holes(list(asset.candles or []), period_seconds)
-            if holes_after == 0 or holes_after >= holes_before:
-                # سُدّت كل الثغرات، أو المحاولة لم تحسّن شيئاً (لا تكرر بلا فائدة)
-                break
-            holes_before = holes_after
-        # إعادة الخط الكامل: شموع الآلة المُصلحة تحل محل المطابق زمنياً فقط —
-        # لا فقدان لأي شمعة من دفعات التاريخ (طلب المستخدم: لا نريد فقدان الشموع)
-        # v14.7 (سبب «بعد سد الثغرات ايضا لماذا لم تسد ثغرتها»): الآلة الأصلية
-        # تُرجع آخر 1000 شمعة فقط (INITIAL_CANDLES في الكود المرجعي) فتبقى
-        # الثغرات الأعمق من نافذة الآلة كما هي. هنا تُعاد شموع الآلة فوق الخط
-        # الكامل ثم **نفس** دالة التعبئة الأصلية _fill_missing_slots (حرفياً
-        # من الكود المرجعي، نفس سقف max_gap=1440) تُطبَّق على الخط كاملاً —
-        # كل ثغرة ≤ يوم كامل تُسدّ بكل الأمداد لا آخر 1000 شمعة فقط.
-        try:
-            repaired = list(asset.candles or [])
-            if full_before and repaired:
-                rep_map = {c["time"]: c for c in repaired}
-                full_t = {c["time"] for c in full_before}
-                restored = [rep_map.get(c["time"], c) for c in full_before]
-                restored += [c for c in repaired if c["time"] not in full_t]
-                seen, unique = set(), []
-                for c in sorted(restored, key=lambda x: x["time"]):
-                    if c["time"] not in seen:
-                        seen.add(c["time"])
-                        unique.append(c)
-                unique = qx._fill_missing_slots(list(unique), period_seconds,
-                                                max_gap=1440)
-                unique = unique[-int(getattr(qx, "ASSET_MAX_CANDLES", 45000)):]
-                qx._apply_candles_to_asset(asset, unique)
-        except Exception:
-            pass
-        # v14.9 (لقطة «مهذه المشاكل»): السد العميق في نهاية سلسلة التاريخ —
-        # نفس نداء الجلب الرسمي لكن مرساته عند أقدم شمعة اصطناعية، فيستبدل
-        # الشرطات المسطحة القديمة بشموع حقيقية قبل مزامنة الشارت (طبقة
-        # إضافية بلا أي تغيير في الآلة الأصلية ولا في طريقة الجلب).
-        try:
-            _ds_fut = asyncio.run_coroutine_threadsafe(
-                qx.v14_deep_gap_seal(api, reason="chain"), qx.ASYNC_LOOP)
-            _ds_fut.result(timeout=60)
-        except Exception:
-            pass
-
-    def _qx_chain_worker(self, api, tf_label, gen):
-        key = (api, tf_label)
-        days = 2.0
-        total_pushed = 0
-        viewing_ok = False
-        try:
-            qx = _qx_module()
-            if not qx or getattr(qx, "CLIENT", None) is None:
-                return
-            days = self._hist_days_cfg()
-            target = max(60, int(days * 86400))
-            tf_sec = dict(TFS).get(tf_label, 60)
-
-            def _viewing():
-                """هل الشارت الحالي يعرض نفس العملة والفريم؟ (مطابقة على مستوى رمز الخادم)"""
-                try:
-                    cur_api = self._qx_symbols.get(self._asset) or self._api_from_display(self._asset)
-                    return cur_api == api and self._tf == tf_label
-                except Exception:
-                    return False
-
-            def _stale():
-                """سلسلة أحدث بدأت لنفس المفتاح (تغيير الأيام مثلاً) — هذه تُجهض."""
-                try:
-                    with self._qx_chain_lock:
-                        return self._qx_chain_gen.get(key) != gen
-                except Exception:
-                    return False
-            try:
-                qx.QX_HISTORY_DAYS = days
-                qx.apply_history_days(days)   # آلية قائمة الأصل نفسها
-            except Exception:
-                pass
-            if _stale():
-                return
-            viewing_ok = _viewing()
-            # حماية الزوم: الصفحة لا تعيد ضبط الشارت أثناء السلسلة (طلب المستخدم:
-            # الشارت لا نريده ان يتاثر اطلاقا يجب ان يبقا حر ولا يتاثر)
-            if viewing_ok:
-                self._qx_chain_set_active(True)
-            # أفق التاريخ الجديد: كل ما هو أقدم من أول شمعة على الشارت الآن
-            horizon = 0
-            try:
-                if viewing_ok and self._candles:
-                    horizon = int(self._candles[0]["t"])
-            except Exception:
-                horizon = 0
-            pushed_t = set()
-            # ═══ v14.6 (طلب المستخدم حرفياً: «انضر الى هذا الكود لا توجد فيه
-            #     تلك المشاكل»): طريقة الجلب نفسها من الكود المرجعي حرفياً —
-            #     CLIENT.get_historical_candles (5 عمال × مرساة متحركة × دفعة
-            #     ~200 شمعة كل 0.1 ثانية) وهي نفسها التي تجلب 1000 شمعة في ثوانٍ
-            #     ومئات آلاف الشموع. طلب واحد بمدى الأيام كاملاً ولا طلب 300
-            #     شمعة بمرساة ثابتة تعيد نفس الدفعة الأولى. ═══
-            import queue as _bq
-            batch_q = _bq.Queue()
-
-            def _on_batch(batch, worker_id):
-                """مرصد الدفعات (يعمل داخل حلقة الخادم — لا يبطئه أبداً):
-                يسلم كل دفعة فور وصولها إلى عاملي السلسلة عبر طابور خفيف."""
-                try:
-                    if batch:
-                        batch_q.put(list(batch))
-                except Exception:
-                    pass
-
-            fut = asyncio.run_coroutine_threadsafe(
-                qx.qx_get_historical_batches(
-                    api, amount_of_seconds=target, period=tf_sec,
-                    max_workers=5, batch_callback=_on_batch),
-                qx.ASYNC_LOOP)
-            # ═══ كل دفعة تصل تُعالج وتُرفع إلى الشارت فوراً — لا انتظار انتهاء
-            #     الجلب كله (طلب المستخدم: اي دفعة جلبها يرفعها الى الشارت) ═══
-            while True:
-                if _stale():
-                    try:
-                        fut.cancel()
-                    except Exception:
-                        pass
-                    return
-                try:
-                    batch = batch_q.get(timeout=0.2)
-                except Exception:
-                    if fut.done():
-                        break
-                    continue
-                n = self._qx_chain_push_message(
-                    api, tf_label, tf_sec, batch, horizon, pushed_t, _viewing)
-                if n > 0:
-                    total_pushed += n
-            try:
-                res = fut.result(timeout=180)
-            except Exception:
-                res = None
-            if _stale():
-                return
-            # ═══ صافي الأمان: أي دفعة أفلتت من الرفع الحي تُرفع من النتيجة
-            #     الكاملة (pushed_t يمنع التكرار — كل شمعة تُرفع مرة واحدة فقط) ═══
-            if res:
-                n = self._qx_chain_push_message(
-                    api, tf_label, tf_sec, res, horizon, pushed_t, _viewing)
-                if n > 0:
-                    total_pushed += n
-            # ═══ الدمج النهائي لذاكرة الخادم (نفس دلالات الكود المرجعي:
-            #     _fill_missing_slots يسد فجوات حتى يوم كامل) دون لمس الشمعة الحية ═══
-            if tf_sec == 60:
-                self._qx_chain_final_merge(qx, api)
-            # ═══ سد الثغرات — الآلة الأصلية حرفياً من v10، لكل عملة تُفتح دون استثناء ═══
-            if tf_sec == 60:
-                self._qx_seal_gaps(api)
-            with self._qx_chain_lock:
-                self._qx_chain_done.add(key)
-            if total_pushed:
-                self._log("ok", f"history: +{total_pushed} candles ({days} days) — "
-                                f"{self._asset if _viewing() else api} {tf_label}")
-            # v14.6: إصلاحات سد الثغرات ودمج الدفعات تصل إلى الشارت في مكانها عبر
-            # patchCandles (بلا setData وبلا إعادة ضبط) — الزوم والموضع يبقيان حرين.
-            # غذاء الواجهة يُنسّق أولاً من ذاكرة الخادم نفسها حتى تصل إصلاحات
-            # السد الداخلية إلى الصفحة وليس إصلاحات الذيل فقط.
-            if _viewing():
-                if tf_sec == 60:
-                    try:
-                        eng = self._qx_engine_candles(api)
-                        if eng:
-                            # v15: استيعاب بلا تقليص — نافذة البث الأصلية (INITIAL_CANDLES)
-                            # لا تُقصّ شموع دفعات التاريخ من الشارت أبداً
-                            self._qx_absorb_engine_no_shrink(eng)
-                            self._qx_last_sig = None   # المضخة تدفع الغذاء المُصلَح فوراً
-                    except Exception:
-                        pass
-                self._qx_resync_pending = True
-        except Exception as e:
-            self._log("err", f"history chain {tf_label}: " + str(e)[:120])
-        finally:
-            try:
-                with self._qx_chain_lock:
-                    # القديمة تُزيل علامتها فقط — لا تلغي سلسلة أحدث لنفس المفتاح
-                    if self._qx_chain_running.get(key) == gen:
-                        self._qx_chain_running.pop(key, None)
-                    cur_api = (self._qx_symbols.get(self._asset)
-                               or self._api_from_display(self._asset))
-                    still_active = (cur_api, self._tf) in self._qx_chain_running
-                self._qx_chain_set_active(still_active)
-            except Exception:
-                self._qx_chain_set_active(False)
-
-    def _qx_chain_final_merge(self, qx, api):
-        """v14.6: دمج نهائي واحد لذاكرة الخادم بعد اكتمال دفعات التاريخ.
-        نفس دلالات الكود المرجعي: شموع حقيقية + _fill_missing_slots (سقف يوم
-        كامل كما في fill_gap_once الأصلية) — لكن الشمعة الحية المتشكلة من البث
-        لا تُلمس أبداً (نفس حماية fill_gap_once الأصلية: t >= current_period_start)."""
-        try:
-            asset = qx._get_or_create_asset(api)
-        except Exception:
+        if asset is None:
             return
+        sym = str(getattr(asset, "symbol", "") or api)
+        # تصفير علامة التجمّد — نفس ما تفعله refetch_all_candles الأصلية
         try:
-            merged = list(asset.candles or [])
-            if not merged:
-                return
-            seen, unique = set(), []
-            for c in sorted(merged, key=lambda x: x["time"]):
-                if c["time"] not in seen:
-                    seen.add(c["time"])
-                    unique.append(c)
-            cur_start = qx._align_time(int(time.time()))
-            # حماية الشمعة الحية: إن كان البث الحي يشكّل شمعة الآن تبقى نسخته هي
-            # المرجع — الدفعات لا تعيدها للخلف (هذا سبب «الشموع تقفز» سابقاً)
-            live_map = {c["time"]: c for c in (asset.candles or [])
-                        if c["time"] >= cur_start}
-            if live_map:
-                unique = [live_map.get(c["time"], c) if c["time"] >= cur_start else c
-                          for c in unique]
-            unique = unique[-int(getattr(qx, "ASSET_MAX_CANDLES", 45000)):]
-            qx._apply_candles_to_asset(asset, unique)
+            qx.MT4_WRITER._gap_filled[sym] = False
         except Exception:
             pass
-
-    def _qx_tail_repaired(self, engine):
-        """v14.3: كشف إصلاحات آلة سد الثغرات داخل منطقة الذيل (آخر 40 شمعة).
-
-        الآلة الأصلية (fill_gap_once كما هي من v10) تستبدل الشموع المغلقة
-        الناقصة داخل ذاكرة الخادم — الدمج الذيلي فقط لا يوصل هذه الإصلاحات
-        إلى الشارت (كانت تبقى الفجوة ظاهرة رغم عمل الآلة). هنا يُكتشف الإصلاح
-        فيُحدَّث غذاء الشارت كاملاً مرة واحدة."""
         try:
-            if not self._candles or not engine:
-                return False
-            win = {c["t"]: c for c in self._candles[-40:]}
-            for c in engine[-40:]:
-                o = win.get(c["t"])
-                if o is None:
-                    continue
-                if (round(o["o"], 10) != round(c["o"], 10)
-                        or round(o["h"], 10) != round(c["h"], 10)
-                        or round(o["l"], 10) != round(c["l"], 10)
-                        or round(o["c"], 10) != round(c["c"], 10)):
-                    return True
+            qx.MT4_WRITER._gap_filled_at.pop(sym, None)
         except Exception:
-            return False
-        return False
+            pass
+        try:
+            qx.MT4_WRITER.candle_store.clear_symbol(sym)
+        except Exception:
+            pass
+        # نداء الآلة الأصلية الواحد (نفس نداء mt4_gap_filler الأصلي)
+        try:
+            fut = asyncio.run_coroutine_threadsafe(
+                qx.MT4_WRITER.fill_gap_once(qx.CLIENT, asset,
+                                            int(getattr(qx, "PERIOD", 1))),
+                qx.ASYNC_LOOP)
+            fut.result(timeout=30)
+        except Exception as e:
+            self._log("info", f"seal {api}: {str(e)[:80]}")
 
     def _qx_load_feed(self, force=False):
         """تحميل غذاء الشارت الحقيقي للعملة/الفريم الحاليين من الخادم."""
@@ -13922,8 +12877,7 @@ class Backend(QObject):
 
     def _qx_fetch_tf_async(self, api, tf_sec, count):
         """جلب شموع فريم أعلى داخل حلقة الخادم — نفس CLIENT.get_candles الأصلي
-        لكن عبر بوابة الجلب الواحدة (v13.1): طلب واحد في كل لحظة + أولوية أمامية
-        (طلب المستخدم المعروض يتقدم على التحميل المسبق ولا يختلط معه)."""
+        نداء CLIENT.get_candles الأصلي نفسه حرفياً — طلب واحد مباشر بلا أي بوابة."""
         qx = _qx_module()
         if not qx or getattr(qx, "CLIENT", None) is None:
             return
@@ -13933,8 +12887,8 @@ class Backend(QObject):
             try:
                 end = int(time.time())
                 fut = asyncio.run_coroutine_threadsafe(
-                    qx.qx_fetch_window_raw(api, end, count * tf_sec, tf_sec,
-                                           foreground=True, timeout=45.0), qx.ASYNC_LOOP)
+                    qx.CLIENT.get_candles(api, int(end), int(count * tf_sec), int(tf_sec)),
+                    qx.ASYNC_LOOP)
                 res = fut.result(timeout=60)
                 candles = self._qx_fmt_raw(res, tf_sec)[-count:]
                 if candles and asset_name == self._asset and tf_key == self._tf:
@@ -14195,21 +13149,6 @@ class Backend(QObject):
             self._qx_live_step()
         except Exception:
             pass
-        # 3) حالة التحميل المسبق → سجل التطبيق (مخنوقة كل 3 ثوانٍ)
-        try:
-            now = time.time()
-            if now - self._qx_pre_log >= 3.0:
-                self._qx_pre_log = now
-                info = qx._PRELOADED_INFO
-                if info:
-                    opener = qx.PRELOAD_FIRST_SYMBOL
-                    o = info.get(opener)
-                    n_stream = len(qx.ALL_STREAMING_ASSETS)
-                    msg = (f"QX preload: {len(info)} assets loaded, {n_stream} streaming live"
-                           + (f" | opener {opener}: {o['candles']} candles" if o else ""))
-                    self._log("info", msg)
-        except Exception:
-            pass
         # 4) v15.4 (طلب المستخدم): دائرة تحميل الشموع لكل عملة — تُطفأ فور
         #    اكتمال الجلب والسد وتُدفع الشموع (الشارت يظهر بعد اكتمالهما)، مع
         #    مهلة أمان 120 ثانية حتى لا تبقى الدائرة عالقة أبداً. الحالة تُبث
@@ -14286,31 +13225,9 @@ class Backend(QObject):
                 return
             candles = self._qx_engine_candles(api)
             if candles:
-                # v14.9 (لقطة «مهذه المشاكل»): السد العميق استبدل شرطات قديمة
-                # بشموع حقيقية في ذاكرة المحرك — تحديث كامل واحد للغذاء يُظهرها
-                # فوراً (نفس مسار مزامنة السلسلة: بلا setData وبلا إعادة ضبط —
-                # الزوم والموضع يبقيان حرين)
-                try:
-                    _ds_t = int((getattr(qx, "V14_DEEP_REPAIRED", {}) or {}).get(api, 0) or 0)
-                    if _ds_t > int(getattr(self, "_qx_deep_seen", 0) or 0):
-                        self._qx_deep_seen = _ds_t
-                        self._qx_absorb_engine_no_shrink(candles)
-                        self._qx_last_sig = None
-                        self._qx_resync_pending = True
-                except Exception:
-                    pass
                 if not self._candles or self._qx_feed_key != key:
                     self._candles = candles[-self._QX_FEED_CAP:]
                     self._qx_feed_key = key
-                elif self._qx_tail_repaired(candles):
-                    # v14.3: آلة سد الثغرات أصلحت شموعاً مغلقة في ذاكرة الخادم —
-                    # الدمج الذيلي لا يوصل إصلاحات المنصف، تحديث كامل واحد يُظهرها
-                    # (هنا تُغلق فجوة «بين شمعة الحية والشموع التي قبلها»)
-                    # v14.7: الاستيعاب بلا تقليص — المحرك قد يعود مقصوصاً إلى
-                    # آخر 1000 شمعة من الآلة الأصلية، والنسخ المباشر كان يُفقد
-                    # شموع دفعات التاريخ من الشارت («لماذا تختفي شموعها»)
-                    self._qx_absorb_engine_no_shrink(candles)
-                    self._qx_resync_pending = True
                 else:
                     self._qx_merge_tail_full(candles, tf_sec)
             elif self._qx_feed_key != key:
@@ -14448,19 +13365,6 @@ class Backend(QObject):
             # (دون انهيار الخوادم). الحلقات الأصلية أعلاه كما هي حرفياً،
             # وv14 يضيف فوقها فقط: بوابة تفرز الطلبات + سد الثغرات على كل
             # عملة مفتوحة + التكس لا ينام + تقوي النقاط + النبضة.
-            if hasattr(qx, "v14_build_background_loops"):
-                try:
-                    for _v14_name, _v14_factory in qx.v14_build_background_loops():
-                        asyncio.run_coroutine_threadsafe(
-                            qx.v14_supervise(_v14_name, _v14_factory), loop)
-                    if hasattr(qx, "v14_print_banner"):
-                        qx.v14_print_banner()
-                except Exception as _v14e:
-                    try:
-                        print("[QX] v14 strengthening layer issue "
-                              "(server continues unchanged): " + str(_v14e))
-                    except Exception:
-                        pass
             self._qx_logged = True
             # v15.2 (طلب المستخدم): «ميزة حفض الايميل» — مع «تذكّرني» يبقى
             # البريد محفوظاً فيظهر معبأ في واجهة تسجيل الدخول عند الإقلاع
@@ -14484,6 +13388,12 @@ class Backend(QObject):
             try:
                 qx.PRELOAD_CANDLES = int(self._batch_candles)
                 qx.PAGINATION_BATCH = int(self._batch_candles)
+            except Exception:
+                pass
+            try:
+                # حجم الجلب الأصلي عند فتح العملة (700 افتراضياً حتى 1000) —
+                # نفس آلية الأصل INITIAL_CANDLES + هامش +15% (STAGE 3)
+                qx.apply_candles_target(self._batch_candles)
             except Exception:
                 pass
             # v15.2 (طلب المستخدم): دائرة تحميل الشموع لعملة فتح الشارت —
@@ -14555,8 +13465,8 @@ class Backend(QObject):
                     # دفعة 300 شمعة وليس 170 (طلب المستخدم)
                     _nb = int(getattr(qx, "PAGINATION_BATCH", 300))
                     fut = asyncio.run_coroutine_threadsafe(
-                        qx.qx_fetch_window_raw(api, before, _nb * tf_sec, tf_sec,
-                                               foreground=True, timeout=45.0), qx.ASYNC_LOOP)
+                        qx.CLIENT.get_candles(api, int(before), int(_nb * tf_sec), int(tf_sec)),
+                        qx.ASYNC_LOOP)
                     res = fut.result(timeout=60)
                     batch = [c for c in self._qx_fmt_raw(res, tf_sec) if c["t"] < before][-_nb:]
                 # مزامنة غذاء بايثون فوراً حتى لا يعيد المضخة إرسال إعادة ضبط للشارت
@@ -18298,6 +17208,15 @@ ApplicationWindow {
                     try { userF.text = backend.savedEmail } catch (e) {}
                 }
             }
+            /* v16 (طلب المستخدم «ميزة حفض الايميل»): محرك الخادم يهيأ في خيط
+               خلفي عند الإقلاع — عند جاهزيته تُدفَق إشارة البريد المحفوظ فيُملأ
+               الحقل فوراً حتى لو جاء المحرك بعد رسم شاشة الدخول */
+            Connections {
+                target: backend
+                function onSavedEmailChanged() {
+                    try { if (!userF.text) userF.text = backend.savedEmail } catch (e) {}
+                }
+            }
 
             function attempt() {
                 if (busy) return
@@ -19493,6 +18412,22 @@ if __name__ == "__main__":
     app.setWindowIcon(make_app_icon())   # شعار التطبيق في شريط العنوان وشريط المهام
     engine = QQmlApplicationEngine()
     backend = Backend()
+    # v16 (طلب المستخدم «ميزة حفض الايميل لماذا لا تعمل»): محرك الخادم يُهيَّأ
+    # مبكراً في خيط خلفي (exec الوحدة ثقيل)، وعند جاهزيته تُدفَق إشارة
+    # savedEmailChanged فيمتلئ حقل البريد المحفوظ في شاشة تسجيل الدخول فوراً.
+    import threading as _qx_warm_th
+
+    def _qx_warm_engine():
+        try:
+            if _qx_module() is not None:
+                try:
+                    backend.savedEmailChanged.emit()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    _qx_warm_th.Thread(target=_qx_warm_engine, daemon=True, name="qxWarm").start()
     engine.rootContext().setContextProperty("backend", backend)
     engine.rootContext().setContextProperty("dbgShotDir", os.environ.get("BADI_SHOTS", ""))
     theme_json = json.dumps({"dark": backend.dark, "c": (DARK if backend.dark else LIGHT),
