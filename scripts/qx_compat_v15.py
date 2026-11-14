@@ -843,3 +843,45 @@ def v14_supervise(name, factory):
                 pass
     return _sup()
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ═══ v15.2: إصلاح حفظ البريد («تذكّرني») — في طبقة الربط، الأصل لم يُمَس ═══
+# ═══════════════════════════════════════════════════════════════════════════
+# سبب «ميزة حفض الايميل لماذا لا تعمل» (طلب المستخدم): كود الأصل في
+# SessionManager._save_state يمرر **7 قيم** لعبارة INSERT بها **6 علامات ؟**
+# فقط (VALUES (1, ?, ?, ?, ?, ?, ?) — العمود id مكتوب قيمةً حرفية والكود
+# يمرر 1 أيضاً) فترفع sqlite الخطأ «Incorrect number of bindings supplied.
+# The current statement uses 6, and there are 7 supplied» وexcept الصامت
+# يبتلعه — النتيجة: البريد/كلمة السر/الحالة لا تُكتب في app_data.db أبداً،
+# ولا يظهر البريد في واجهة تسجيل الدخول عند الإقلاع التالي.
+# الإصلاح: نفس الكود الأصلي حرفياً بعدد الروابط الصحيح فقط (6 قيم بعد id
+# الحرفي) — لا أي تغيير في منطق آخر، وكود الأصل أعلاه لم يُمَس بايت واحد.
+def _v152_session_save_state(self):
+    try:
+        with _db_lock:
+            conn = _db_conn()
+            try:
+                conn.execute("""
+                    INSERT OR REPLACE INTO app_state
+                    (id, email, password, host, last_login, last_success, failed_auth_count)
+                    VALUES (1, ?, ?, ?, ?, ?, ?)
+                """, (
+                    self.state.get("email", ""),
+                    self.state.get("password", ""),
+                    self.state.get("host", "qxbroker.com"),
+                    self.state.get("last_login", 0),
+                    1 if self.state.get("last_success", False) else 0,
+                    self.state.get("failed_auth_count", 0),
+                ))
+                conn.commit()
+            finally:
+                conn.close()
+    except Exception:
+        pass
+
+
+try:
+    SessionManager._save_state = _v152_session_save_state
+except Exception:
+    pass
+
