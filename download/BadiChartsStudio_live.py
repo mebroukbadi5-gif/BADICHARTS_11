@@ -3373,8 +3373,11 @@ T = {
         "otherSett": "Other settings", "darkMode": "Dark mode", "langLbl": "Language", "sndLbl": "Signal sounds",
         "sbLbl": "Status bar", "cdLbl": "Candle countdown",
         "histDays": "History candles — days", "histSave": "Save",
-        "histDaysHint": "When you open a currency the engine fetches this many days in ONE request (0.5 – 30, default 2); the server delivers it in batches and every batch of 300 candles rises to the chart immediately — the chart stays free (zoom/pan) and no candles are lost. Type the number and press Save.",
+        "histDaysHint": "When you open a currency the engine fetches this many days in ONE request (0.5 – 30, default 2); the server delivers it in batches and every batch rises to the chart immediately — the chart stays free (zoom/pan) and no candles are lost. Type the number and press Save.",
         "histSaved": "History days saved — opening a currency now loads the new range",
+        "batchCandles": "Batch candles — direct batch", "batchSave": "Save",
+        "batchCandlesHint": "The direct batch fetched for a currency when you open it, and the size of every batch pushed to the chart (default 700, adjustable up to 1000). Type the number and press Save.",
+        "batchSaved": "Batch candles saved — next batches use the new size",
         "badiSect": "Encrypted indicators (BADI)", "keyFp": "Key fingerprint:",
         "notifT": "Notifications", "notifEmpty": "No notifications yet",
         "notifHint": "Notifications from your paid indicators appear here — the developer sends them from his own server (updates, subscription reminders). No files can ever pass through this channel.",
@@ -3455,8 +3458,11 @@ T = {
         "otherSett": "إعدادات أخرى", "darkMode": "الوضع الليلي", "langLbl": "اللغة", "sndLbl": "أصوات الإشارات",
         "sbLbl": "شريط الحالة", "cdLbl": "العد التنازلي على الشارت",
         "histDays": "شموع التاريخ — عدد الأيام", "histSave": "حفظ",
-        "histDaysHint": "عند فتح العملة يجلب المحرك هذا العدد من الأيام بطلب واحد (0.5 – 30، الافتراضي يومان)، والخادم يرفعه على دفعات وكل دفعة 300 شمعة تُرفع إلى الشارت فوراً — الشارت يبقى حراً (زوم/تحريك) ولا تُفقد أي شمعة. اكتب الرقم واضغط حفظ.",
+        "histDaysHint": "عند فتح العملة يجلب المحرك هذا العدد من الأيام بطلب واحد (0.5 – 30، الافتراضي يومان)، والخادم يرفعه على دفعات وكل دفعة تُرفع إلى الشارت فوراً — الشارت يبقى حراً (زوم/تحريك) ولا تُفقد أي شمعة. اكتب الرقم واضغط حفظ.",
         "histSaved": "تم حفظ عدد الأيام — فتح العملة يجلب المدى الجديد",
+        "batchCandles": "شموع الدفعة المباشرة", "batchSave": "حفظ",
+        "batchCandlesHint": "الدفعة المباشرة التي تُجلب للعملة عند فتح شارتها، وحجم كل دفعة تُرفع إلى الشارت (الافتراضي 700 شمعة، وقابل للتعديل حتى 1000). اكتب الرقم واضغط حفظ.",
+        "batchSaved": "تم حفظ عدد شموع الدفعة — الدفعات القادمة بالحجم الجديد",
         "badiSect": "المؤشرات المشفرة (BADI)", "keyFp": "بصمة المفتاح:",
         "notifT": "الإشعارات", "notifEmpty": "لا توجد إشعارات بعد",
         "notifHint": "تظهر هنا إشعارات المؤشرات المدفوعة — المبرمج يرسلها من خادمه (تحديثات، تذكير بالاشتراك). لا يمكن لأي ملف أن يمر عبر هذه القناة إطلاقًا.",
@@ -5544,6 +5550,15 @@ class Backend(QObject):
         except Exception:
             _hd = 2.0
         self._hist_days = max(0.5, min(30.0, _hd))
+        # v14.7 (طلب المستخدم حرفياً): «اريد ان تجلب 700 شمعة بدل 300 شمعة
+        # كدفعة مباشرة للعملة ويمكن تعديلها في الاعدادات الى 1000 شمعة في
+        # الدفعة» — حجم الدفعة المباشرة عند فتح العملة وحجم كل دفعة تُرفع
+        # إلى الشارت. الافتراضي 700، يقبل التعديل حتى 1000، يُحفظ بالضغط على حفظ.
+        try:
+            _bc = int(float(str(cfg.get("batch_candles", 700)).replace(",", ".")))
+        except Exception:
+            _bc = 700
+        self._batch_candles = max(100, min(1000, _bc))
         self._market = "real"        # قسم الحساب الحقيقي/التجريبي حُذف — يبقى وسم السوق للعملات OTC فقط
         # LIVE SERVER EDITION (طلب المستخدم): العملة الافتراضية ثابتة دائماً —
         # الشارت يفتح على BRLUSD_otc (باسمها الحقيقي USD/BRL (OTC) كما في الخادم —
@@ -5866,7 +5881,8 @@ class Backend(QObject):
                                "asset": self._asset, "tf": self._tf,
                                "added": self._added,
                                "chart_theme": self._chart_theme,
-                               "hist_days": self._hist_days})
+                               "hist_days": self._hist_days,
+                               "batch_candles": self._batch_candles})
 
     def _load_files(self):
         data = _read_json(FILES_FILE, None)
@@ -6492,7 +6508,8 @@ class Backend(QObject):
                  "open": True, "otc": True, "flag": _fl}]
 
     def _qx_ensure_asset(self, api):
-        """v13.2 (طلب المستخدم): عملة فُتح شارتها تُجلب فوراً — 300 شمعة —
+        """v13.2 (طلب المستخدم): عملة فُتح شارتها تُجلب فوراً — دفعة مباشرة
+        (v14.7: 700 شمعة افتراضياً بدل 300، قابلة للتعديل من الإعدادات حتى 1000)
         والعملات التي لم يُفتح شارتها لا تجلب أبداً.
         v13.2 (طلب المستخدم): إذا فتح المستخدم عدة عملات بسرعة يجلب
         **واحدة تلو الأخرى** — طابور متسلسل بفاصل بين عملة وأخرى، بلا تسرّع."""
@@ -6569,6 +6586,50 @@ class Backend(QObject):
     @Property(str, constant=True)
     def histDaysStr(self):
         return str(self._hist_days)
+
+    # ───── v14.7 (طلب المستخدم حرفياً): عدد شموع الدفعة المباشرة ─────
+    @Property(str, constant=True)
+    def batchCandlesStr(self):
+        return str(self._batch_candles)
+
+    @Slot(str)
+    def setBatchCandles(self, v):
+        """v14.7 (طلب المستخدم حرفياً): «اريد ان تجلب 700 شمعة بدل 300 شمعة
+        كدفعة مباشرة للعملة ويمكن تعديلها في الاعدادات الى 1000 شمعة في
+        الدفعة» — يكتب الرقم في بطاقة الإعدادات ويضغط حفظ: الدفعة المباشرة
+        عند فتح العملة وكل دفعة تُرفع إلى الشارت تصبح بهذا الحجم
+        (100 حتى 1000، الافتراضي 700). يُحفظ ويُطبَّق فوراً على المحرك."""
+        try:
+            n = int(round(float(str(v or "").replace(",", ".").strip())))
+        except Exception:
+            self._log("err", "Batch candles: invalid number")
+            return
+        if not (100 <= n <= 1000):
+            self._log("err", "Batch candles: allowed range 100 – 1000")
+            return
+        self._batch_candles = n
+        self._save_cfg()
+        qx = _qx_module()
+        if qx:
+            try:
+                qx.PRELOAD_CANDLES = n      # الدفعة المباشرة عند فتح العملة
+            except Exception:
+                pass
+            try:
+                qx.PAGINATION_BATCH = n     # حجم كل دفعة تُرفع إلى الشارت
+            except Exception:
+                pass
+        self._log("ok", T[self._lang].get("batchSaved", "Batch candles saved"))
+        # أعد دفعات التاريخ للعملة الحالية فوراً بحجم الدفعة الجديد
+        api = self._qx_symbols.get(self._asset) or self._api_from_display(self._asset)
+        if api:
+            with self._qx_chain_lock:
+                self._qx_chain_done.discard((api, self._tf))
+                if self._tf != "1m":
+                    self._qx_chain_done.discard((api, "1m"))
+            self._qx_start_history_chain(api, self._tf)
+            if self._tf != "1m":
+                self._qx_start_history_chain(api, "1m")
 
     @Property(bool, notify=histChainChanged)
     def histChainActive(self):
@@ -6664,7 +6725,7 @@ class Backend(QObject):
         if not new_c:
             return 0
         new_c.sort(key=lambda x: x["t"])
-        cap = int(getattr(qx, "PAGINATION_BATCH", 300))
+        cap = int(getattr(qx, "PAGINATION_BATCH", 700))
         n_pushed = 0
         i = 0
         while i < len(new_c):
@@ -6809,6 +6870,12 @@ class Backend(QObject):
             holes_before = holes_after
         # إعادة الخط الكامل: شموع الآلة المُصلحة تحل محل المطابق زمنياً فقط —
         # لا فقدان لأي شمعة من دفعات التاريخ (طلب المستخدم: لا نريد فقدان الشموع)
+        # v14.7 (سبب «بعد سد الثغرات ايضا لماذا لم تسد ثغرتها»): الآلة الأصلية
+        # تُرجع آخر 1000 شمعة فقط (INITIAL_CANDLES في الكود المرجعي) فتبقى
+        # الثغرات الأعمق من نافذة الآلة كما هي. هنا تُعاد شموع الآلة فوق الخط
+        # الكامل ثم **نفس** دالة التعبئة الأصلية _fill_missing_slots (حرفياً
+        # من الكود المرجعي، نفس سقف max_gap=1440) تُطبَّق على الخط كاملاً —
+        # كل ثغرة ≤ يوم كامل تُسدّ بكل الأمداد لا آخر 1000 شمعة فقط.
         try:
             repaired = list(asset.candles or [])
             if full_before and repaired:
@@ -6821,6 +6888,8 @@ class Backend(QObject):
                     if c["time"] not in seen:
                         seen.add(c["time"])
                         unique.append(c)
+                unique = qx._fill_missing_slots(list(unique), period_seconds,
+                                                max_gap=1440)
                 unique = unique[-int(getattr(qx, "ASSET_MAX_CANDLES", 45000)):]
                 qx._apply_candles_to_asset(asset, unique)
         except Exception:
@@ -7064,11 +7133,13 @@ class Backend(QObject):
                 # يشغّل البث الحي نفسه فيتدفق التيك مباشرة
                 self._qx_ensure_asset(api)
         else:
-            # فريمات أعلى من الدقيقة: جلب مباشر 300 شمعة بنفس طريقة الخادم الأصلية.
+            # فريمات أعلى من الدقيقة: جلب مباشر بحجم الدفعة المضبوط (v14.7:
+            # 700 افتراضياً بدل 300 — طلب المستخدم) بنفس طريقة الخادم الأصلية.
             # ملاحظة: feed_key يُضبط داخل العامل عند وصول الشموع فعلاً — حتى لا يبدأ
             # مدّ الذيل (_qx_extend_tail) قبل جلب البيانات ويصنع شموعاً مسطحة وهمية.
             if force or not self._candles or self._qx_feed_key != key:
-                self._qx_fetch_tf_async(api, tf_sec, 300)
+                self._qx_fetch_tf_async(api, tf_sec,
+                                        int(getattr(qx, "PAGINATION_BATCH", 700)))
 
     def _qx_fetch_tf_async(self, api, tf_sec, count):
         """جلب شموع فريم أعلى داخل حلقة الخادم — نفس CLIENT.get_candles الأصلي
@@ -7149,6 +7220,36 @@ class Backend(QObject):
                 d["c"] = price
                 d["v"] += 1
         return [buckets[k] for k in sorted(buckets)]
+
+    def _qx_absorb_engine_no_shrink(self, engine, cap=None):
+        """v14.7 — استيعاب شموع المحرك في غذاء الواجهة **بلا تقليص أبداً**.
+
+        الآلة الأصلية fill_gap_once (حرفياً من الكود المرجعي) تعيد ذاكرة
+        العملة مقصوصة إلى آخر 1000 شمعة — لو نُسخ المحرك مباشرة فوق الغذاء
+        لُفقدت شموع دفعات التاريخ من الشارت («لماذا تختفي شموعها»). هنا:
+        شموع المحرك تحل محل المطابق زمنياً (إصلاحات السد تصل)، شموع الغذاء
+        الأقدم تبقى كما هي، وشموع المحرك الأحدث تُضاف — لا شمعة تُحذف."""
+        if not engine:
+            return False
+        cap = int(cap or self._QX_FEED_CAP)
+        if not self._candles:
+            self._candles = list(engine)[-cap:]
+            return True
+        eng_map = {}
+        for c in engine:
+            eng_map[c["t"]] = c
+        tail_t = self._candles[-1]["t"]
+        merged = [eng_map.get(c["t"], c) for c in self._candles]
+        merged += [c for c in engine if c["t"] > tail_t]
+        seen, unique = set(), []
+        for c in sorted(merged, key=lambda x: x["t"]):
+            if c["t"] not in seen:
+                seen.add(c["t"])
+                unique.append(c)
+        before = len(self._candles)
+        self._candles = unique[-cap:]
+        return len(self._candles) != before or any(
+            c["t"] in eng_map for c in self._candles[-3:])
 
     def _qx_merge_tail_full(self, new_feed, tf_sec=None):
         """دمج غذاء الخادم مع غذاء الواجهة من الذيل فقط — رأس البيانات يبقى ثابتاً
@@ -7320,7 +7421,10 @@ class Backend(QObject):
                     # v14.3: آلة سد الثغرات أصلحت شموعاً مغلقة في ذاكرة الخادم —
                     # الدمج الذيلي لا يوصل إصلاحات المنصف، تحديث كامل واحد يُظهرها
                     # (هنا تُغلق فجوة «بين شمعة الحية والشموع التي قبلها»)
-                    self._candles = candles[-self._QX_FEED_CAP:]
+                    # v14.7: الاستيعاب بلا تقليص — المحرك قد يعود مقصوصاً إلى
+                    # آخر 1000 شمعة من الآلة الأصلية، والنسخ المباشر كان يُفقد
+                    # شموع دفعات التاريخ من الشارت («لماذا تختفي شموعها»)
+                    self._qx_absorb_engine_no_shrink(candles)
                     self._qx_resync_pending = True
                 else:
                     self._qx_merge_tail_full(candles, tf_sec)
@@ -7477,6 +7581,13 @@ class Backend(QObject):
                 pass
             try:
                 qx.QX_HISTORY_DAYS = self._hist_days()
+            except Exception:
+                pass
+            # v14.7 (طلب المستخدم حرفياً): الدفعة المباشرة للعملة بحجم
+            # الإعداد المحفوظ — 700 شمعة افتراضياً وقابلة للتعديل حتى 1000
+            try:
+                qx.PRELOAD_CANDLES = int(self._batch_candles)
+                qx.PAGINATION_BATCH = int(self._batch_candles)
             except Exception:
                 pass
             try:
@@ -10696,6 +10807,42 @@ ApplicationWindow {
                     border.color: histDaysField.activeFocus ? backend.c.accent : backend.c.border
                 }
                 onAccepted: backend.setHistDays(histDaysField.text)
+            }
+            /* ───── v14.7 (طلب المستخدم حرفياً): «اريد ان تجلب 700 شمعة بدل
+               300 شمعة كدفعة مباشرة للعملة ويمكن تعديلها في الاعدادات الى 1000
+               شمعة في الدفعة» — يُكتب الرقم ويُضغط حفظ (الافتراضي 700) ───── */
+            Rectangle { Layout.fillWidth: true; height: 1; color: backend.c.border }
+            RowLayout {
+                spacing: 8
+                Icon { name: "candle"; sz: 14; tint: backend.c.accent }
+                Label { text: backend.s.batchCandles; font.pixelSize: 13; font.bold: true; color: backend.c.fg }
+                Item { Layout.fillWidth: true }
+                Btn { text: backend.s.batchSave; iconName: "ok"; implicitHeight: 30; font.pixelSize: 10
+                      onClicked: backend.setBatchCandles(batchField.text) }
+            }
+            Label {
+                text: backend.s.batchCandlesHint; font.pixelSize: 10; color: backend.c.sub
+                wrapMode: Text.WordWrap; Layout.fillWidth: true
+            }
+            TextField {
+                id: batchField
+                Layout.fillWidth: true
+                implicitHeight: 38
+                font.pixelSize: 12; font.family: "monospace"
+                color: backend.c.fg
+                text: backend.batchCandlesStr
+                placeholderText: "700"
+                placeholderTextColor: backend.c.sub
+                selectByMouse: true
+                leftPadding: 12; rightPadding: 12
+                inputMethodHints: Qt.ImhPreferNumbers
+                validator: IntValidator { bottom: 100; top: 1000; locale: "C" }
+                background: Rectangle {
+                    radius: 10; color: backend.c.bg
+                    border.width: batchField.activeFocus ? 2 : 1
+                    border.color: batchField.activeFocus ? backend.c.accent : backend.c.border
+                }
+                onAccepted: backend.setBatchCandles(batchField.text)
             }
             /* ───── مظهر الشارت: تغيير الخلفية وألوان الشموع بحرية (طلب المستخدم) ───── */
             Rectangle { Layout.fillWidth: true; height: 1; color: backend.c.border }

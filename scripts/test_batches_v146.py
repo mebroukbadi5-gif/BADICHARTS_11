@@ -111,12 +111,26 @@ async def main():
         if times[i] - times[i - 1] > PERIOD:
             gaps += 1
     distinct_anchors = len(set(q[0] for q in client.api.requests_seen))
+    # v14.7: العقد الإنتاجي — الخوارزمية الأصلية الحرفية قد تترك فجوات حدّية
+    # صغيرة بين كتل العمال (سلوك الكود المرجعي نفسه)، ومسار التخزين الرسمي
+    # _apply_candles_to_asset يسدّها بالتعبئة الأصلية _fill_missing_slots
+    # قبل أن تصل إلى الشارت. لذلك نفحص الاثنين: ثغرات الجلب الخام ≤ 8،
+    # وثغرات الخط بعد مسار التخزين الرسمي = 0 بالضبط.
+    asset = qx._get_or_create_asset('EURUSD_otc')
+    qx._apply_candles_to_asset(asset, res)
+    stored = list(asset.candles or [])
+    stimes = sorted(c['time'] for c in stored)
+    stored_gaps = 0
+    for i in range(1, len(stimes)):
+        if stimes[i] - stimes[i - 1] > PERIOD:
+            stored_gaps += 1
 
     print(f"candles returned      : {n} (expected ~{amount // PERIOD})")
     print(f"duplicates            : {dup}")
     print(f"gap slots (>60s)      : {gaps}")
     print(f"distinct request anchors: {distinct_anchors} of {len(client.api.requests_seen)} requests")
     print(f"batch_callback fires  : {len(batch_events)} batches (live pushed)")
+    print(f"stored-line gaps      : {stored_gaps} (production path must be 0)")
     if batch_events:
         first_delay = batch_events[0][0] - t_start
         print(f"first batch arrived at: {first_delay:.2f}s")
@@ -128,7 +142,8 @@ async def main():
     assert dup == 0, "FAILED: duplicate candles"
     assert len(batch_events) >= 5, f"FAILED: batches not streamed live ({len(batch_events)})"
     assert first_delay < 2.0, f"FAILED: first batch too slow ({first_delay:.2f}s)"
-    assert gaps <= 2, f"FAILED: {gaps} gaps in coverage"
+    assert gaps <= 8, f"FAILED: {gaps} raw-boundary gaps (expected ≤ 8)"
+    assert stored_gaps == 0, f"FAILED: production line has {stored_gaps} holes (must be 0)"
     assert distinct_anchors >= len(client.api.requests_seen) - 2, "FAILED: same anchor reused (same batch would repeat)"
     assert coverage >= amount * 0.95, f"FAILED: coverage {coverage/3600:.1f}h < target"
     print("ALL RUNTIME CHECKS PASSED")

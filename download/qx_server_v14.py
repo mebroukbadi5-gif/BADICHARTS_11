@@ -1968,8 +1968,12 @@ WRITE_INTERVAL = 0.5
 # ===== v13: ثوابت التحميل المسبق والبث المتعدد والقرص =====
 # BRLUSD_otc = عملة فتح الشارت (طلب المستخدم) — تُحمّل فوراً بعد الدخول.
 PRELOAD_FIRST_SYMBOL = "BRLUSD_otc"
-PRELOAD_CANDLES = 300          # 300 شمعة لكل عملة عند فتح شارتها (طلب المستخدم)
-PAGINATION_BATCH = 300         # v13.2: دفعة التمرير للخلف 300 شمعة وليس 170 (طلب المستخدم)
+# v14.7 (طلب المستخدم حرفياً): «اريد ان تجلب 700 شمعة بدل 300 شمعة كدفعة
+# مباشرة للعملة ويمكن تعديلها في الاعدادات الى 1000 شمعة في الدفعة» —
+# الدفعة المباشرة عند فتح العملة 700 شمعة (بدل 300)، وقابلة للتعديل من
+# بطاقة الإعدادات حتى 1000 شمعة في الدفعة (التطبيق يضبط القيمتين معاً).
+PRELOAD_CANDLES = 700          # الدفعة المباشرة عند فتح العملة — 700 شمعة (v14.7)
+PAGINATION_BATCH = 700         # حجم الدفعة المرفوعة إلى الشارت — 700 شمعة (v14.7)
 # v14.3 (طلب المستخدم حرفياً): «عند فتح العملة يجلب دفعة 300 شمعة ثم يجلب
 # 300 اخرى مثل ماكانت تفعل في السابق خليها تجلب 2 يوم ... ضع في الاعدادات
 # كم يريد ان يسحب عدد الايام تبع الشموع ... الافتراضي 2 يوم يمكنه جعله
@@ -8165,6 +8169,23 @@ async def v14_gap_fill_for_asset(api_symbol: str, *,
         return False
     ok = False
     t0 = time.monotonic()
+    # v14.7 (جذر «لماذا تختفي شموعها ولا نعلم لماذا يحدث هكذا»):
+    # الآلة الأصلية fill_gap_once (حرفياً من الكود المرجعي) تعيد الخط مقصوصاً
+    # إلى آخر INITIAL_CANDLES شمعة — وفي v14 يحتفظ المحرك بدفعات التاريخ كاملة
+    # (حتى 45000 شمعة)، فكان كل سد يقلّص ذاكرة العملة إلى آخر 1000 شمعة،
+    # ويحفظ اللقطة المقصوصة في القاعدة، ثم يجدها مدقق الفجوات فيكون ثغرات
+    # أعمق فيرفع التجمّد ويسد من جديد — حلقة تقليص لا تنتهي تُفقد الشموع من
+    # الشارت. الحل هنا (طبقة التقوية فقط — الخوارزمية الأصلية نفسها بلا أي
+    # لمس): قبل الآلة تُحفظ نسخة كاملة من الخط، وبعدها تُعاد الشموع المُصلَحة
+    # إلى مكانها زمنياً فوق الخط الكامل + نفس دالة التعبئة الأصلية
+    # _fill_missing_slots (من الكود المرجعي نفسه) تُطبَّق على الخط **كاملاً**
+    # فتُسدّ كل الثغرات (حتى يوم كامل) في كل الأمداد المجلوبة لا في آخر
+    # 1000 شمعة فقط — هذا سبب «بعد سد الثغرات لماذا لم تسد ثغرتها».
+    full_before = []
+    try:
+        full_before = list(asset.candles or [])
+    except Exception:
+        full_before = []
     try:
         await MT4_WRITER.fill_gap_once(client, asset,
                                        int(globals().get("PERIOD", 1)))
@@ -8179,6 +8200,34 @@ async def v14_gap_fill_for_asset(api_symbol: str, *,
             logmsg(f"[v14-gap] fill error for {api_symbol}: {e}")
         except Exception:
             pass
+    # v14.7: إعادة الخط الكامل بعد الآلة — شموع الآلة المُصلَحة تحل محل
+    # المطابق زمنياً فقط + شموع الآلة الجديدة تُضاف، ولا يُفقد أي شمعة من
+    # دفعات التاريخ (نفس نمط استعادة التطبيق في _qx_seal_gaps)، ثم التعبئة
+    # الأصلية _fill_missing_slots على الخط كاملاً تسد كل ثغرة ≤ يوم كامل.
+    try:
+        repaired = list(asset.candles or [])
+        if full_before and repaired:
+            rep_map = {c.get("time"): c for c in repaired}
+            full_t = {c.get("time") for c in full_before}
+            restored = [rep_map.get(c.get("time"), c) for c in full_before]
+            restored += [c for c in repaired if c.get("time") not in full_t]
+            seen, unique = set(), []
+            for c in sorted(restored, key=lambda x: x.get("time", 0)):
+                if c.get("time") not in seen:
+                    seen.add(c.get("time"))
+                    unique.append(c)
+            restored = unique
+        else:
+            restored = repaired or full_before
+        if restored:
+            restored = _fill_missing_slots(restored,
+                                           int(globals().get("PERIOD_SECONDS", 60) or 60),
+                                           max_gap=1440)
+            restored = restored[-int(globals().get("ASSET_MAX_CANDLES", 45000)):]
+            _apply_candles_to_asset(asset, restored)
+    except Exception as e:
+        V14_JOURNAL.record("gap_restore_error", asset=api_symbol,
+                           error=str(e)[:160])
     dt = time.monotonic() - t0
     V14_OPENED.note_gap_fill(api_symbol, ok)
     V14_METRICS.inc("v14.gap.fill_runs" if ok else "v14.gap.fill_failed")

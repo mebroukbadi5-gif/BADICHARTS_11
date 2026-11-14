@@ -474,3 +474,13 @@ NameError: name 'bound' is not defined. Did you mean: 'bound2'?
 [21:48:43] [v14-endpoint] circuit selftest -> CLOSED
 [21:48:47] [v14-supervisor] loop 'selftest_dying' crashed (run 1, attempt 1): RuntimeError: simulated crash for selftest — restarting
 [21:48:48] [v14-supervisor] loop 'selftest_dying' crashed (run 2, attempt 2): RuntimeError: simulated crash for selftest — restarting
+[00:10:56] [v14-endpoint] circuit selftest -> OPEN
+[00:10:56] [v14-endpoint] circuit selftest -> HALF_OPEN
+[00:10:56] [v14-endpoint] circuit selftest -> CLOSED
+[00:10:59] [v14-supervisor] loop 'selftest_dying' crashed (run 1, attempt 1): RuntimeError: simulated crash for selftest — restarting
+[00:11:00] [v14-supervisor] loop 'selftest_dying' crashed (run 2, attempt 2): RuntimeError: simulated crash for selftest — restarting
+[00:15:39] [v14-endpoint] circuit selftest -> OPEN
+[00:15:39] [v14-endpoint] circuit selftest -> HALF_OPEN
+[00:15:39] [v14-endpoint] circuit selftest -> CLOSED
+[00:15:42] [v14-supervisor] loop 'selftest_dying' crashed (run 1, attempt 1): RuntimeError: simulated crash for selftest — restarting
+[00:15:44] [v14-supervisor] loop 'selftest_dying' crashed (run 2, attempt 2): RuntimeError: simulated crash for selftest — restarting

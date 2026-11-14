@@ -32,3 +32,161 @@ Traceback (most recent call last):
     raise JSONDecodeError("Extra data", s, end)
 json.decoder.JSONDecodeError: Extra data: line 1 column 99 (char 98)
 
+[00:11:04] FATAL in main thread (top level): FAILED: 4 gaps in coverage
+Traceback (most recent call last):
+  File "/home/z/my-project/scripts/test_batches_v146.py", line 137, in <module>
+    asyncio.run(main())
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/z/my-project/scripts/test_batches_v146.py", line 131, in main
+    assert gaps <= 2, f"FAILED: {gaps} gaps in coverage"
+           ^^^^^^^^^
+AssertionError: FAILED: 4 gaps in coverage
+
+[00:11:23] FATAL in main thread (top level): FAILED: 4 gaps in coverage
+Traceback (most recent call last):
+  File "/home/z/my-project/scripts/test_batches_v146.py", line 137, in <module>
+    asyncio.run(main())
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/z/my-project/scripts/test_batches_v146.py", line 131, in main
+    assert gaps <= 2, f"FAILED: {gaps} gaps in coverage"
+           ^^^^^^^^^
+AssertionError: FAILED: 4 gaps in coverage
+
+[00:11:25] FATAL in main thread (top level): FAILED: 4 gaps in coverage
+Traceback (most recent call last):
+  File "/home/z/my-project/scripts/test_batches_v146.py", line 137, in <module>
+    asyncio.run(main())
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/z/my-project/scripts/test_batches_v146.py", line 131, in main
+    assert gaps <= 2, f"FAILED: {gaps} gaps in coverage"
+           ^^^^^^^^^
+AssertionError: FAILED: 4 gaps in coverage
+
+[00:11:26] FATAL in main thread (top level): FAILED: 4 gaps in coverage
+Traceback (most recent call last):
+  File "/home/z/my-project/scripts/test_batches_v146.py", line 137, in <module>
+    asyncio.run(main())
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/z/my-project/scripts/test_batches_v146.py", line 131, in main
+    assert gaps <= 2, f"FAILED: {gaps} gaps in coverage"
+           ^^^^^^^^^
+AssertionError: FAILED: 4 gaps in coverage
+
+[00:11:39] FATAL in main thread (top level): FAILED: 4 gaps in coverage
+Traceback (most recent call last):
+  File "/home/z/my-project/scripts/test_batches_v146.py", line 137, in <module>
+    asyncio.run(main())
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/z/my-project/scripts/test_batches_v146.py", line 131, in main
+    assert gaps <= 2, f"FAILED: {gaps} gaps in coverage"
+           ^^^^^^^^^
+AssertionError: FAILED: 4 gaps in coverage
+
+[00:14:24] FATAL in main thread (top level): No module named 'PySide6'
+Traceback (most recent call last):
+  File "/home/z/my-project/scripts/test_v147_fixes.py", line 129, in <module>
+    test_absorb_no_shrink()
+  File "/home/z/my-project/scripts/test_v147_fixes.py", line 107, in test_absorb_no_shrink
+    spec2.loader.exec_module(app)
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/z/my-project/download/BadiChartsStudio_live.py", line 3269, in <module>
+    from PySide6.QtCore import QObject, Property, Signal, Slot, QTimer, QUrl, QFileSystemWatcher, QMimeData
+ModuleNotFoundError: No module named 'PySide6'
+
+[00:14:46] FATAL in main thread (top level): setup: deep gap expected (got 0)
+Traceback (most recent call last):
+  File "/home/z/my-project/scripts/test_v147_fixes.py", line 145, in <module>
+    asyncio.run(test_no_truncation_and_deep_gap_sealed())
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/z/my-project/scripts/test_v147_fixes.py", line 57, in test_no_truncation_and_deep_gap_sealed
+    assert holes_before == 79, f"setup: deep gap expected (got {holes_before})"
+           ^^^^^^^^^^^^^^^^^^
+AssertionError: setup: deep gap expected (got 0)
+
+[00:15:13] FATAL in main thread (top level): setup: deep gap expected (got 80)
+Traceback (most recent call last):
+  File "/home/z/my-project/scripts/test_v147_fixes.py", line 148, in <module>
+    asyncio.run(test_no_truncation_and_deep_gap_sealed())
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/z/my-project/scripts/test_v147_fixes.py", line 60, in test_no_truncation_and_deep_gap_sealed
+    assert holes_before == 79, f"setup: deep gap expected (got {holes_before})"
+           ^^^^^^^^^^^^^^^^^^
+AssertionError: setup: deep gap expected (got 80)
+
+[00:15:20] FATAL in main thread (top level): v14_gap_fill_for_asset should succeed
+Traceback (most recent call last):
+  File "/home/z/my-project/scripts/test_v147_fixes.py", line 148, in <module>
+    asyncio.run(test_no_truncation_and_deep_gap_sealed())
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/z/my-project/scripts/test_v147_fixes.py", line 76, in test_no_truncation_and_deep_gap_sealed
+    assert ok, "v14_gap_fill_for_asset should succeed"
+           ^^
+AssertionError: v14_gap_fill_for_asset should succeed
+
+[00:15:32] [v14-gap] gap fill done for TESTV147_otc (test) in 0.0s — original method untouched
+[00:15:49] [v14-gap] gap fill done for TESTV147_otc (test) in 0.0s — original method untouched
