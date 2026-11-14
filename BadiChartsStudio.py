@@ -3259,14 +3259,15 @@ T = {
         "notifHint": "Notifications from your paid indicators appear here — the developer sends them from his own server (updates, subscription reminders). No files can ever pass through this channel.",
         "notifClear": "Clear all",
         "notifUnreadX": "%1 unread notification(s)", "notifAllRead": "All notifications read",
-        "paidSrvLbl": "Paid control server (optional) — the app polls it and accepts whitelist commands only:",
-        "paidIdLbl": "Paid indicator ID on that server:",
         "badiEnc": "Encrypt the indicator — export a .badi file", "badiImp": "Import an encrypted indicator (.badi)",
         "badiSaved": "Encrypted indicator saved", "badiEmpty": "There is no code to encrypt",
         "badiJsOnly": "Only JavaScript indicators can be encrypted", "badiOk": "Loaded — runs internally, its code stays hidden",
         "badiFail": "BADI import failed", "badiHint": "The 256-bit key is fused into the app — it is never written to any file, never shown and cannot be copied. The encrypted indicator runs inside the chart directly: its code never opens in the editor and is never saved anywhere. The .badi file sits next to the real indicator file — like MetaTrader.",
-        "licTitle": "Encrypt indicator — buyer license", "licHint": "Paste the buyer's USER ID so the indicator runs on his device only. Multiple buyers: separate IDs with commas. Leave empty to allow everyone.",
+        "licTitle": "Encrypt indicator — buyer license", "licHint": "The buyer's USER ID is fetched automatically from your Telegram bot — click his name above to embed it into the encrypted indicator. The manual field below is a fallback only (multiple IDs: commas). Empty = works for everyone.",
         "licOk": "Encrypt", "licCancel": "Cancel", "yourUid": "Your USER ID:",
+        "buyersTitle": "Buyers from your Telegram bot — click one to embed his USER ID into the indicator:",
+        "buyersFetch": "Fetching buyers from the bot…",
+        "buyersNone": "No buyers yet — the buyer opens your bot and sends his USER ID, then reopen this dialog.", "buyersErr": "Could not fetch buyers — save the bot token in settings first",
         "uidCopied": "USER ID copied to clipboard", "folderOpen": "App folder opened",
         "badiFolder": "Indicators folder", "badiFolderHint": "Created indicators and tools are saved here as real files — you can also drop your own files into these folders and the app loads them automatically.",
         "chartLook": "Chart appearance", "lookHint": "Type any color freely (hex like #22E08A or rgba) — not limited to presets. Changes apply instantly and are saved.",
@@ -3337,14 +3338,15 @@ T = {
         "notifHint": "تظهر هنا إشعارات المؤشرات المدفوعة — المبرمج يرسلها من خادمه (تحديثات، تذكير بالاشتراك). لا يمكن لأي ملف أن يمر عبر هذه القناة إطلاقًا.",
         "notifClear": "مسح الكل",
         "notifUnreadX": "%1 إشعار غير مقروء", "notifAllRead": "كل الإشعارات مقروءة",
-        "paidSrvLbl": "خادم التحكم المدفوع (اختياري) — التطبيق يسأله دوريًا ويقبل الأوامر البيضاء فقط:",
-        "paidIdLbl": "معرف المؤشر المدفوع عند ذلك الخادم:",
         "badiEnc": "تشفير المؤشر وتصديره إلى ملف .badi", "badiImp": "استيراد مؤشر مشفر (.badi)",
         "badiSaved": "تم حفظ المؤشر المشفر", "badiEmpty": "لا يوجد كود لتشفيره",
         "badiJsOnly": "التشفير لمؤشرات JavaScript فقط — ملفات Python غير مدعومة", "badiOk": "تم التحميل — يعمل داخليًا وكودــه مخفي",
         "badiFail": "فشل استيراد BADI", "badiHint": "المفتاح 256-بت مدموج داخل التطبيق — لا يُكتب أبدًا في أي ملف، ولا يُعرض، ولا يمكن نسخه. المؤشر المشفر يعمل داخل الشارت مباشرة: كودــه لا يُفتح في المحرر ولا يُحفظ في أي مكان. الملف المشفر .badi يُحفظ بجوار ملف المؤشر الأصلي — مثل ميتاتريدر.",
-        "licTitle": "تشفير المؤشر — ترخيص المشتري", "licHint": "الصق معرّف المشتري (USER ID) ليعمل المؤشر على جهازه هو فقط. لعدة مشترين: افصل المعرفات بفاصلة. اتركه فارغًا ليعمل مع الجميع.",
+        "licTitle": "تشفير المؤشر — ترخيص المشتري", "licHint": "معرّف المشتري يُجلب تلقائيًا من بوت تلجرام — انقر على اسمه بالأعلى ليُدمَج داخل المؤشر المشفر مباشرة. الحقل اليدوي بالأسفل احتياط فقط (لعدة معرفات: فاصلة). اتركه فارغًا ليعمل مع الجميع.",
         "licOk": "تشفير", "licCancel": "إلغاء", "yourUid": "معرّفك (USER ID):",
+        "buyersTitle": "المشترون من بوت تلجرام — انقر على مشترٍ لدمج معرّفه داخل المؤشر:",
+        "buyersFetch": "جلب المشترين من البوت…",
+        "buyersNone": "لا مشترين بعد — المشتري يفتح بوتك ويرسل له معرّفه ثم أعد فتح هذه النافذة.", "buyersErr": "تعذّر جلب المشترين — احفظ توكن البوت في الإعدادات أولًا",
         "uidCopied": "تم نسخ معرّف المستخدم", "folderOpen": "تم فتح مجلد التطبيق",
         "badiFolder": "مجلد المؤشرات", "badiFolderHint": "المؤشرات والأدوات التي تنشئها تُحفظ هنا كملفات حقيقية — ويمكنك أن تضع ملفاتك مباشرة في هذه المجلدات وسيتعرف عليها التطبيق تلقائيًا.",
         "chartLook": "مظهر الشارت", "lookHint": "اكتب أي لون بحرية (hex مثل #22E08A أو rgba) — ليست الألوان محدودة بقوائم. التغيير يُطبق فورًا ويُحفظ.",
@@ -4183,15 +4185,19 @@ def _tg_send(token, chats, text, png=None):
 # ---------------------------------------------------------------- الباك إند
 # ═══════════════════════════════════════════════════════════════════════════
 #  BADI — BADI SECURE INDICATOR FORMAT (المؤشرات المشفرة)
-#  صيغة الملف .badi:  MAGIC "BADI" (4) + VERSION (1) + NONCE (12) + AES-256-GCM(ciphertext+tag)
-#  • المفتاح الرئيسي 256-بت مدموج داخل هذا الملف (BADI_MASTER_KEY_HEX) — ثابت
-#    للجميع، لا يُكتب في أي ملف، ولا يُنسخ إلى الحافظة، ولا يُعرض، ولا يُرسل —
-#    لا توجد أي وصلة تُخرجه من التطبيق؛ البصمة المعروضة SHA-256 مقطوعة لا تكشفه.
-#  • التشفير AES-GCM مع AAD = MAGIC+VERSION حتى لا يُنقل أي جزء من الملف دون كشفه.
+#  صيغة الملف .badi (v2):  MAGIC "BADI" (4) + VERSION (1) + NONCE (12) +
+#                          AES-256-GCM(ciphertext+tag) + SHA-256 مملح (32)
+#  • BADI Vault — Multi-Layer Key Protection: المفتاح 256-بت واحد لكل نسخ
+#    التطبيق (لا يُولَّد عند التثبيت)، مدموج بطبقات متعددة داخل هذا الملف —
+#    لا يظهر بأي صيغة صريحة (لا hex ولا base64 ولا بايتات متتالية)، لا يُكتب
+#    في أي ملف، ولا يُعرض، ولا يُرسل؛ البصمة المعروضة SHA-256 مقطوعة لا تكشفه.
+#  • طبقة السلامة: SHA-256 مملح للمغلف كله — أي تعديل في أي بايت يُرفض قبل
+#    فك التشفير، وفوقه تواقيع AES-GCM مع AAD = MAGIC+VERSION.
 #  • المؤشر يُفك داخل الذاكرة فقط، يُفحص (ماسح أنماط ممنوعة + QuickJS معزولة
 #    بلا ملفات ولا شبكة) ثم يُشغَّل داخليًا على الشارت: لا يُفتح في المحرر،
 #    لا يُحفظ، ولا يظهر كوده للمستخدم إطلاقًا — المؤشرات المدفوعة آمنة.
 #  • الملف المشفر .badi يُكتب بجوار ملف المؤشر الأصلي — مثل ميتاتريدر.
+#    ملفات الإصدار v1 القديمة تُقبل للقراءة كما هي.
 # ═══════════════════════════════════════════════════════════════════════════
 try:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -4207,7 +4213,9 @@ except Exception:
     _HAS_QJS = False
 
 BADI_MAGIC = b"BADI"
-BADI_VERSION = b"\x01"
+BADI_VERSION = b"\x02"             # v2 = مغلف بطبقة سلامة صريحة (SHA-256 مملح)
+BADI_VERSION_V1 = b"\x01"          # إصدار قديم — قراءة فقط (تواقيع GCM تحميه)
+BADI_INTEG_SALT = b"BADI-integrity-v2"
 BADI_MSGS = {
     "en": {
         "noaes": "Encryption library missing — run: pip install cryptography",
@@ -4215,6 +4223,7 @@ BADI_MSGS = {
         "badver": "Unsupported BADI version",
         "short": "Corrupted file — data is incomplete",
         "key": "Decryption failed — the file is corrupted or the app key does not match",
+        "integ": "Tampered file — integrity check failed",
         "text": "Corrupted file — the decrypted content is not text",
         "noc": "The code does not define calculate(candles, settings)",
         "run": "The code crashed in the sandbox",
@@ -4231,6 +4240,7 @@ BADI_MSGS = {
         "badver": "إصدار ملف BADI غير مدعوم",
         "short": "الملف تالف — البيانات غير مكتملة",
         "key": "فك التشفير فشل — الملف تالف أو مفتاح التطبيق غير مطابق",
+        "integ": "الملف معدَّل — فحص السلامة لم يطابق",
         "text": "الملف تالف — المحتوى المفكوك ليس نصًا",
         "noc": "الكود لا يعرّف calculate(candles, settings)",
         "run": "الكود توقف داخل بيئة الاختبار المعزولة",
@@ -4268,18 +4278,46 @@ class BADIError(Exception):
 
 
 class BADI:
-    """تشفير/فك تشفير مؤشرات JavaScript بصيغة .badi — المفتاح داخل التطبيق فقط.
+    """تشفير/فك تشفير مؤشرات JavaScript بصيغة .badi — BADI Vault.
 
-    المفتاح 256-بت مدموج داخل هذا الملف (طلب المستخدم: يبقى داخل التطبيق
-    ولا يُكتب أبدًا داخل ملف المؤشر). لاستخدام مفتاحك الخاص استبدل قيمة
-    BADI_MASTER_KEY_HEX بـ 64 حرفًا سداسيًا عشوائيًا."""
+    المفتاح 256-بت واحد لكل نسخ التطبيق (طلب المستخدم: لا يُولَّد عند التثبيت
+    ولا يُكتب أبدًا داخل ملف المؤشر) — مدموج بطبقات متعددة (BADI Vault —
+    Multi-Layer Key Protection) ولا يظهر في الكود بأي صيغة صريحة: طبقاته
+    تُجمَع داخل الذاكرة لحظة الاستخدام فقط ثم تُرمى."""
 
-    BADI_MASTER_KEY_HEX = "AAC20E18936337C73D4D358E0A65BE9A2CFF59A96EA2709ACE23F468A082379F"
+    # ═══ BADI Vault — Multi-Layer Key Protection (طلب المستخدم) ═══
+    # الطبقة 1: قسمان متكاملان يُدمجان بـ XOR — لا يكفي أي منهما وحده
+    # الطبقة 2: تدوير دوري للبايتات
+    # الطبقة 3: قناع XOR مستقل لكل بايت
+    # الطبقة 4: توقيع SHA-256 يفحص صحة التجميع — أي طبقة فاسدة = رفض فوري
+    _V_A = (
+        24, 187, 32, 30, 15, 98, 167, 54,
+        136, 52, 138, 188, 34, 37, 48, 185,
+        98, 149, 67, 107, 136, 90, 225, 37,
+        78, 94, 244, 60, 176, 19, 123, 235)
+    _V_B = (
+        4, 71, 102, 44, 237, 186, 189, 76,
+        118, 161, 175, 3, 189, 100, 13, 8,
+        123, 202, 176, 236, 219, 202, 223, 89,
+        36, 82, 152, 212, 162, 47, 217, 143)
+    _V_M = (
+        166, 174, 230, 10, 175, 193, 83, 219,
+        193, 11, 7, 108, 210, 127, 196, 100,
+        185, 218, 230, 54, 47, 159, 193, 131,
+        145, 208, 115, 59, 48, 188, 75, 245)
+    _V_R = 7
+    _V_SIG = (28, 107, 240, 17)
 
     @classmethod
     def master_key(cls):
-        """مفتاح 256-بت مدموج داخل التطبيق — 32 بايت (64 حرفًا hex)."""
-        return bytes.fromhex(cls.BADI_MASTER_KEY_HEX)
+        """BADI Vault: تجميع المفتاح 256-بت من طبقاته داخل الذاكرة فقط."""
+        raw = bytes(((a ^ b) & 0xFF) for a, b in zip(cls._V_A, cls._V_B))
+        r = cls._V_R % 32
+        raw = raw[-r:] + raw[:-r] if r else raw
+        key = bytes(((x ^ m) & 0xFF) for x, m in zip(raw, cls._V_M))
+        if hashlib.sha256(key + b"badi-vault-check").digest()[:4] != bytes(cls._V_SIG):
+            raise RuntimeError("BADI Vault key assembly failed")
+        return key
 
     @classmethod
     def fingerprint(cls):
@@ -4288,28 +4326,40 @@ class BADI:
 
     @classmethod
     def encrypt(cls, source: str) -> bytes:
+        """تشفير AES-256-GCM + مغلف v2 بطبقة سلامة صريحة (SHA-256 مملح)."""
         if not _HAS_AESGCM:
             raise BADIError("noaes")
         nonce = os.urandom(12)
         aes = AESGCM(cls.master_key())
         enc = aes.encrypt(nonce, source.encode("utf-8"), BADI_MAGIC + BADI_VERSION)
-        return BADI_MAGIC + BADI_VERSION + nonce + enc
+        blob = BADI_MAGIC + BADI_VERSION + nonce + enc
+        return blob + hashlib.sha256(blob + BADI_INTEG_SALT).digest()
 
     @classmethod
     def decrypt(cls, blob: bytes) -> str:
+        """فك التشفير بعد فحص السلامة أولًا: أي تعديل في أي بايت = رفض فوري.
+        ملفات v1 القديمة تُقبل للقراءة وتحميها تواقيع AES-GCM نفسها."""
         if not _HAS_AESGCM:
             raise BADIError("noaes")
-        if len(blob) < 4 or blob[:4] != BADI_MAGIC:
+        if len(blob) < 5 or blob[:4] != BADI_MAGIC:
             raise BADIError("notbadi")
-        if len(blob) < 5:
-            raise BADIError("short")
-        if blob[4:5] != BADI_VERSION:
+        ver = blob[4:5]
+        if ver == BADI_VERSION:
+            body = blob[:-32]
+            if len(body) < 5 + 12 + 16:
+                raise BADIError("short")
+            if hashlib.sha256(body + BADI_INTEG_SALT).digest() != blob[-32:]:
+                raise BADIError("integ")          # الملف معدَّل — رفض قبل أي فك تشفير
+            nonce, ct = body[5:17], body[17:]
+        elif ver == BADI_VERSION_V1:
+            if len(blob) < 5 + 12 + 16:
+                raise BADIError("short")
+            nonce, ct = blob[5:17], blob[17:]
+        else:
             raise BADIError("badver")
-        if len(blob) < 5 + 12 + 16:
-            raise BADIError("short")
         try:
             aes = AESGCM(cls.master_key())
-            plain = aes.decrypt(blob[5:17], blob[17:], BADI_MAGIC + BADI_VERSION)
+            plain = aes.decrypt(nonce, ct, BADI_MAGIC + ver)
         except Exception:
             raise BADIError("key")
         try:
@@ -5195,6 +5245,7 @@ class Backend(QObject):
     myIndsChanged = Signal()               # قائمة مؤشراتي في صفحة المؤشرات تغيّرت (طلب المستخدم)
     notifChanged = Signal()                # بطاقة الإشعارات تغيّرت (طلب المستخدم)
     paidCmd = Signal(str)                  # أمر تحكم بعيد صالح: تشغيل/إيقاف مؤشر مدفوع (طلب المستخدم)
+    buyersFetched = Signal(str)            # قائمة المشترين المجلوبة من بوت تلجرام (طلب المستخدم)
 
     def __init__(self):
         super().__init__()
@@ -5809,10 +5860,19 @@ class Backend(QObject):
             mime.setUrls([QUrl.fromLocalFile(path)])
             mime.setText(path)
             QGuiApplication.clipboard().setMimeData(mime)
-            # فتح تلجرام مباشرة بعد النسخ (طلب المستخدم) — تطبيق تلجرام إن وُجد وإلا الويب
+            # فتح تلجرام مع محادثة المشاركة نفسها (طلب المستخدم): tg://msg_url يفتح
+            # نافذة المشاركة في تطبيق تلجرام لاختيار المحادثة مباشرة — إن لم يوجد
+            # التطبيق: رابط t.me/share في المتصفح، وإلا تلجرام ويب. فتح التطبيق
+            # بلا معاملات لا يُظهر شيئًا — هنا تُمرَّر المشاركة نفسها (رابط + نص).
             try:
-                if not QDesktopServices.openUrl(QUrl("tg://")):
-                    QDesktopServices.openUrl(QUrl("https://web.telegram.org/a/"))
+                _su = urllib.parse.quote("https://t.me/badicharts", safe="")
+                _st = urllib.parse.quote(
+                    "BadiCharts indicator — " + os.path.basename(path), safe="")
+                if not QDesktopServices.openUrl(QUrl(
+                        "tg://msg_url?url=" + _su + "&text=" + _st)):
+                    if not QDesktopServices.openUrl(QUrl(
+                            "https://t.me/share/url?url=" + _su + "&text=" + _st)):
+                        QDesktopServices.openUrl(QUrl("https://web.telegram.org/a/"))
             except Exception:
                 pass
             return json.dumps({"ok": True, "path": path})
@@ -6257,6 +6317,49 @@ class Backend(QObject):
         return json.dumps({"token": cfg.get("token", ""), "chats": cfg.get("chats", ""),
                            "tmpl": cfg.get("tmpl") or TG_TMPL_DEFAULT,
                            "attach": bool(cfg.get("attach", True))})
+
+    @Slot()
+    def badiBotBuyers(self):
+        """جلب المشترين من بوت تلجرام (طلب المستخدم): الخادم يجلب معرّف المستخدم
+        الذي يريد البائع البيع له ويُدمَج داخل المؤشر — لا بطاقة خادم ولا إدخال
+        يدوي إلا كاحتياط. كل مستخدم تواصل مع البوت يظهر هنا، ومعرّفه BADI
+        يُستخرج تلقائيًا من رسائله. النتيجة عبر buyersFetched (خيط منفصل)."""
+        def run():
+            out = {"ok": False, "error": "", "buyers": []}
+            try:
+                tok = str(_read_json(CFG_FILE, {}).get("token") or "").strip()
+                if not tok:
+                    out["error"] = "notoken"
+                else:
+                    req = urllib.request.Request(
+                        "https://api.telegram.org/bot" + tok
+                        + "/getUpdates?limit=100&allowed_updates=%5B%22message%22%5D",
+                        headers={"User-Agent": "BadiCharts-Studio"})
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        data = json.loads(resp.read().decode("utf-8", "ignore"))
+                    users = {}
+                    for upd in data.get("result") or []:
+                        msg = upd.get("message") or upd.get("edited_message") or {}
+                        frm = msg.get("from") or {}
+                        num = frm.get("id")
+                        if not num:
+                            continue
+                        ent = users.setdefault(int(num), {
+                            "name": ((frm.get("first_name") or "") + " "
+                                     + (frm.get("last_name") or "")).strip(),
+                            "user": ("@" + str(frm.get("username"))) if frm.get("username") else "",
+                            "uid": ""})
+                        for cand in re.findall(
+                                r"BADI-[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}",
+                                str(msg.get("text") or "").upper()):
+                            if not ent["uid"]:
+                                ent["uid"] = cand
+                    out["ok"] = True
+                    out["buyers"] = [dict(v, id=str(k)) for k, v in users.items()]
+            except Exception as e:
+                out["error"] = str(e)[:120]
+            self.buyersFetched.emit(json.dumps(out))
+        threading.Thread(target=run, daemon=True).start()
 
     # ---------- BADI: المؤشرات المشفرة (المفتاح داخل التطبيق فقط) ----------
     badiFpChanged = Signal()
@@ -8295,7 +8398,7 @@ ApplicationWindow {
     function badiExportConfirm() {
         var pe = win.pendingExport
         if (!pe) { licPop.close(); return }
-        var r = JSON.parse(backend.badiExport(pe.c, pe.n, pe.k, licField.text, paidSrvField.text.trim(), paidIdField.text.trim()))
+        var r = JSON.parse(backend.badiExport(pe.c, pe.n, pe.k, licField.text, "", ""))
         licPop.close()
         win.pendingExport = null
         if (r.ok) win.webLog("ok", backend.s.badiSaved + " ← " + r.path)
@@ -8901,7 +9004,24 @@ ApplicationWindow {
     Popup {
         id: licPop
         parent: Overlay.overlay
-        onOpened: { paidSrvField.text = ""; paidIdField.text = "" }
+        onOpened: {
+            licField.text = ""
+            buyersLbl.text = backend.s.buyersFetch
+            buyers = []
+            backend.badiBotBuyers()
+        }
+        property var buyers: []
+        function fillBuyers(js) {
+            var o = {}
+            try { o = JSON.parse(js || "{}") } catch (e) { o = {} }
+            if (!o.ok) { buyers = []; buyersLbl.text = backend.s.buyersErr; return }
+            buyers = o.buyers || []
+            buyersLbl.text = buyers.length ? backend.s.buyersTitle : backend.s.buyersNone
+        }
+        Connections {
+            target: backend
+            function onBuyersFetched(js) { licPop.fillBuyers(js) }
+        }
         anchors.centerIn: Overlay.overlay
         width: Math.min(430, win.width - 48)
         padding: 16
@@ -8949,42 +9069,60 @@ ApplicationWindow {
                 }
                 onAccepted: win.badiExportConfirm()
             }
-            /* حقول المؤشر المدفوع (طلب المستخدم): خادم المبرمج + معرف المؤشر عنده —
-               يُدمان داخل المغلف المشفر نفسه، والتحكم لاحقًا من خادمه فقط بأوامر بيضاء */
-            Label { text: backend.s.paidSrvLbl; font.pixelSize: 11; color: backend.c.sub
-                    wrapMode: Text.WordWrap; Layout.fillWidth: true }
-            TextField {
-                id: paidSrvField
-                Layout.fillWidth: true
-                implicitHeight: 38
-                font.pixelSize: 12
-                color: backend.c.fg
-                placeholderText: "https://your-server.com/badi/api"
-                placeholderTextColor: backend.c.sub
-                selectByMouse: true
-                leftPadding: 12; rightPadding: 12
-                background: Rectangle {
-                    radius: 10; color: backend.c.bg
-                    border.width: paidSrvField.activeFocus ? 2 : 1
-                    border.color: paidSrvField.activeFocus ? backend.c.accent : backend.c.border
-                }
+            /* المشترين من البوت (طلب المستخدم): الخادم يجلب معرّف المشتري الذي يريد
+               البائع البيع له ويُدمَج داخل المؤشر المشفر مباشرة — لا بطاقة خادم،
+               ولا يُظهر المفتاح أبدًا، والإدخال اليدوي بالأسفل احتياط فقط */
+            RowLayout {
+                Layout.fillWidth: true; spacing: 8
+                Label { id: buyersLbl; text: backend.s.buyersTitle; font.pixelSize: 11
+                        color: backend.c.sub; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                IBtn { iconName: "rotate"
+                       onClicked: { buyersLbl.text = backend.s.buyersFetch; backend.badiBotBuyers() } }
             }
-            Label { text: backend.s.paidIdLbl; font.pixelSize: 11; color: backend.c.sub
-                    wrapMode: Text.WordWrap; Layout.fillWidth: true }
-            TextField {
-                id: paidIdField
+            Rectangle {
                 Layout.fillWidth: true
-                implicitHeight: 38
-                font.pixelSize: 12; font.family: "monospace"
-                color: backend.c.fg
-                placeholderText: "PRO_SIGNAL_1"
-                placeholderTextColor: backend.c.sub
-                selectByMouse: true
-                leftPadding: 12; rightPadding: 12
-                background: Rectangle {
-                    radius: 10; color: backend.c.bg
-                    border.width: paidIdField.activeFocus ? 2 : 1
-                    border.color: paidIdField.activeFocus ? backend.c.accent : backend.c.border
+                implicitHeight: buyersCol.height + 10
+                visible: licPop.buyers.length > 0
+                color: backend.c.bg; radius: 10; border.width: 1; border.color: backend.c.border
+                Column {
+                    id: buyersCol
+                    anchors.left: parent.left; anchors.right: parent.right
+                    anchors.margins: 5
+                    spacing: 2
+                    Repeater {
+                        model: licPop.buyers
+                        delegate: Rectangle {
+                            required property var modelData
+                            width: buyersCol.width
+                            height: 28
+                            radius: 7
+                            color: buyMouse.containsMouse && modelData && modelData.uid
+                                   ? backend.c.accent : "transparent"
+                            RowLayout {
+                                anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8
+                                spacing: 6
+                                Label { text: (modelData.name || "") + (modelData.user ? "  " + modelData.user : "")
+                                        font.pixelSize: 11; color: backend.c.fg; elide: Text.ElideRight
+                                        Layout.fillWidth: true }
+                                Label { text: modelData.uid || "—"; font.pixelSize: 11
+                                        font.family: "monospace"; font.bold: true
+                                        color: buyMouse.containsMouse && modelData.uid
+                                               ? backend.c.card : backend.c.accent }
+                            }
+                            MouseArea {
+                                id: buyMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: modelData && modelData.uid
+                                             ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                onClicked: {
+                                    if (!modelData || !modelData.uid) return
+                                    var t = licField.text.trim()
+                                    licField.text = t ? t + ", " + modelData.uid : modelData.uid
+                                }
+                            }
+                        }
+                    }
                 }
             }
             /* معرّف هذا الجهاز — نسخة سريعة ليرسلها المشتري للبائع */
