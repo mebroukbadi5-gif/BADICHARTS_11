@@ -115,3 +115,6 @@ NameError: name 'PERIOD_SECONDS' is not defined
 [21:03:51] [older:BRLUSD_otc] +198 candles (batch 300) — oldest now 2026-11-13 12:46
 [21:06:09] [older:BRLUSD_otc] +198 candles (batch 300) — oldest now 2026-11-13 12:49
 [21:09:18] [older:BRLUSD_otc] +198 candles (batch 300) — oldest now 2026-11-13 12:52
+[12:26:57] [v14-gap] gap fill done for TESTV147_otc (test) in 0.0s — original method untouched
+[12:29:22] [v14-gap] gap fill done for TESTV147_otc (test) in 0.0s — original method untouched
+[12:30:17] [v14-gap] gap fill done for TESTV147_otc (test) in 0.0s — original method untouched

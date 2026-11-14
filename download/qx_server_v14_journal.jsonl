@@ -815,3 +815,6 @@
 {"t":1794619019.286,"iso":"2026-11-14 01:16:59","seq":40,"event":"gate_worker_start"}
 {"t":1794619019.286,"iso":"2026-11-14 01:16:59","seq":1,"event":"gate_done","asset":"LIVE_GATE_TEST","label":"","exec_s":0.0,"wait_s":0.0}
 {"t":1794619019.286,"iso":"2026-11-14 01:16:59","seq":42,"event":"smoke_test","ملاحظة":"اختبار دخاني"}
+{"t":1794659217.764,"iso":"2026-11-14 12:26:57","seq":1,"event":"gap_fill_done","asset":"TESTV147_otc","reason":"test","exec_s":0.028}
+{"t":1794659362.201,"iso":"2026-11-14 12:29:22","seq":1,"event":"gap_fill_done","asset":"TESTV147_otc","reason":"test","exec_s":0.027}
+{"t":1794659417.4,"iso":"2026-11-14 12:30:17","seq":1,"event":"gap_fill_done","asset":"TESTV147_otc","reason":"test","exec_s":0.027}
