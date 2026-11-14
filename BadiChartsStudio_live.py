@@ -9951,6 +9951,48 @@ def v14_supervise(name, factory):
                 pass
     return _sup()
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ═══ v15.2: إصلاح حفظ البريد («تذكّرني») — في طبقة الربط، الأصل لم يُمَس ═══
+# ═══════════════════════════════════════════════════════════════════════════
+# سبب «ميزة حفض الايميل لماذا لا تعمل» (طلب المستخدم): كود الأصل في
+# SessionManager._save_state يمرر **7 قيم** لعبارة INSERT بها **6 علامات ؟**
+# فقط (VALUES (1, ?, ?, ?, ?, ?, ?) — العمود id مكتوب قيمةً حرفية والكود
+# يمرر 1 أيضاً) فترفع sqlite الخطأ «Incorrect number of bindings supplied.
+# The current statement uses 6, and there are 7 supplied» وexcept الصامت
+# يبتلعه — النتيجة: البريد/كلمة السر/الحالة لا تُكتب في app_data.db أبداً،
+# ولا يظهر البريد في واجهة تسجيل الدخول عند الإقلاع التالي.
+# الإصلاح: نفس الكود الأصلي حرفياً بعدد الروابط الصحيح فقط (6 قيم بعد id
+# الحرفي) — لا أي تغيير في منطق آخر، وكود الأصل أعلاه لم يُمَس بايت واحد.
+def _v152_session_save_state(self):
+    try:
+        with _db_lock:
+            conn = _db_conn()
+            try:
+                conn.execute("""
+                    INSERT OR REPLACE INTO app_state
+                    (id, email, password, host, last_login, last_success, failed_auth_count)
+                    VALUES (1, ?, ?, ?, ?, ?, ?)
+                """, (
+                    self.state.get("email", ""),
+                    self.state.get("password", ""),
+                    self.state.get("host", "qxbroker.com"),
+                    self.state.get("last_login", 0),
+                    1 if self.state.get("last_success", False) else 0,
+                    self.state.get("failed_auth_count", 0),
+                ))
+                conn.commit()
+            finally:
+                conn.close()
+    except Exception:
+        pass
+
+
+try:
+    SessionManager._save_state = _v152_session_save_state
+except Exception:
+    pass
+
 '''
 
 
@@ -12175,6 +12217,7 @@ class Backend(QObject):
     notifChanged = Signal()                # بطاقة الإشعارات تغيّرت (طلب المستخدم)
     paidCmd = Signal(str)                  # أمر تحكم بعيد صالح: تشغيل/إيقاف مؤشر مدفوع (طلب المستخدم)
     qxEvent = Signal(str)                  # LIVE SERVER EDITION: أحداث خادم QX (الدخول/لوحة العملات/دفعات التمرير)
+    savedEmailChanged = Signal()           # v15.2: تغيّر البريد المحفوظ («تذكّرني»)
 
     def __init__(self):
         super().__init__()
@@ -12228,6 +12271,10 @@ class Backend(QObject):
         self._qx_older_busy = False    # دفعة تمرير للخلف جارية
         self._qx_resync_pending = False  # v14.3: مزامنة كاملة بعد إصلاح سد الثغرات
         self._qx_pre_log = 0.0         # خنق سجلات حالة التحميل المسبق
+        # v15.2 (طلب المستخدم): دائرة تحميل الشموع — حالة صريحة تبدأ عند بداية
+        # جلب شموع العملة المفتوحة وتنتهي عند وصولها (أو مهلة أمان 60 ثانية)
+        self._qx_loading = False       # جلب شموع العملة الحالية جارٍ الآن
+        self._qx_loading_at = 0.0      # لحظة بدء الجلب
         self._qx_tf_retry = 0.0        # خنق إعادة محاولة جلب فريم أعلى
         self._qx_ensure_at = {}        # v13.1: آخر جلب فوري لكل عملة (خنق 15 ثانية)
         self._qx_ensure_fail = {}      # v13.1: عدّاد فشل الجلب الفوري (خنق تصاعدي)
@@ -12444,9 +12491,11 @@ class Backend(QObject):
 
     @Property(bool, notify=candlesChanged)
     def chartLoading(self):
-        """v13.2 (طلب المستخدم): دائرة تحميل في الشارت — True عندما يكون الدخول
-        تم والعملة الحالية بلا شموع بعد (تُجلب الآن) — بدل شارت أسود فارغ."""
-        return bool(self._qx_logged and not self._candles)
+        """v13.2/v15.2 (طلب المستخدم): دائرة تحميل في الشارت — True فقط أثناء
+        جلب شموع العملة المفتوحة فعلاً (حالة صريحة تبدأ عند بداية الجلب
+        وتنتهي عند وصول الشموع أو مهلة 60 ثانية) — بدل شارت أسود فارغ."""
+        return bool(self._qx_logged and getattr(self, "_qx_loading", False)
+                    and not self._candles)
 
     @Property(str, notify=filesChanged)
     def filesJson(self):
@@ -12997,7 +13046,15 @@ class Backend(QObject):
             # يبدأ فارغاً وينتظر بيانات الخادم الحقيقية فقط (لا شموع وهمية).
             self._candles = []
             self._qx_feed_key = ("", "")
+            # v15.2 (طلب المستخدم): «عندما نفتح العملة من قائمة العملات» —
+            # دائرة تحميل تظهر عند بداية جلب الشموع وتبقى حتى ينتهي الجلب
+            # فيظهر الشارت. لا تحميل خلفي — الجلب عند الفتح فقط.
+            self._qx_loading_arm()
             self._qx_load_feed(force=True)
+            # الجلب اكتمل فوراً (شموع العملة في ذاكرة المحرك أو تيكات جاهزة) —
+            # الدائرة تُطفأ في نفس اللحظة
+            if self._qx_feed_key == (self._asset, self._tf) and self._candles:
+                self._qx_loading_clear()
         self._save_cfg()
         # إعادة حساب كل مؤشرات بايثون المفعّلة على الشموع الجديدة فورًا
         # (بدل انتظار أول تيك — وإلا اختفى الخط لأن القيم القديمة خارج نطاق السعر الجديد)
@@ -14029,16 +14086,11 @@ class Backend(QObject):
         if _tick_new:
             self._qx_tick_stamp = _stamp
         _board_due = (_now - getattr(self, "_qx_board_at", 0.0)) >= 2.0
-        # v15.1 (طلب المستخدم): دائرة تحميل الشموع — أثناء التحميل المسبق
-        # المتسلسل المضخة تعمل (نبضة كل ثانية) حتى بلا تيك جديد، وبعدها 3 ثوانٍ
-        # لتضمن إخفاء الدائرة.
-        try:
-            _ps0 = getattr(qx, "_QX_PRELOAD_STATUS", {}) or {}
-            _pre_want = bool(_ps0.get("active")) or (
-                _now - float(_ps0.get("finished_at") or 0.0) <= 3.0)
-        except Exception:
-            _pre_want = False
-        if (not _tick_new and not _board_due and not _pre_want
+        # v15.2: أثناء جلب شموع العملة المفتوحة (دائرة التحميل) المضخة تعمل
+        # دائماً حتى تختفي الدائرة فور وصول الشموع — بلا أي نبضات إضافية
+        # في غير ذلك (التحميل المسبق الخلفي أُلغي — طلب المستخدم).
+        _load_due = bool(getattr(self, "_qx_loading", False))
+        if (not _tick_new and not _board_due and not _load_due
                 and not getattr(self, "_qx_resync_pending", False)):
             return
         if _board_due:
@@ -14097,29 +14149,33 @@ class Backend(QObject):
                     self._log("info", msg)
         except Exception:
             pass
-        # 4) v15.1 (طلب المستخدم): حالة دائرة تحميل الشموع — التحميل المسبق
-        #    المتسلسل (92 عملة واحدة تلو الأخرى). تُدفع للواجهة عند أي تغيير
-        #    + نبضة كل ثانية أثناء العمل، ونبضة أخيرة بعد الانتهاء حتى تختفي
-        #    الدائرة فوراً.
+        # 4) v15.2 (طلب المستخدم): دائرة تحميل الشموع عند فتح العملة — تُطفأ
+        #    فور وصول شموع العملة الحالية (الشارت يظهر بعد انتهاء الجلب)، مع
+        #    مهلة أمان 60 ثانية حتى لا تبقى الدائرة عالقة أبداً.
         try:
-            _pst = dict(getattr(qx, "_QX_PRELOAD_STATUS", {}) or {})
-            _sig = (bool(_pst.get("active")), int(_pst.get("idx") or 0),
-                    int(_pst.get("total") or 0), int(_pst.get("loaded") or 0))
-            _emit_it = _sig != getattr(self, "_qx_pre_sig", None)
-            if not _emit_it and _sig[0]:
-                _emit_it = (_now - getattr(self, "_qx_pre_ev_at", 0.0)) >= 1.0
-            if not _emit_it and not _sig[0]:
-                _fin = float(_pst.get("finished_at") or 0.0)
-                if (_fin and _now - _fin <= 3.0
-                        and _now - getattr(self, "_qx_pre_ev_at", 0.0) >= 1.0):
-                    _emit_it = True
-            if _emit_it:
-                self._qx_pre_ev_at = _now
-                self._qx_pre_sig = _sig
-                self._emit_qx({"type": "preload", "active": _sig[0],
-                               "idx": _sig[1], "total": _sig[2], "loaded": _sig[3]})
+            if getattr(self, "_qx_loading", False):
+                _ready = (self._qx_feed_key == (self._asset, self._tf)
+                          and bool(self._candles))
+                if _ready or (_now - getattr(self, "_qx_loading_at", 0.0)) > 60.0:
+                    if not _ready:
+                        self._log("info", "candles loading timeout — spinner hidden")
+                    self._qx_loading_clear()
         except Exception:
             pass
+
+    def _qx_loading_arm(self):
+        """v15.2 (طلب المستخدم): بدء دائرة تحميل الشموع — تظهر في اللحظة التي
+        يبدأ فيها جلب شموع العملة المفتوحة وتُطفأ عند وصولها."""
+        self._qx_loading = True
+        self._qx_loading_at = time.time()
+        self._emit_qx({"type": "chartload", "active": True, "asset": self._asset})
+
+    def _qx_loading_clear(self):
+        """v15.2: انتهاء جلب شموع العملة الحالية — إخفاء الدائرة فيظهر الشارت."""
+        if not getattr(self, "_qx_loading", False):
+            return
+        self._qx_loading = False
+        self._emit_qx({"type": "chartload", "active": False, "asset": self._asset})
 
     def _qx_live_step(self):
         """خطوة التغذية الحية: تحديث شموع العملة الحالية من الخادم ثم الدفع للشارت."""
@@ -14227,9 +14283,11 @@ class Backend(QObject):
             self._emit_qx({"type": "resync"})
 
     # ---------- الدخول الحقيقي عبر خادم Quotex (بديل تسجيل الدخول الوهمي) ----------
-    @Property(str, constant=True)
+    @Property(str, notify=savedEmailChanged)
     def savedEmail(self):
-        """البريد المحفوظ لدى الخادم (للتذكير عند الدخول التالي)."""
+        """البريد المحفوظ («تذكّرني») — يظهر معبأ في واجهة تسجيل الدخول عند
+        الإقلاع التالي. v15.2: الكتابة في app_data.db كانت تفشل صامتة في الأصل
+        (عدد روابط خاطئ في _save_state — أُصلح في طبقة الربط داخل المحرك)."""
         qx = _qx_module()
         try:
             return str(qx.session_manager.get_saved_email() or "")
@@ -14275,8 +14333,12 @@ class Backend(QObject):
             asyncio.run_coroutine_threadsafe(qx.keepalive_loop(), loop)
             asyncio.run_coroutine_threadsafe(qx.stale_message_watchdog(), loop)
             asyncio.run_coroutine_threadsafe(qx.asset_payout_monitor(), loop)
-            # BRLUSD_otc فوراً (300 شمعة + الحالة + الدفع) ثم بقية العملات واحدة تلو الأخرى
-            asyncio.run_coroutine_threadsafe(qx.preload_all_assets(), loop)
+            # v15.2 (طلب المستخدم): «لا نريده ان يحمل العملات في الخلفية
+            # نريده ان يقوم بتحميل بطريقة عندما نفتح العملة من قائمة العملات» —
+            # التحميل المسبق المتسلسل لكل العملات أُلغي تماماً. الشموع تُجلب
+            # فقط عند فتح العملة: switch → _qx_load_feed → ensure_asset_loaded
+            # وfetch_tf_async وسلسلة تاريخ العملة المفتوحة — نفس آلة الجلب
+            # الفوري القائمة دون أي تحميل خلفي لأي عملة لم تُفتح.
             # v13.1 (طلب المستخدم): آلية سد الثغرات تعمل الآن مع التطبيق أيضاً —
             # نفس mt4_gap_filler الخادم بلا أي تغيير (كانت معرّفة بلا تشغيل)
             asyncio.run_coroutine_threadsafe(qx.mt4_gap_filler(), loop)
@@ -14302,7 +14364,24 @@ class Backend(QObject):
                     except Exception:
                         pass
             self._qx_logged = True
+            # v15.2 (طلب المستخدم): «ميزة حفض الايميل» — مع «تذكّرني» يبقى
+            # البريد محفوظاً فيظهر معبأ في واجهة تسجيل الدخول عند الإقلاع
+            # التالي؛ بلا تحديد لا يُحفظ شيء.
+            try:
+                _sm = qx.session_manager
+                if not bool(remember):
+                    _sm.state["email"] = ""
+                    _sm.state["password"] = ""
+                    _sm._save_state()
+                self.savedEmailChanged.emit()
+            except Exception:
+                pass
+            # v15.2 (طلب المستخدم): دائرة تحميل الشموع لعملة فتح الشارت —
+            # تظهر عند بداية الجلب وتختفي عند وصول الشموع فيظهر الشارت
+            self._qx_loading_arm()
             self._qx_load_feed(force=True)
+            if self._qx_feed_key == (self._asset, self._tf) and self._candles:
+                self._qx_loading_clear()
             # v14.3 (طلب المستخدم): تصفير علامات تجمّد السد القديمة + مزامنة إعداد
             # الأيام + دفعات التاريخ المتسلسلة لعملة فتح الشارت (300 ثم 300 حتى
             # عدد الأيام المضبوط — كل دفعة تُرفع إلى الشارت فوراً)
@@ -15369,12 +15448,12 @@ var OLDER = { loading: false, at: 0, asset: "", tf: "", key: null, anchor: null,
 /* ═══ v13.2 (طلب المستخدم): دائرة تحميل داخل الشارت ═══
    عندما تُفتح عملة لم تُجلب بعد تظهر دائرة تحميل وسط الشارت مع نص
    «جارٍ جلب الشموع من الخادم» — وتختفي فور وصول أول شموع — بدل شارت أسود فارغ */
-var CHLOAD = { on: false, el: null };
+var CHLOAD = { on: false, asset: "", el: null };
 function chartLoadEl(pr) {
   try {
     if (!CHLOAD.el) {
       var st = document.createElement("style");
-      st.textContent = ".badi-load{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;z-index:6;pointer-events:none}"
+      st.textContent = ".badi-load{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;z-index:6;pointer-events:none;background:rgba(7,10,16,.72)}"
         + ".badi-load .bl-ring{width:46px;height:46px;border-radius:50%;border:3px solid rgba(128,140,170,.22);border-top-color:#3B8BFF;animation:badispin .9s linear infinite}"
         + ".badi-load .bl-txt{font:600 12px/1 system-ui,-apple-system,Segoe UI,sans-serif;letter-spacing:.3px;opacity:.7}"
         + ".badi-load .bl-sub{font:10px/1 system-ui,sans-serif;opacity:.45;margin-top:-6px}"
@@ -15385,55 +15464,24 @@ function chartLoadEl(pr) {
       CHLOAD.el.hidden = true;
     }
     var ar = window.__BADI_LANG__ === "ar";
-    var _sub = (PRELOAD.active && PRELOAD.total > 0)
-      ? ((ar ? "العملة " : "asset ") + Math.max(1, PRELOAD.idx) + "/" + PRELOAD.total)
-      : "700 candles";
+    var _sub = CHLOAD.asset ? CHLOAD.asset : "";
     CHLOAD.el.innerHTML = '<div class="bl-ring"></div><div class="bl-txt">'
       + (ar ? "جارٍ جلب الشموع من الخادم…" : "Loading candles from server…")
-      + '</div><div class="bl-sub">' + _sub + '</div>';
+      + '</div>' + (_sub ? '<div class="bl-sub">' + esc(_sub) + '</div>' : '');
     var host = pr && pr.el ? pr.el.querySelector(".pane-cv") : null;
     if (host && CHLOAD.el.parentNode !== host) host.appendChild(CHLOAD.el);
     return CHLOAD.el;
   } catch (e) { return null; }
 }
-/* ═══ v15.1 (طلب المستخدم): دائرة تحميل حتى ينتهي الخادم من جلب الشموع ═══
-   أثناء التحميل المسبق المتسلسل (92 عملة واحدة تلو الأخرى) تظهر دائرة صغيرة
-   في زاوية الشارت مع التقدّم (12/92) وتختفي عند الانتهاء. وعندما يكون الشارت
-   نفسه بلا شموع بعد تظهر دائرة الوسط أيضاً أثناء التحميل المسبق. */
-var PRELOAD = { active: false, idx: 0, total: 0, loaded: 0 };
-var PREBADGE = null;
-function preloadBadge(pr) {
-  try {
-    if (!PREBADGE) {
-      var st = document.createElement("style");
-      st.textContent = ".badi-pre{position:absolute;top:8px;right:10px;display:flex;align-items:center;gap:8px;z-index:7;pointer-events:none;background:rgba(10,14,22,.55);border:1px solid rgba(128,140,170,.25);border-radius:999px;padding:5px 12px 5px 8px}"
-        + ".badi-pre .bp-ring{width:18px;height:18px;border-radius:50%;border:2.5px solid rgba(128,140,170,.3);border-top-color:#3B8BFF;animation:badispin .9s linear infinite;flex:0 0 auto}"
-        + ".badi-pre .bp-txt{font:600 11px/1 system-ui,-apple-system,Segoe UI,sans-serif;letter-spacing:.3px;opacity:.85;white-space:nowrap}"
-        + "@keyframes badispin{to{transform:rotate(360deg)}}";
-      document.head.appendChild(st);
-      PREBADGE = document.createElement("div");
-      PREBADGE.className = "badi-pre";
-      PREBADGE.hidden = true;
-    }
-    var ar = window.__BADI_LANG__ === "ar";
-    var txt = PRELOAD.total > 0
-      ? (ar ? ("جارٍ جلب الشموع " + Math.max(1, PRELOAD.idx) + "/" + PRELOAD.total + "…")
-            : ("Loading candles " + Math.max(1, PRELOAD.idx) + "/" + PRELOAD.total + "…"))
-      : (ar ? "جارٍ جلب الشموع…" : "Loading candles…");
-    PREBADGE.innerHTML = '<div class="bp-ring"></div><div class="bp-txt">' + esc(txt) + '</div>';
-    var host = pr && pr.el ? pr.el.querySelector(".pane-cv") : null;
-    if (host && PREBADGE.parentNode !== host) host.appendChild(PREBADGE);
-    return PREBADGE;
-  } catch (e) { return null; }
-}
+/* ═══ v15.2 (طلب المستخدم): دائرة تحميل الشموع عند فتح العملة ═══
+   شارة الزاوية أُزيلت («تلك دائرة تحميل لي ضفتها في جنب لماذا ضفتها هناك»).
+   الدائرة الوسطى فقط: تظهر عند بداية جلب شموع العملة المفتوحة من قائمة
+   العملات وتبقى حتى ينتهي الجلب فيظهر الشارت — غطاء تحميل كامل فوق الشارت. */
 function renderChartLoading() {
   try {
     var pr = window.__badiPrimary ? window.__badiPrimary() : null;
-    var empty = !pr || !pr.dataArr || pr.dataArr.length === 0;
     var el = chartLoadEl(pr);
-    if (el) el.hidden = !((CHLOAD.on || PRELOAD.active) && empty);
-    var bg = preloadBadge(pr);
-    if (bg) bg.hidden = !PRELOAD.active;
+    if (el) el.hidden = !CHLOAD.on;
   } catch (e) {}
 }
 window.__badiMaybeLoadOlder = function (p, auto) {
@@ -16259,23 +16307,12 @@ function defineBadiApp() {
       /* البث الحي يعمل دائمًا الآن (طلب المستخدم) — يبقى مفعّلاً مهما وصل */
       live = true;
     },
-    setChartLoading: function (on) {
-      /* v13.2 (طلب المستخدم): دائرة تحميل داخل الشارت — تظهر عندما تكون شموع
-         العملة الحالية تُجلب من الخادم وتختفي فور وصولها — لا شارت أسود فارغ */
+    setChartLoading: function (on, assetName) {
+      /* v15.2 (طلب المستخدم): دائرة تحميل الشموع — تظهر عند بداية جلب شموع
+         العملة المفتوحة من قائمة العملات وتبقى حتى ينتهي الجلب فيظهر الشارت */
       try {
         CHLOAD.on = !!on;
-        renderChartLoading();
-      } catch (e) {}
-    },
-    setPreload: function (st) {
-      /* v15.1 (طلب المستخدم): دائرة تحميل عند تحميل الشموع — تبقى حتى ينتهي
-         الخادم من جلب شموع كل العملات واحدة تلو الأخرى ثم تختفي */
-      try {
-        st = st || {};
-        PRELOAD.active = !!st.active;
-        PRELOAD.idx = Number(st.idx || 0);
-        PRELOAD.total = Number(st.total || 0);
-        PRELOAD.loaded = Number(st.loaded || 0);
+        CHLOAD.asset = String(assetName || "");
         renderChartLoading();
       } catch (e) {}
     },
@@ -17266,13 +17303,12 @@ ApplicationWindow {
                 win.webCall("__badiApp.setBoard(" + JSON.stringify(e.board) + ")")
                 return
             }
-            if (e.type === "preload") {
-                /* v15.1 (طلب المستخدم): دائرة تحميل عند تحميل الشموع — تبقى
-                   ظاهرة حتى ينتهي الخادم من جلب شموع كل العملات واحدة تلو
-                   الأخرى، ثم تختفي */
-                win.webCall("__badiApp.setPreload(" + JSON.stringify(
-                    { active: !!e.active, idx: e.idx || 0,
-                      total: e.total || 0, loaded: e.loaded || 0 }) + ")")
+            if (e.type === "chartload") {
+                /* v15.2 (طلب المستخدم): دائرة تحميل الشموع عند فتح العملة من
+                   قائمة العملات — تظهر عند بداية جلب الشموع وتبقى حتى ينتهي
+                   الجلب فيظهر الشارت. بلا شارة في الزاوية وبلا تحميل خلفي. */
+                win.webCall("__badiApp.setChartLoading(" + (e.active ? "true" : "false")
+                            + "," + JSON.stringify(String(e.asset || "")) + ")")
                 return
             }
             if (e.type === "resync") {
@@ -18156,7 +18192,15 @@ ApplicationWindow {
                 /* LIVE SERVER EDITION: تعبئة البريد المحفوظ لدى الخادم (تذكّرني) */
                 try { userF.text = backend.savedEmail } catch (e) {}
             }
-            onVisibleChanged: if (visible) { t = 0; enterAnim.restart() }
+            /* v15.2 (طلب المستخدم): البريد المحفوظ («تذكّرني») يظهر معبأ في
+               واجهة تسجيل الدخول في كل مرة تظهر فيها الصفحة */
+            onVisibleChanged: {
+                if (visible) {
+                    t = 0
+                    enterAnim.restart()
+                    try { userF.text = backend.savedEmail } catch (e) {}
+                }
+            }
 
             function attempt() {
                 if (busy) return
