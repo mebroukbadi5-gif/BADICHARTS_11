@@ -132,6 +132,14 @@ def _align(ts, period_seconds=None):
 
 fg_code = extract_function(V14, "fill_gap_once", "MT4Writer")
 
+_flat_code = extract_function(V14, "_v14_is_synth_flat")
+
+def _flat_fn():
+    _ns = {}
+    exec(compile(_flat_code, V14, "exec"), _ns)
+    return _ns["_v14_is_synth_flat"]
+
+
 def _align_time_mock(raw_ts, period_seconds=None):
     return int(raw_ts) // 60 * 60
 
@@ -159,7 +167,8 @@ def build_gap_env(store_filled, with_artificial):
     ns2 = {"time": time, "asyncio": asyncio, "Dict": dict,
            "_align_time": _align_time_mock, "_fill_missing_slots": lambda c, p, max_gap=1440: c,
            "PERIOD_SECONDS": 60, "PERIOD": 1, "INITIAL_CANDLES": 1000,
-           "GAP_FILL_CANDLES": 10, "GAP_FILL_REFRESH_INTERVAL": 300}
+           "GAP_FILL_CANDLES": 10, "GAP_FILL_REFRESH_INTERVAL": 300,
+           "_v14_is_synth_flat": _flat_fn()}
     exec(compile(fg_code, V14, "exec"), ns2)
     return ns2["fill_gap_once"], mt, store, asset, client, window
 
@@ -189,7 +198,8 @@ def build_gap_env2(store_filled):
     ns2 = {"time": time, "asyncio": asyncio, "Dict": dict,
            "_align_time": _align_time_mock, "_fill_missing_slots": lambda c, p, max_gap=1440: c,
            "PERIOD_SECONDS": 60, "PERIOD": 1, "INITIAL_CANDLES": 1000,
-           "GAP_FILL_CANDLES": 10, "GAP_FILL_REFRESH_INTERVAL": 300}
+           "GAP_FILL_CANDLES": 10, "GAP_FILL_REFRESH_INTERVAL": 300,
+           "_v14_is_synth_flat": _flat_fn()}
     exec(compile(fg_code, V14, "exec"), ns2)
     return ns2["fill_gap_once"], mt, store, asset, client
 
@@ -216,7 +226,8 @@ def build_gap_env3():
     ns2 = {"time": time, "asyncio": asyncio, "Dict": dict,
            "_align_time": _align_time_mock, "_fill_missing_slots": lambda c, p, max_gap=1440: c,
            "PERIOD_SECONDS": 60, "PERIOD": 1, "INITIAL_CANDLES": 1000,
-           "GAP_FILL_CANDLES": 10, "GAP_FILL_REFRESH_INTERVAL": 300}
+           "GAP_FILL_CANDLES": 10, "GAP_FILL_REFRESH_INTERVAL": 300,
+           "_v14_is_synth_flat": _flat_fn()}
     exec(compile(fg_code, V14, "exec"), ns2)
     return ns2["fill_gap_once"], mt, store, asset, client
 

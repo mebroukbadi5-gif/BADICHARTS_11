@@ -1427,6 +1427,7 @@ class Quotex:
             async with semaphore:
                 oldest_t = start_t
                 consecutive_failures_in_worker = 0
+                _same_anchor_tries = 0   # v14.9: محاولات على نفس المرساة قبل أي تخطٍّ
                 while oldest_t > end_t:
                     # ===== FIX 3: batch =====
                     if not self.api or not getattr(self.api.state, 'check_accepted_connection', False):
@@ -1435,17 +1436,36 @@ class Quotex:
                     index = next(_request_counter)
                     batch_data = await self._fetch_historical_batch(asset, oldest_t, chunk_seconds, period, index, timeout)
                     if not batch_data:
-                        oldest_t -= chunk_seconds
+                        # v14.9 (لقطة «مهذه المشاكل» — التاريخ يصل متناثراً):
+                        # كان أول رد فارغ يقفز المرساة كتلة كاملة (200 شمعة
+                        # تُفقد بلا محاولة) وأي 3 فشلات متتالية تقتل العامل
+                        # فيُترك كتله كاملاً بلا جلب. الآن: 3 محاولات على نفس
+                        # المرساة بفواصل أطول قبل أي تخطٍّ، وحد الموت 10 فشلات
+                        # متتالية — الطريقة نفسها (نفس الطلب، نفس المرساة،
+                        # نفس الإيقاع) بلا أي تغيير.
                         consecutive_failures_in_worker += 1
-                        if consecutive_failures_in_worker >= 3:
-                            # 3 consecutive failures = connection dead — exit
+                        _same_anchor_tries += 1
+                        if consecutive_failures_in_worker >= 10:
+                            # 10 consecutive failures = connection dead — exit
                             break
+                        if _same_anchor_tries >= 3:
+                            _same_anchor_tries = 0
+                            oldest_t -= chunk_seconds
                         # backoff
-                        await asyncio.sleep(FETCH_BATCH_DELAY * 2)
+                        await asyncio.sleep(FETCH_BATCH_DELAY * (2 + _same_anchor_tries * 2))
                         continue
                     consecutive_failures_in_worker = 0
+                    _same_anchor_tries = 0
                     new_batch = self._parse_historical_candles(batch_data)
-                    if not new_batch: oldest_t -= chunk_seconds; continue
+                    if not new_batch:
+                        # v14.9: رد غير قابل للتحليل = محاولة على نفس المرساة
+                        # قبل التخطي (القديم كان يهمل كتلة كاملة من أول مرة)
+                        _same_anchor_tries += 1
+                        if _same_anchor_tries >= 3:
+                            _same_anchor_tries = 0
+                            oldest_t -= chunk_seconds
+                        await asyncio.sleep(FETCH_BATCH_DELAY * 2)
+                        continue
                     # v14.6 (طلب المستخدم: «اي دفعة جلبها يرفعها الى الشارت»):
                     # مرصد قراءة فقط — يسلّم كل دفعة فور وصولها للمستدعي الذي
                     # يرفعها إلى الشارت في الحال. طريقة الجلب نفسها وسم Requests
@@ -5014,7 +5034,7 @@ class MT4Writer:
                 try:
                     _cps = _align_time(int(time.time()))
                     for _fc in (asset_obj.candles or []):
-                        if _fc.get('time', 0) < _cps and int(_fc.get('volume', 1) or 0) == 0:
+                        if _fc.get('time', 0) < _cps and _v14_is_synth_flat(_fc):
                             _has_artificial = True
                             break
                 except Exception:
@@ -5059,7 +5079,7 @@ class MT4Writer:
             try:
                 _cps0 = _align_time(int(time.time()))
                 for _fc in state['candles']:
-                    if _fc.get('time', 0) < _cps0 and int(_fc.get('volume', 1) or 0) == 0:
+                    if _fc.get('time', 0) < _cps0 and _v14_is_synth_flat(_fc):
                         if _oldest_artificial == 0 or _fc['time'] < _oldest_artificial:
                             _oldest_artificial = _fc['time']
             except Exception:
@@ -5148,7 +5168,7 @@ class MT4Writer:
             try:
                 _cps2 = _align_time(int(time.time()))
                 for _fc in merged:
-                    if _fc.get('time', 0) < _cps2 and int(_fc.get('volume', 1) or 0) == 0:
+                    if _fc.get('time', 0) < _cps2 and _v14_is_synth_flat(_fc):
                         _still_artificial = True
                         break
             except Exception:
@@ -8362,7 +8382,209 @@ async def v14_gap_fill_for_asset(api_symbol: str, *,
                    f"({reason}) in {dt:.1f}s — original method untouched")
         except Exception:
             pass
+    # v14.9 (لقطة «مهذه المشاكل» — الشرطات المسطحة القديمة لا تُستبدل أبداً):
+    # السد العميق بعد الآلة الأصلية — نفس نداء الجلب الرسمي لكن مرساته عند
+    # أقدم شمعة اصطناعية، فيتقدم من الأقدم للأحدث حتى يُستبدل كل شيء ببيانات
+    # حقيقية من الخادم. كل المسارات (فتح العملة/المراجعة الدورية/الحارس)
+    # تمر من هنا فلا تبقى أي عملة بشرطاتها للأبد.
+    try:
+        if not globals().get("IS_SUBSECOND"):
+            await v14_deep_gap_seal(api_symbol, reason=reason)
+    except _v14_asyncio.CancelledError:
+        raise
+    except Exception as e:
+        V14_JOURNAL.record("deep_seal_error", asset=api_symbol,
+                           error=str(e)[:160])
     return ok
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# v14.9 — السد العميق: استبدال الشرطات الاصطناعية القديمة بشموع حقيقية
+# ══════════════════════════════════════════════════════════════════════════
+# لقطة «مهذه المشاكل» (2026-11-14): شموع حقيقية ~3 ساعات ثم شرطات مسطحة
+# (أمداد _fill_missing_slots) حتى بداية البث الحي. السبب: النداء الأصلي في
+# fill_gap_once مرساته «الآن» ونافذته آخر 200 شمعة كحد أقصى — فكل شمعة
+# اصطناعية أعمق من ذلك تبقى مسطحة للأبد.
+#
+# الحل (طبقة إضافية بلا أي تغيير في الآلة الأصلية ولا في طريقة الجلب
+# الرسمية): نفس النداء client.get_candles(...) (نفس الطلب history/load
+# ونفس التحليل عبر prepare_candles) لكن مرساته عند أقدم مشكلة — نافذة
+# 200 شمعة في كل دورة تتقدم من الأقدم للأحدث حتى يُستبدل كل شيء ببيانات
+# حقيقية من الخادم. ما لا يرد له الخادم بيانات (عطلة/إغلاق) يُتخطى بمؤشر
+# تقدم لكل عملة حتى لا تدور الجولات على نفس المرساة بلا نهاية.
+_V14_DEEP_CURSOR: Dict[str, float] = {}    # مرساة بلا تقدم → تُتخطى مؤقتاً
+V14_DEEP_REPAIRED: Dict[str, float] = {}   # إشارة للتطبيق: وقت آخر إصلاح عميق
+
+
+def _v14_is_synth_flat(c) -> bool:
+    """v14.9: كاشف الشمعة الاصطناعية الصادق.
+
+    الاصطناعية = مولّدة بلا حجم (volume=0) ومسطحة تماماً (o=h=l=c>0).
+    الشموع الحقيقية المجلوبة من الخادم تأتي بلا حجم أصلاً (volume=0) لكن
+    مداها حقيقي (high>low غالباً) — الكاشف القديم كان يحسبها اصطناعية
+    فلا يتقدم السد أبداً ولا يصل للأعمق (سبب بقاء الشرطات في اللقطة)."""
+    try:
+        if int(c.get("volume", 1) or 0) != 0:
+            return False
+        o = float(c.get("open", 0) or 0)
+        if o <= 0:
+            return False
+        h = float(c.get("high", 0) or 0)
+        l = float(c.get("low", 0) or 0)
+        cl = float(c.get("close", 0) or 0)
+        return o == h == l == cl
+    except Exception:
+        return False
+
+
+async def v14_deep_gap_seal(api_symbol: str, *, reason: str = "deep",
+                            max_passes: int = 8,
+                            window_candles: int = 200,
+                            time_budget_s: float = 45.0) -> bool:
+    """السد العميق — يستبدل الشرطات الاصطناعية القديمة والفراغات العميقة
+    بشموع حقيقية بنفس طريقة الجلب الرسمية (client.get_candles نفسها التي
+    تستخدمها الآلة الأصلية fill_gap_once — نفس الطلب ونفس التحليل، فقط
+    المرساة عند أقدم مشكلة بدل «الآن»).
+
+    - يستبدل الاصطناعي المسطح والفراغات الزمنية فقط — الشموع الحقيقية
+      والشمعة الحية لا تُلمس إطلاقاً (نفس حماية الآلة الأصلية).
+    - منطقة لا يرد لها الخادم بيانات → تُتخطى بمؤشر تقدم (لا حلقات بلا نهاية).
+    - يعيد True إذا استبدل/أضاف شموعاً حقيقية فعلاً.
+    """
+    api_symbol = str(api_symbol or "").strip()
+    if not api_symbol:
+        return False
+    client = globals().get("CLIENT")
+    if client is None or getattr(client, "api", None) is None or \
+            not globals().get("CONNECTION_ALIVE"):
+        return False
+    if globals().get("IS_SUBSECOND"):
+        return False
+    period_s = int(globals().get("PERIOD_SECONDS", 60) or 60)
+    if period_s <= 0:
+        return False
+    asset = _v14_find_asset(api_symbol)
+    if asset is None:
+        try:
+            getter = globals().get("_get_or_create_asset")
+            if getter is not None:
+                asset = getter(api_symbol)
+        except Exception:
+            asset = None
+    if asset is None:
+        return False
+    store = globals().get("MT4_WRITER")
+    sym_store = str(getattr(asset, "symbol", "") or api_symbol)
+    win_s = max(2, int(window_candles)) * period_s
+    t_deadline = time.monotonic() + max(5.0, float(time_budget_s))
+    repaired_any = False
+    for _pass in range(max(1, int(max_passes))):
+        if time.monotonic() > t_deadline:
+            break
+        try:
+            line = sorted(list(asset.candles or []),
+                          key=lambda c: int(c.get("time", 0)))
+        except Exception:
+            break
+        if len(line) < 2:
+            break
+        cur_start = _align_time(int(time.time()))
+        cursor = float(_V14_DEEP_CURSOR.get(api_symbol, 0.0) or 0.0)
+        # أقدم مشكلة بعد المؤشر: شمعة اصطناعية مسطحة أو فجوة زمنية.
+        # الشمعة الحية وما بعدها لا تُلمس (حماية الآلة الأصلية نفسها).
+        oldest_flat = 0
+        oldest_hole = 0
+        prev_t = 0
+        for c in line:
+            t = int(c.get("time", 0))
+            if t >= cur_start:
+                # v14.9-fix: فجوة الذيل بين آخر شمعة مغلقة والفترة الحية
+                # تُقاس قبل القطع — الشمعة الحية نفسها تبقى محمية دائماً
+                if prev_t and (cur_start - prev_t) > period_s and \
+                        (oldest_hole == 0 or prev_t < oldest_hole):
+                    oldest_hole = prev_t
+                break
+            if t > cursor:
+                if _v14_is_synth_flat(c) and (oldest_flat == 0 or t < oldest_flat):
+                    oldest_flat = t
+                if prev_t and (t - prev_t) > period_s and \
+                        (oldest_hole == 0 or prev_t < oldest_hole):
+                    oldest_hole = prev_t
+            prev_t = t
+        _cand = [x for x in (oldest_flat, oldest_hole) if x]
+        target_t = min(_cand) if _cand else 0
+        if not target_t:
+            # لا مشاكل بعد المؤشر — المؤشر يُمسح ليبدأ السد من جديد لاحقاً
+            _V14_DEEP_CURSOR.pop(api_symbol, None)
+            break
+        anchor_end = target_t + win_s
+        if anchor_end > int(time.time()):
+            anchor_end = int(time.time())
+        try:
+            # نفس نداء الجلب الرسمي الذي تستخدمه الآلة الأصلية fill_gap_once
+            # (+ فترة واحدة: نافذة get_candles هي (end-offset, end] — بلا
+            # الفترة الإضافية تبقى شمعة المرساة نفسها خارج النافذة أبداً
+            # فيُهدر جولة كاملة بلا تقدم وتبقى أقدم شرطة كما هي)
+            fetched = await client.get_candles(api_symbol, anchor_end,
+                                               win_s + period_s, period_s)
+        except Exception:
+            fetched = None
+        if not fetched:
+            # لا بيانات من الخادم لهذه المنطقة (عطلة/نهاية تاريخ) — تُتخطى
+            # مؤقتاً حتى لا تدور الجولات على نفس المرساة
+            _V14_DEEP_CURSOR[api_symbol] = float(anchor_end)
+            V14_JOURNAL.record("deep_seal_skip", asset=api_symbol,
+                               anchor=int(anchor_end), reason=reason)
+            continue
+        try:
+            cur_map = {int(c.get("time", 0)): c for c in line}
+        except Exception:
+            break
+        changed = 0
+        for fc in fetched:
+            try:
+                t = _align_time(int(fc.get("time", fc.get("timestamp", 0)) or 0))
+            except Exception:
+                continue
+            if t <= 0 or t >= cur_start or t < target_t:
+                continue
+            o = float(fc.get("open", fc.get("o", 0)) or 0)
+            h = float(fc.get("high", fc.get("max", fc.get("h", 0))) or 0)
+            l = float(fc.get("low", fc.get("min", fc.get("l", 0))) or 0)
+            cl = float(fc.get("close", fc.get("c", 0)) or 0)
+            if o <= 0 or h <= 0 or l <= 0 or cl <= 0:
+                continue
+            ex = cur_map.get(t)
+            if ex is None or _v14_is_synth_flat(ex):
+                cur_map[t] = {"time": t, "open": o, "high": h, "low": l,
+                              "close": cl, "volume": 0}
+                changed += 1
+        if not changed:
+            # الخادم أعاد نفس البيانات بلا تحسن — تُتخطى هذه المرساة مؤقتاً
+            _V14_DEEP_CURSOR[api_symbol] = float(anchor_end)
+            continue
+        merged = sorted(cur_map.values(), key=lambda c: int(c.get("time", 0)))
+        try:
+            merged = _fill_missing_slots(list(merged), period_s, max_gap=1440)
+        except Exception:
+            pass
+        merged = merged[-int(globals().get("ASSET_MAX_CANDLES", 45000)):]
+        try:
+            _apply_candles_to_asset(asset, merged)
+        except Exception:
+            pass
+        try:
+            if store is not None and getattr(store, "save_snapshot", None):
+                store.save_snapshot(sym_store, merged)
+        except Exception:
+            pass
+        repaired_any = True
+        _V14_DEEP_CURSOR.pop(api_symbol, None)
+        V14_DEEP_REPAIRED[api_symbol] = time.time()
+        V14_JOURNAL.record("deep_seal_pass", asset=api_symbol,
+                           replaced=changed, anchor=int(anchor_end),
+                           reason=reason, pass_n=_pass + 1)
+    return repaired_any
 
 
 def v14_note_asset_opened(api_symbol: str, source: str) -> None:
@@ -8452,6 +8674,23 @@ class V14GapLossAuditor:
                 if period_s < gap <= int(self.suspect_max_gap_s) and \
                         gap > period_s:
                     holes.append(int(a.get("time", 0)))
+            # v14.9 (لقطة «مهذه المشاكل»): الشموع الاصطناعية المسطحة (الشرطات)
+            # ثغرات أيضاً — الكاشف القديم كان يحسبها شموعاً فلا يشتغل السد
+            # العميق لها أبداً. تُرفع وقتها ليُستبدل السد العميق كل واحدة
+            # بشمعة حقيقية بنفس طريقة الجلب الرسمية.
+            try:
+                _cur0 = _align_time(int(time.time()))
+                _n_synth = 0
+                for c in line:
+                    if int(c.get("time", 0)) >= _cur0:
+                        continue
+                    if _v14_is_synth_flat(c):
+                        holes.append(int(c.get("time", 0)))
+                        _n_synth += 1
+                        if _n_synth >= 200:
+                            break
+            except Exception:
+                pass
         except Exception:
             pass
         return holes
