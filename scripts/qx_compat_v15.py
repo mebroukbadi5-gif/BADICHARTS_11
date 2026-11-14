@@ -209,34 +209,85 @@ async def asset_payout_monitor():
         await asyncio.sleep(PAYOUT_REFRESH_INTERVAL)
 
 # ═══ 3) مرصد instruments فوق on_message الأصلي ═══
-# الأصل يعمل كاملاً أولاً حرفياً (_qx_orig_on_message(self, wss, msg)) ثم نلتقط
-# فقط 451-["instruments/list",[...]] لنوقظ من ينتظره — نفس كتلة v10 حرفياً.
+# الأصل يعمل كاملاً أولاً حرفياً (_qx_orig_on_message(self, wss, msg)) ثم نطبّق
+# **على مرحلتين** (نفس كتلة v14 المُجرّبة حرفياً — سبب ظهور قائمة العملات فارغة
+# في v15.0 كان أن المرصد هنا كان يعالج الصيغة المضمّنة فقط):
+#   الرد الرسمي على 42["instruments/get"] يصل كما يلي (سلوك المكتبة الرسمية):
+#     المرحلة 1: 451-["instruments/list",{...,"_placeholder":true,"num":0}]
+#                (رسالة تحكم تحمل placeholder فقط — بلا بيانات)
+#     المرحلة 2: إطار منفصل يحتوي JSON القائمة الفعلية
+# v15.1: المساران معاً — كما في v14 حرفياً.
 _qx_orig_on_message = WebsocketClient.on_message
 
 def _qx_on_message_with_instruments(self, wss, msg):
     _qx_orig_on_message(self, wss, msg)      # الأصل حرفياً — كل شيء كما هو
     try:
         msg_str = msg.decode("utf-8", errors="ignore") if isinstance(msg, bytes) else str(msg)
-        if "instruments/list" not in msg_str:
+
+        if "instruments/list" in msg_str and "_placeholder" in msg_str:
+            # المرحلة 1: نتذكر أننا ننتظر الإطار التالي الذي يحمل البيانات الفعلية
+            try:
+                self.api._temp_status = msg_str
+            except Exception:
+                pass
             return
-        _idx = msg_str.find('["')
-        if _idx == -1:
-            return
-        _payload = json.loads(msg_str[_idx:])
-        _data = _payload[1] if isinstance(_payload, list) and len(_payload) >= 2 else None
-        if isinstance(_data, dict) and "list" in _data:
-            _data = _data["list"]
-        if isinstance(_data, list) and _data:
-            self.api.instruments = _data
-            _loop = getattr(self.api, "_async_loop", None)
-            if _loop is not None and _loop.is_running():
-                asyncio.run_coroutine_threadsafe(
-                    self.api.event_registry.set_event("instruments_ready", _data),
-                    _loop,
-                )
-            logger.info(f"Instruments list received: {len(_data)} assets")
+
+        if "instruments/list" in msg_str:
+            # الصيغة المضمّنة (القائمة كاملة داخل نفس الرسالة) — خطة بديلة
+            try:
+                _idx = msg_str.find('["')
+                if _idx != -1:
+                    _payload = json.loads(msg_str[_idx:])
+                    _data = _payload[1] if isinstance(_payload, list) and len(_payload) >= 2 else None
+                    if isinstance(_data, dict) and "list" in _data:
+                        _data = _data["list"]
+                    if isinstance(_data, list) and _data:
+                        self.api.instruments = _data
+                        try:
+                            self.api._temp_status = ""
+                        except Exception:
+                            pass
+                        _loop = getattr(self.api, "_async_loop", None)
+                        if _loop is not None and _loop.is_running():
+                            asyncio.run_coroutine_threadsafe(
+                                self.api.event_registry.set_event("instruments_ready", _data),
+                                _loop,
+                            )
+                        logger.info(f"Instruments list received: {len(_data)} assets")
+            except Exception as _e:
+                logger.debug(f"instruments/list parse error: {_e}")
+
+        # المرحلة 2: تسليم القائمة الفعلية بعد placeholder (نفس سلوك المكتبة الرسمية)
+        try:
+            if getattr(self.api, "_temp_status", "") and "instruments/list" in self.api._temp_status:
+                _first_char = msg_str[0] if msg_str else ""
+                if _first_char and not _first_char.isdigit():
+                    _sidx = -1
+                    for _ci, _cc in enumerate(msg_str):
+                        if _cc in ("[", "{"):
+                            _sidx = _ci
+                            break
+                    if _sidx != -1:
+                        _payload = json.loads(msg_str[_sidx:])
+                        if (isinstance(_payload, list) and len(_payload) == 1
+                                and isinstance(_payload[0], (list, dict))):
+                            _payload = _payload[0]
+                        if isinstance(_payload, dict) and "list" in _payload:
+                            _payload = _payload["list"]
+                        if isinstance(_payload, list) and _payload:
+                            self.api.instruments = _payload
+                            self.api._temp_status = ""
+                            _loop = getattr(self.api, "_async_loop", None)
+                            if _loop is not None and _loop.is_running():
+                                asyncio.run_coroutine_threadsafe(
+                                    self.api.event_registry.set_event("instruments_ready", _payload),
+                                    _loop,
+                                )
+                            logger.info(f"Instruments list received: {len(_payload)} assets")
+        except Exception as _e:
+            logger.debug(f"instruments payload fulfillment error: {_e}")
     except Exception as _e:
-        logger.debug(f"instruments/list parse error: {_e}")
+        logger.debug(f"instruments/list observer error: {_e}")
 
 WebsocketClient.on_message = _qx_on_message_with_instruments
 
@@ -251,6 +302,11 @@ PRELOAD_FIRST_SYMBOL = ASSET_LIST[0] if ASSET_LIST else "BRLUSD_otc"
 _PRELOADED_INFO = {}
 V14_DEEP_REPAIRED = {}
 _QX_WINDOW_BUSY = False
+# v15.1 (طلب المستخدم): دائرة تحميل عند تحميل الشموع — حالة التحميل المسبق
+# المتسلسل (92 عملة واحدة تلو الأخرى) تُحدَّث هنا وترفعها المضخة للواجهة
+# حتى تختفي الدائرة عند انتهاء جلب الشموع.
+_QX_PRELOAD_STATUS = {"active": False, "idx": 0, "total": 0, "loaded": 0,
+                      "finished_at": 0.0}
 
 def apply_history_days(days_val):
     """تطبيق عدد أيام التاريخ بنفس آلية قائمة الأصل حرفياً (STAGE 3 وقائمة
@@ -693,6 +749,15 @@ async def preload_all_assets():
     total = len(symbols)
     logmsg(f"[preload] sequential preload: {total} assets, ONE after another "
            f"(history window {FETCH_DURATION_SECONDS}s each)")
+    # v15.1: بدء التحميل المسبق — الدائرة تظهر في الواجهة من هذه اللحظة
+    try:
+        _QX_PRELOAD_STATUS["active"] = True
+        _QX_PRELOAD_STATUS["idx"] = 0
+        _QX_PRELOAD_STATUS["total"] = int(total)
+        _QX_PRELOAD_STATUS["loaded"] = 0
+        _QX_PRELOAD_STATUS["finished_at"] = 0.0
+    except Exception:
+        pass
     loaded = 0
     streak = 0
     for idx, sym in enumerate(symbols, 1):
@@ -730,10 +795,24 @@ async def preload_all_assets():
         else:
             loaded += 1
         _PRELOADED_INFO[sym] = {"candles": len(asset.candles), "at": time.time()}
+        # v15.1: تحديث حالة الدائرة بعد كل عملة (واحدة تلو الأخرى)
+        try:
+            _QX_PRELOAD_STATUS["idx"] = int(idx)
+            _QX_PRELOAD_STATUS["loaded"] = int(loaded)
+        except Exception:
+            pass
         if idx % 10 == 0:
             logmsg(f"[preload] progress: {idx}/{total} assets ({loaded} loaded)")
         # فاصل بين عملة وأخرى — نفس الأصل: واحدة تلو الأخرى بلا تسرّع
         await asyncio.sleep(1.0 if PERIOD_SECONDS < 60 else FETCH_ASSET_DELAY)
+    # v15.1: انتهاء التحميل المسبق — الدائرة تختفي من الواجهة
+    try:
+        _QX_PRELOAD_STATUS["active"] = False
+        _QX_PRELOAD_STATUS["idx"] = int(total)
+        _QX_PRELOAD_STATUS["loaded"] = int(loaded)
+        _QX_PRELOAD_STATUS["finished_at"] = time.time()
+    except Exception:
+        pass
     logmsg(f"[preload] done: {loaded}/{total} assets loaded sequentially")
     return loaded
 
