@@ -3328,8 +3328,30 @@ _QX_ENGINE_SOURCE = r'''#!/usr/bin/env python3
 
 import os
 import sys
+import io
 import ssl
 import json
+
+# ==============================================================================
+# ENCODING FIX: Force UTF-8 on stdout / stderr / stdin to prevent
+# UnicodeEncodeError / UnicodeDecodeError when the script prints or logs
+# non-ASCII characters (Arabic, accents, emoji, etc.) on Windows consoles
+# whose default code page is cp1252 / cp1256.
+# ==============================================================================
+# Fix console encoding on Windows
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+        sys.stdin.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
+# Set default encoding to UTF-8
+try:
+    io.TextIOWrapper(open.__self__, encoding='utf-8')
+except Exception:
+    pass
 import time
 import math
 import struct
@@ -3347,7 +3369,7 @@ import configparser
 import contextlib
 from pathlib import Path
 from datetime import datetime, timedelta
-from collections import OrderedDict, defaultdict, deque as _v14_deque
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Any, Awaitable, Callable, Dict, Generic, Hashable, List, Literal, Mapping, Optional, Tuple, TypeVar
@@ -3370,23 +3392,34 @@ except ImportError:
     HAS_ORJSON = False
 
 # ==============================================================================
-# NOTE (v13.0): Preload Engine — same terminal-only flow as v12 (no web
-# interface, login asks ONLY email + password, full payout table in terminal).
-# NEW per user request:
-#   1) Right after login: 300 candles + status + payout for BRLUSD_otc (the
-#      chart opener asset).
-#   2) Then every other OPEN asset is loaded one-by-one with 300 candles each,
-#      and a live price stream keeps running per asset so any chart opened
-#      later is instantly ready.
-#   3) fetch_older_batch(): fetches a 300-candle older batch (scroll-back
-#      pagination, like professional platforms). Server-side is ready NOW;
-#      wiring it to the app comes LATER (user said: not now).
-#   4) Ticks live in MEMORY ONLY and are auto-deleted after 5 minutes, so the
-#      disk never fills up with ticks. Log file rotates at 10MB, candles.db is
-#      trimmed to the newest 5000 candles per symbol.
-#   5) In-memory candle cap raised 1000 -> 3000 so scroll-back batches can
-#      accumulate. The login method and the candle fetch method are UNCHANGED.
+# FIX FOR NUITKA / FROZEN ENVIRONMENT
 # ==============================================================================
+# 1) fake_useragent: force local-only mode so it doesn't try to fetch a remote
+#    user-agent list (which would crash when running as a frozen EXE / Nuitka
+#    build with no network access or no writable cache dir).
+os.environ['HTTPX_FAKE_USERAGENT_LOCAL_ONLY'] = 'True'
+os.environ['FAKE_USERAGENT_FALLBACK'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+
+# 2) SSL certificates: pin certifi's CA bundle path into the env vars that
+#    requests / websocket-client / ssl module all read. This avoids
+#    "SSL: CERTIFICATE_VERIFY_FAILED" errors in frozen builds where the
+#    default cert store is missing or points to a temp dir.
+_cert_path = certifi.where()
+os.environ['SSL_CERT_FILE'] = _cert_path
+os.environ['WEBSOCKET_CLIENT_CA_BUNDLE'] = _cert_path
+os.environ['REQUESTS_CA_BUNDLE'] = _cert_path
+
+# 3) Working directory: chdir to the folder that contains the EXE (frozen) or
+#    the .py file (script mode) so app_data.db, mt4_config.json, etc. are
+#    created next to the binary — NOT inside a temp _MEIPASS / build dir.
+if getattr(sys, 'frozen', False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+try:
+    os.chdir(BASE_DIR)
+except Exception:
+    pass
 
 # ==============================================================================
 # SECTION 1: LOGGING & SSL SETUP
@@ -3409,6 +3442,548 @@ cacert = os.environ.get('WEBSOCKET_CLIENT_CA_BUNDLE')
 ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
 ssl_context.load_verify_locations(cert_path)
+
+
+# ==============================================================================
+# SECTION 1.6: STARTUP INTERFACE (Welcome + License Verification)
+# ==============================================================================
+# هذا القسم مستقل تماماً: يعرض شعار QXMT4 + قائمة ترخيص + تحقق عبر Supabase.
+# ينتهي عمله بمجرد تأكيد الترخيص، ثم يُسلّم التحكم إلى بقية البرنامج.
+# كل الأسماء داخل فضاء `qx_startup.*` — لا توجد تعارضات مع بقية الكود.
+# ==============================================================================
+import hashlib as _qx_hashlib
+import socket as _qx_socket
+import platform as _qx_platform
+from dataclasses import dataclass as _qx_dataclass
+from datetime import datetime as _qx_datetime, timezone as _qx_timezone
+
+try:
+    from pyfiglet import figlet_format as _qx_figlet_format, FontNotFound as _qx_FontNotFound
+except ImportError:  # pragma: no cover
+    _qx_figlet_format = None
+    _qx_FontNotFound = Exception
+
+try:
+    import requests as _qx_requests
+except ImportError:  # pragma: no cover
+    _qx_requests = None
+
+
+def _qx_supports_color() -> bool:
+    if os.environ.get("NO_COLOR"):
+        return False
+    if not sys.stdout.isatty():
+        return False
+    if os.name == "nt":
+        os.system("")  # enable ANSI on Windows 10+
+    return True
+
+
+class _QxStyle:
+    """أكواد ANSI. تصبح سلاسل فارغة عند تعطيل الألوان."""
+
+    _NAMES = {
+        "RESET": "\033[0m",
+        "BOLD": "\033[1m",
+        "DIM": "\033[2m",
+        "CYAN": "\033[96m",
+        "GREEN": "\033[92m",
+        "YELLOW": "\033[93m",
+        "MAGENTA": "\033[95m",
+        "RED": "\033[91m",
+        "WHITE": "\033[97m",
+        "BLUE": "\033[94m",
+        "GRAY": "\033[90m",
+    }
+
+    def __init__(self, enabled: bool = True):
+        self.enabled = enabled
+        for name, code in self._NAMES.items():
+            setattr(self, name, code if enabled else "")
+
+    def rgb(self, r: int, g: int, b: int) -> str:
+        return f"\033[38;2;{r};{g};{b}m" if self.enabled else ""
+
+
+def _qx_term_size() -> tuple:
+    size = shutil.get_terminal_size(fallback=(80, 24))
+    return size.columns, size.lines
+
+
+def _qx_clear() -> None:
+    if sys.stdout.isatty():
+        os.system("cls" if os.name == "nt" else "clear")
+
+
+def _qx_configure_stdout() -> None:
+    if (sys.stdout.encoding or "").lower() not in ("utf-8", "utf8"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
+
+def _qx_best_rule_char() -> str:
+    """Heavy box-drawing line if the terminal can encode it, else ASCII."""
+    encoding = (sys.stdout.encoding or "ascii")
+    for char in ("\u2501", "\u2550", "\u2015"):  # heavy, double, horizontal bar
+        try:
+            char.encode(encoding)
+            return char
+        except (UnicodeEncodeError, LookupError):
+            continue
+    return "-"
+
+
+_QX_GRADIENT = (
+    (138, 43, 226),
+    (106, 60, 235),
+    (75, 80, 245),
+    (40, 120, 250),
+    (0, 170, 255),
+    (0, 230, 255),
+)
+
+
+@_qx_dataclass
+class QxStartupConfig:
+    app_name: str = "QXMT4"
+    # حساب المطور الفعلي (يظهر في قسم DEVELOPER → Username)
+    username: str = "@qxzero1"
+    # رابط القناة الرسمي للمطور (يظهر في قسم DEVELOPER → Channel)
+    channel: str = "https://t.me/qxchart"
+    # بوت التراخيص (يظهر فقط في "Get your license from …" — بلونين مختلفين)
+    license_bot: str = "@QXChartLicenseBot"
+    license_bot_url: str = "https://t.me/QXChartLicenseBot"
+    font: str = "slant"
+    animate: bool = True
+    line_delay: float = 0.06
+    width: int = 52
+    rule_char: str = ""  # empty -> auto-detect (heavy line, or "-" fallback)
+    supabase_url: str = "https://scuebmuivzqckasssyfu.supabase.co"
+    supabase_anon_key: str = "sb_publishable_wBPTnTcj6baFgyYxaP41rw_a5KPd8-C"
+    license_table: str = "licenses"
+    # license_store_path has been removed: license data now lives in the
+    # SQLite database (app_data.db, 'licenses' table). See _QxLicenseStore.
+
+    def __post_init__(self):
+        if not self.rule_char:
+            self.rule_char = _qx_best_rule_char()
+
+
+# ---- Banner rendering ----
+
+def _qx_figlet(text: str, font: str) -> list:
+    if _qx_figlet_format is None:
+        return [text]
+    try:
+        art = _qx_figlet_format(text, font=font)
+    except _qx_FontNotFound:
+        art = _qx_figlet_format(text)
+    return [line for line in art.splitlines() if line.strip()]
+
+
+def _qx_print_gradient(lines, st: '_QxStyle', indent: str = "  ",
+                       delay: float = 0.0) -> None:
+    for i, line in enumerate(lines):
+        r, g, b = _QX_GRADIENT[i % len(_QX_GRADIENT)]
+        sys.stdout.write(f"{indent}{st.rgb(r, g, b)}{st.BOLD}{line}{st.RESET}\n")
+        sys.stdout.flush()
+        if delay:
+            time.sleep(delay)
+
+
+def _qx_show_welcome(cfg: 'QxStartupConfig', st: '_QxStyle') -> None:
+    """ترحيب صغير في المنتصف، يُكتب حرفاً حرفاً."""
+    _qx_clear()
+    cols, rows = _qx_term_size()
+    text = f"Welcome, {cfg.app_name} Trader"
+
+    top_pad = max(0, rows // 2 - 1)
+    print("\n" * top_pad, end="")
+
+    left_pad = " " * max(0, (cols - len(text)) // 2)
+    r, g, b = _QX_GRADIENT[2]
+    color = st.rgb(r, g, b)
+
+    sys.stdout.write(left_pad)
+    sys.stdout.flush()
+    for ch in text:
+        sys.stdout.write(f"{color}{st.BOLD}{ch}{st.RESET}")
+        sys.stdout.flush()
+        if cfg.animate:
+            time.sleep(0.04)
+    print()
+
+    if cfg.animate:
+        time.sleep(0.7)
+    _qx_clear()
+
+
+def _qx_show_logo(cfg: 'QxStartupConfig', st: '_QxStyle') -> None:
+    print()
+    _qx_print_gradient(_qx_figlet(cfg.app_name, cfg.font), st,
+                       delay=cfg.line_delay if cfg.animate else 0.0)
+    print()
+
+
+# ---- Menu ----
+
+def _qx_rule(cfg: 'QxStartupConfig', st: '_QxStyle') -> None:
+    print(f"  {st.GRAY}{cfg.rule_char * cfg.width}{st.RESET}")
+
+
+def _qx_show_menu(cfg: 'QxStartupConfig', st: '_QxStyle') -> None:
+    _qx_rule(cfg, st)
+    # العناوين الرئيسية (DEVELOPER, ACTIVATION) باللون السماوي + Bold (مثل الشعار)
+    print(f"  {st.CYAN}{st.BOLD}DEVELOPER{st.RESET}")
+    # التسميات الثابتة (Username, Channel) باللون الأبيض الباهت
+    # القيم (المحتوى الفعلي) باللون السماوي + Bold
+    print(f"  {st.WHITE}Username{st.RESET} : {st.CYAN}{st.BOLD}{cfg.username}{st.RESET}")
+    print(f"  {st.WHITE}Channel {st.RESET} : {st.CYAN}{st.BOLD}{cfg.channel}{st.RESET}")
+    print(f"  {st.DIM}Contact via Telegram for support and updates{st.RESET}")
+    _qx_rule(cfg, st)
+    print()
+
+    print(f"  {st.CYAN}{st.BOLD}ACTIVATION{st.RESET}")
+    access_points = (
+        "Fetches all timeframes from 5 seconds up to 1 day",
+        "Auto-reconnects when internet drops, never loses the stream",
+        "User can fetch as many candles as needed",
+        "Default: 1000 candles per asset in just 4 seconds",
+        "Supports two timeframe ranges simultaneously",
+        "Includes 41 OTC assets out of the box",
+    )
+    for item in access_points:
+        print(f"  {st.GREEN}*{st.RESET} {st.WHITE}{item}{st.RESET}")
+    print()
+
+    _qx_rule(cfg, st)
+    # [L]/[Q] بلون سماوي زاهي + Bold (مثل الشعار)
+    print(f"  {st.CYAN}{st.BOLD}[L]{st.RESET} {st.WHITE}Enter license key{st.RESET}")
+    print(f"  {st.CYAN}{st.BOLD}[Q]{st.RESET} {st.WHITE}Quit{st.RESET}")
+    _qx_rule(cfg, st)
+    # "Get your license from @QXChartLicenseBot" — بلونين مختلفين:
+    #   النص التمهيدي باللون الرمادي (DIM)
+    #   اسم البوت باللون السماوي الزاهي + Bold (مثل لون الشعار)
+    print(f"  {st.DIM}Get your license from {st.RESET}{st.CYAN}{st.BOLD}{cfg.license_bot}{st.RESET}")
+    print()
+
+
+def _qx_render_home(cfg: 'QxStartupConfig', st: '_QxStyle') -> None:
+    """إعادة رسم الشعار + القائمة (بعد كل تغيير شاشة)."""
+    _qx_clear()
+    _qx_show_logo(cfg, st)
+    _qx_show_menu(cfg, st)
+
+
+# ---- License: local cache ----
+# NOTE: The original JSON-file-based _QxLocalStore has been replaced by a
+# SQLite-backed _QxLicenseStore defined later in this file (after the
+# DB_PATH and _init_db() definitions). All license data now lives in the
+# 'licenses' table of app_data.db — no JSON files are read or written.
+#
+# A tiny backward-compat stub is provided here so any external code that
+# still calls _QxLocalStore(...) keeps working; it transparently delegates
+# to _QxLicenseStore.
+
+class _QxLocalStore:
+    """[Deprecated] Backward-compat shim that delegates to _QxLicenseStore.
+    Kept so legacy call sites don't break. No JSON file is touched."""
+
+    def __init__(self, file_path: str = None):
+        # file_path is accepted for backward-compat but ignored; all data
+        # now lives in the SQLite database (DB_PATH / app_data.db).
+        self._impl = _QxLicenseStore()
+
+    def get(self, key: str):
+        return self._impl.get(key)
+
+    def set(self, key: str, value) -> bool:
+        return self._impl.set(key, value)
+
+    def delete(self, key: str) -> bool:
+        return self._impl.delete(key)
+
+
+def _qx_get_hardware_id() -> str:
+    try:
+        user = os.environ.get("USER") or os.environ.get("USERNAME") or "unknown"
+        # Safe encoding for username
+        if isinstance(user, bytes):
+            user = user.decode('utf-8', errors='ignore')
+        else:
+            user = str(user).encode('utf-8', errors='ignore').decode('utf-8', errors='ignore')
+    except Exception:
+        user = "unknown"
+
+    try:
+        hostname = _qx_socket.gethostname()
+        if isinstance(hostname, bytes):
+            hostname = hostname.decode('utf-8', errors='ignore')
+    except Exception:
+        hostname = "unknown"
+
+    raw = f"{user}-{_qx_platform.system().lower()}-{hostname}"
+    return _qx_hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+# ---- License: Supabase REST client ----
+
+@_qx_dataclass
+class _QxSupabaseConfig:
+    url: str
+    anon_key: str
+    table: str = "licenses"
+    usage_table: str = "usage_logs"
+    timeout: float = 10.0
+
+
+class _QxSupabaseLicenseClient:
+    def __init__(self, cfg: '_QxSupabaseConfig'):
+        self.cfg = cfg
+        self._headers = {
+            "apikey": cfg.anon_key,
+            "Authorization": f"Bearer {cfg.anon_key}",
+            "Content-Type": "application/json",
+        }
+
+    def _rest_url(self, table: str) -> str:
+        return f"{self.cfg.url.rstrip('/')}/rest/v1/{table}"
+
+    def fetch_license(self, license_key: str) -> Optional[dict]:
+        params = {
+            "select": "id,license_key,username,is_active,expires_at,hardware_id",
+            "license_key": f"eq.{license_key}",
+        }
+        resp = _qx_requests.get(
+            self._rest_url(self.cfg.table),
+            headers=self._headers,
+            params=params,
+            timeout=self.cfg.timeout,
+        )
+        resp.raise_for_status()
+        rows = resp.json()
+        return rows[0] if rows else None
+
+    def bind_hardware(self, license_key: str, hardware_id: str) -> None:
+        resp = _qx_requests.patch(
+            self._rest_url(self.cfg.table),
+            headers=self._headers,
+            params={"license_key": f"eq.{license_key}"},
+            json={"hardware_id": hardware_id, "last_seen": _qx_now_iso()},
+            timeout=self.cfg.timeout,
+        )
+        resp.raise_for_status()
+
+    def touch_last_seen(self, license_key: str) -> None:
+        resp = _qx_requests.patch(
+            self._rest_url(self.cfg.table),
+            headers=self._headers,
+            params={"license_key": f"eq.{license_key}"},
+            json={"last_seen": _qx_now_iso()},
+            timeout=self.cfg.timeout,
+        )
+        resp.raise_for_status()
+
+    def log_usage(self, license_id, action_type: str = "login") -> None:
+        try:
+            _qx_requests.post(
+                self._rest_url(self.cfg.usage_table),
+                headers=self._headers,
+                json={"license_id": license_id, "action_type": action_type},
+                timeout=self.cfg.timeout,
+            )
+        except _qx_requests.RequestException:
+            pass  # تسجيل الاستخدام اختياري، لا تُعطّل العملية أبداً
+
+
+def _qx_now_iso() -> str:
+    return _qx_datetime.now(_qx_timezone.utc).isoformat()
+
+
+def _qx_parse_datetime(value: str) -> Optional[_qx_datetime]:
+    try:
+        return _qx_datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+
+
+# ---- License: verification flow ----
+
+@_qx_dataclass
+class QxLicenseResult:
+    ok: bool
+    username: Optional[str] = None
+    expires_at: Optional[_qx_datetime] = None
+    message: str = ""
+
+
+def _qx_verify_with_supabase(client: '_QxSupabaseLicenseClient', license_key: str) -> 'QxLicenseResult':
+    hw_id = _qx_get_hardware_id()
+
+    try:
+        license_row = client.fetch_license(license_key)
+    except _qx_requests.RequestException as e:
+        return QxLicenseResult(False, message=f"Could not reach the license server: {e}")
+
+    if not license_row:
+        return QxLicenseResult(False, message="Invalid or non-existent license key.")
+
+    if not license_row.get("is_active"):
+        return QxLicenseResult(False, message="This license has been deactivated by the administrator.")
+
+    expires_raw = license_row.get("expires_at")
+    expires_at = _qx_parse_datetime(expires_raw) if expires_raw else None
+    if expires_at and expires_at < _qx_datetime.now(_qx_timezone.utc):
+        return QxLicenseResult(False, message=f"This license expired on {expires_at:%Y-%m-%d}.")
+
+    bound_hw = license_row.get("hardware_id")
+    if bound_hw:
+        if bound_hw != hw_id:
+            return QxLicenseResult(False, message="This license key is bound to another device and cannot be shared.")
+    else:
+        try:
+            client.bind_hardware(license_key, hw_id)
+        except _qx_requests.RequestException as e:
+            return QxLicenseResult(False, message=f"Could not bind license to this device: {e}")
+
+    try:
+        client.log_usage(license_row.get("id"))
+        client.touch_last_seen(license_key)
+    except _qx_requests.RequestException:
+        pass
+
+    return QxLicenseResult(
+        True,
+        username=license_row.get("username"),
+        expires_at=expires_at,
+        message="License verified.",
+    )
+
+
+def _qx_verify_license_local(key: str) -> bool:
+    """بديل محلي فقط يُستخدم عند عدم وجود إعدادات Supabase."""
+    valid_keys = {
+        "QXMT4-XXXX-XXXX-XXXX",
+        "QXMT4-DEMO-0000-0000",
+    }
+    return key.strip().upper() in valid_keys
+
+
+def _qx_try_license_key(cfg: 'QxStartupConfig', st: '_QxStyle', key: str) -> Optional['QxLicenseResult']:
+    """التحقق من مفتاح ترخيص أدخله المستخدم."""
+    if cfg.supabase_url and cfg.supabase_anon_key:
+        if _qx_requests is None:
+            print(f"  {st.RED}[X] 'requests' is not installed (pip install requests).{st.RESET}")
+            return None
+        store = _QxLicenseStore()  # SQLite-backed (no JSON)
+        client = _QxSupabaseLicenseClient(_QxSupabaseConfig(
+            url=cfg.supabase_url,
+            anon_key=cfg.supabase_anon_key,
+            table=cfg.license_table,
+        ))
+        result = _qx_verify_with_supabase(client, key)
+        if result.ok:
+            store.set("license", {
+                "license_key": key,
+                "hardware_id": _qx_get_hardware_id(),
+                "saved_at": _qx_now_iso(),
+            })
+            print(f"\n  {st.GREEN}{st.BOLD}[OK] Welcome {result.username or ''}. License activated.{st.RESET}")
+            return result
+        print(f"\n  {st.RED}{st.BOLD}[X] {result.message}{st.RESET}")
+        return None
+
+    if _qx_verify_license_local(key):
+        print(f"\n  {st.GREEN}{st.BOLD}[OK] License activated.{st.RESET}")
+        return QxLicenseResult(True, message="License activated.")
+    print(f"\n  {st.RED}{st.BOLD}[X] Invalid license key.{st.RESET}")
+    print(f"  {st.DIM}Contact {cfg.username} to get a license.{st.RESET}")
+    return None
+
+
+def _qx_try_saved_license(cfg: 'QxStartupConfig', st: '_QxStyle') -> Optional['QxLicenseResult']:
+    """فحص صامت لترخيص محفوظ سابقاً عبر Supabase، إن وُجد."""
+    if not (cfg.supabase_url and cfg.supabase_anon_key and _qx_requests):
+        return None
+    store = _QxLicenseStore()  # SQLite-backed (no JSON)
+    saved = store.get("license")
+    if not saved or saved.get("hardware_id") != _qx_get_hardware_id():
+        return None
+    client = _QxSupabaseLicenseClient(_QxSupabaseConfig(
+        url=cfg.supabase_url,
+        anon_key=cfg.supabase_anon_key,
+        table=cfg.license_table,
+    ))
+    result = _qx_verify_with_supabase(client, saved["license_key"])
+    return result if result.ok else None
+
+
+# ---- Main startup loop ----
+
+def qx_run_startup(cfg: Optional['QxStartupConfig'] = None, skip_welcome: bool = False) -> Optional['QxLicenseResult']:
+    """يعرض الترحيب + شاشة الترخيص. يُرجع QxLicenseResult عند النجاح،
+    أو None إذا خرج المستخدم قبل إدخال ترخيص صالح."""
+    _qx_configure_stdout()
+    cfg = cfg or QxStartupConfig()
+    st = _QxStyle(_qx_supports_color())
+
+    if not skip_welcome:
+        _qx_show_welcome(cfg, st)
+    _qx_render_home(cfg, st)
+
+    # حاول ترخيصاً محفوظاً سابقاً بشكل صامت قبل أي سؤال.
+    try:
+        saved_result = _qx_try_saved_license(cfg, st)
+    except Exception as _e:
+        # Any error reading the saved license (UnicodeDecodeError, OSError,
+        # JSON parse error, network error, ...) must not block the menu.
+        try:
+            print(f"  \033[93m[warn] saved-license check failed: {_e}\033[0m")
+        except Exception:
+            pass
+        saved_result = None
+    if saved_result:
+        print(f"\n  {st.GREEN}{st.BOLD}[OK] Welcome back{', ' + saved_result.username if saved_result.username else ''}. License valid.{st.RESET}")
+        time.sleep(1.0)
+        return saved_result
+
+    prompt = f"  {st.YELLOW}> License key (or [Q] to quit): {st.RESET}"
+
+    while True:
+        try:
+            raw_choice = input(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return None
+        choice = raw_choice.lower()
+
+        if choice in ("q", "quit", "exit"):
+            return None
+
+        if choice == "l":
+            print()
+            try:
+                key = input(f"  {st.CYAN}License key: {st.RESET}").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return None
+            if not key:
+                print(f"\n  {st.RED}[X] No key entered.{st.RESET}")
+                input(f"\n  {st.DIM}Press Enter to continue...{st.RESET}")
+                _qx_render_home(cfg, st)
+                continue
+            raw_choice = key
+
+        result = _qx_try_license_key(cfg, st, raw_choice)
+        if result:
+            time.sleep(1.0)
+            return result
+
+        input(f"\n  {st.DIM}Press Enter to continue...{st.RESET}")
+        _qx_render_home(cfg, st)
+
 
 
 # ==============================================================================
@@ -3492,35 +4067,232 @@ def resource_path(relative_path: str) -> Path:
         base_dir = Path(sys._MEIPASS)
     return base_dir / relative_path
 
+# ----------------------------------------------------------------------
+# SECTION 2B: DATABASE STORAGE
+# Replaces saved_email.txt, session.json, session_state.json with a single
+# SQLite database file (app_data.db). SQLite is built into Python, so there
+# are no extra dependencies. All credentials, session cookies/tokens and
+# login state now live in two tables:
+#   - sessions  (email -> JSON blob with cookies/token/user_agent)
+#   - app_state (single-row table: email, password, host, last_login, ...)
+# On every startup, the sessions table is wiped so the app performs a fresh
+# login (no stale cookies/token) — see SessionManager.delete_session_file().
+# ----------------------------------------------------------------------
+import sqlite3 as _sqlite3
+
+DB_PATH = Path(resource_path("app_data.db"))
+_db_lock = threading.Lock()
+
+def _db_conn() -> "_sqlite3.Connection":
+    conn = _sqlite3.connect(str(DB_PATH), timeout=15, check_same_thread=False)
+    conn.row_factory = _sqlite3.Row
+    return conn
+
+def _init_db() -> None:
+    try:
+        DB_PATH.parent.mkdir(exist_ok=True, parents=True)
+    except Exception:
+        pass
+    with _db_lock:
+        conn = _db_conn()
+        try:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS sessions (
+                    email TEXT PRIMARY KEY,
+                    data  TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS app_state (
+                    id                  INTEGER PRIMARY KEY CHECK (id = 1),
+                    email               TEXT,
+                    password            TEXT,
+                    host                TEXT,
+                    last_login          REAL,
+                    last_success        INTEGER,
+                    failed_auth_count   INTEGER
+                )
+            """)
+            # ---- New: licenses table (replaces license_store.json) ----
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS licenses (
+                    key         TEXT PRIMARY KEY,
+                    value_json  TEXT NOT NULL,
+                    updated_at  INTEGER
+                )
+            """)
+            conn.commit()
+        except Exception:
+            pass
+        finally:
+            conn.close()
+
+    # ---- One-time migration: import any existing license_store.json ----
+    # so legacy users don't lose their saved license. After migration the
+    # JSON file is renamed to .bak so it's no longer read on next start.
+    try:
+        _migrate_legacy_license_json()
+    except Exception:
+        pass
+
+_init_db()
+
+# ==============================================================================
+# LICENSE STORE: SQLite-backed replacement for the old JSON _QxLocalStore.
+# All license data now lives in the 'licenses' table of app_data.db.
+# No JSON files are read or written by this code path.
+# ==============================================================================
+
+class _QxLicenseStore:
+    """Persisted key-value store backed by the SQLite database.
+    Replaces the legacy JSON file-based _QxLocalStore. Uses the
+    'licenses' table created by _init_db()."""
+
+    def __init__(self, db_path: 'Optional[Path]' = None):
+        # DB_PATH is a module-level constant defined above; we resolve it
+        # lazily so this class is safe to instantiate at any time.
+        self._db_path = db_path if db_path is not None else DB_PATH
+
+    def _conn(self):
+        conn = _sqlite3.connect(str(self._db_path), timeout=15, check_same_thread=False)
+        conn.row_factory = _sqlite3.Row
+        return conn
+
+    def get(self, key: str = 'license'):
+        # Read a saved value. Returns a dict or None.
+        with _db_lock:
+            conn = self._conn()
+            try:
+                row = conn.execute(
+                    "SELECT value_json FROM licenses WHERE key=?", (key,)
+                ).fetchone()
+                if row:
+                    try:
+                        return json.loads(row["value_json"])
+                    except (json.JSONDecodeError, TypeError, ValueError):
+                        return None
+                return None
+            except Exception:
+                return None
+            finally:
+                conn.close()
+
+    def set(self, key: str, value) -> bool:
+        # Save a value. Returns True on success.
+        try:
+            value_json = json.dumps(value, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return False
+        with _db_lock:
+            conn = self._conn()
+            try:
+                conn.execute(
+                    "INSERT OR REPLACE INTO licenses (key, value_json, updated_at) VALUES (?, ?, ?)",
+                    (key, value_json, int(time.time()))
+                )
+                conn.commit()
+                return True
+            except Exception:
+                return False
+            finally:
+                conn.close()
+
+    def delete(self, key: str = 'license') -> bool:
+        with _db_lock:
+            conn = self._conn()
+            try:
+                conn.execute("DELETE FROM licenses WHERE key=?", (key,))
+                conn.commit()
+                return True
+            except Exception:
+                return False
+            finally:
+                conn.close()
+
+
+def _migrate_legacy_license_json() -> None:
+    """One-time migration: if a legacy license_store.json file exists in
+    the current working directory, import its 'license' entry into the
+    SQLite 'licenses' table, then rename the JSON file to .bak so it is
+    no longer used on subsequent startups."""
+    legacy_paths = [
+        Path("license_store.json"),
+        Path("app_data.db"),  # legacy collision case
+    ]
+    store = _QxLicenseStore()
+    for p in legacy_paths:
+        try:
+            if not p.exists() or not p.is_file():
+                continue
+            # Skip if the file is actually the SQLite database
+            if p.resolve() == DB_PATH.resolve():
+                continue
+            # Read defensively with errors='replace' so a binary file
+            # (e.g. a SQLite file accidentally pointed at) does not raise.
+            with open(p, "r", encoding="utf-8", errors="replace") as f:
+                try:
+                    data = json.load(f)
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    # Not a JSON file - rename to .bak so we don't keep
+                    # trying to read it on every startup.
+                    p.rename(p.with_suffix(p.suffix + '.bak'))
+                    continue
+            if not isinstance(data, dict):
+                p.rename(p.with_suffix(p.suffix + '.bak'))
+                continue
+            lic = data.get('license')
+            if isinstance(lic, dict):
+                # Only migrate if not already in SQLite
+                if not store.get('license'):
+                    store.set('license', lic)
+            # Rename the JSON file to .bak so it's not used again
+            p.rename(p.with_suffix(p.suffix + '.bak'))
+        except Exception:
+            pass
+
+
 def load_session(email: str, user_agent: str = None) -> dict:
     if user_agent is None:
         try: user_agent = UserAgent().random
         except Exception: user_agent = USER_AGENT
-    output_file = Path(resource_path("session.json"))
-    with session_lock:
-        all_sessions = {}
-        if output_file.exists():
-            try: all_sessions = json.loads(output_file.read_text())
-            except json.JSONDecodeError: pass
-        else:
-            output_file.parent.mkdir(exist_ok=True, parents=True)
-        if email not in all_sessions:
-            all_sessions[email] = {"cookies": None, "token": None, "user_agent": user_agent}
-        output_file.write_text(json.dumps(all_sessions, indent=4))
-        return all_sessions.get(email)
+    default_data = {"cookies": None, "token": None, "user_agent": user_agent}
+    with _db_lock:
+        conn = _db_conn()
+        try:
+            row = conn.execute("SELECT data FROM sessions WHERE email=?", (email,)).fetchone()
+            if row:
+                try:
+                    data = json.loads(row["data"])
+                    if not data.get("user_agent"):
+                        data["user_agent"] = user_agent
+                    return data
+                except json.JSONDecodeError:
+                    pass
+            conn.execute(
+                "INSERT OR REPLACE INTO sessions (email, data) VALUES (?, ?)",
+                (email, json.dumps(default_data, indent=2))
+            )
+            conn.commit()
+            return default_data
+        except Exception:
+            return default_data
+        finally:
+            conn.close()
 
 def update_session(email: str, d: dict) -> dict:
-    output_file = Path(resource_path("session.json"))
-    with session_lock:
-        current_sessions = {}
-        if output_file.exists():
-            try: current_sessions = json.loads(output_file.read_text())
-            except json.JSONDecodeError: pass
-        else:
-            output_file.parent.mkdir(exist_ok=True, parents=True)
-        current_sessions[email] = d
-        output_file.write_text(json.dumps(current_sessions, indent=4))
-        return current_sessions.get(email)
+    with _db_lock:
+        conn = _db_conn()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO sessions (email, data) VALUES (?, ?)",
+                (email, json.dumps(d, indent=2))
+            )
+            conn.commit()
+            return d
+        except Exception:
+            return d
+        finally:
+            conn.close()
 
 # ==============================================================================
 # SECTION 3: HTTP NAVIGATOR (PROVEN WORKING METHOD)
@@ -3596,7 +4368,13 @@ class Browser(Session):
 
     def get_soup(self):
         if self.response and not self.response.ok: raise RuntimeError(self.response.reason)
-        return BeautifulSoup(self.response.content, "html.parser")
+        # Use raw bytes so BeautifulSoup can detect the real encoding;
+        # never rely on requests' .text which may raise UnicodeDecodeError.
+        try:
+            raw = self.response.content if self.response is not None else b""
+            return BeautifulSoup(raw, "html.parser", from_encoding="utf-8")
+        except Exception:
+            return BeautifulSoup(b"", "html.parser")
 
     def send_request(self, method, url, headers=None, **kwargs):
         merged_headers = self.headers.copy()
@@ -3837,7 +4615,11 @@ class WebsocketClient:
         except Exception:
             pass
         try:
-            msg_str = msg.decode("utf-8", errors="ignore") if isinstance(msg, bytes) else str(msg)
+            # Defensive: a malformed binary frame must never crash the WS thread.
+            if isinstance(msg, (bytes, bytearray, memoryview)):
+                msg_str = bytes(msg).decode("utf-8", errors="ignore")
+            else:
+                msg_str = str(msg)
 
             if msg_str == "2":
                 try:
@@ -3867,78 +4649,6 @@ class WebsocketClient:
                 # ===== EVENT-DRIVEN FIX =====
                 self.state.signal_auth_accepted()
 
-            # ===== INSTRUMENTS LIST (طريقة pyquotex الرسمية — على مرحلتين) =====
-            # الرد على 42["instruments/get"] يصل كما يلي (نفس سلوك المكتبة الرسمية):
-            #   المرحلة 1: 451-["instruments/list",{...,"_placeholder":true,"num":0}]
-            #              (رسالة تحكم تحمل placeholder فقط — بلا بيانات)
-            #   المرحلة 2: إطار منفصل (غالباً binary) يحتوي JSON القائمة الفعلية
-            # v12 FIX: السابق كان يعالج الصيغة المضمّنة فقط (451- مع القائمة داخلها)،
-            # ولذلك عندما يرد الخادم بأسلوب placeholder + إطار منفصل لم تُخزن القائمة
-            # أبداً وكانت تظهر فارغة. الآن نطبّق المسارين معاً.
-            if "instruments/list" in msg_str and "_placeholder" in msg_str:
-                # المرحلة 1: نتذكر أننا ننتظر الإطار التالي الذي يحمل البيانات الفعلية
-                try:
-                    self.api._temp_status = msg_str
-                except Exception:
-                    pass
-                self.state.ssl_Mutual_exclusion = False
-                return
-
-            if "instruments/list" in msg_str:
-                # الصيغة المضمّنة (القائمة كاملة داخل نفس الرسالة) — خطة بديلة
-                try:
-                    _idx = msg_str.find('["')
-                    if _idx != -1:
-                        _payload = json.loads(msg_str[_idx:])
-                        _data = _payload[1] if isinstance(_payload, list) and len(_payload) >= 2 else None
-                        if isinstance(_data, dict) and "list" in _data:
-                            _data = _data["list"]
-                        if isinstance(_data, list) and _data:
-                            self.api.instruments = _data
-                            try:
-                                self.api._temp_status = ""
-                            except Exception:
-                                pass
-                            _loop = getattr(self.api, "_async_loop", None)
-                            if _loop is not None and _loop.is_running():
-                                asyncio.run_coroutine_threadsafe(
-                                    self.api.event_registry.set_event("instruments_ready", _data),
-                                    _loop,
-                                )
-                            logger.info(f"Instruments list received: {len(_data)} assets")
-                except Exception as _e:
-                    logger.debug(f"instruments/list parse error: {_e}")
-
-            # المرحلة 2: تسليم القائمة الفعلية بعد placeholder (نفس سلوك المكتبة الرسمية)
-            try:
-                if self.api._temp_status and "instruments/list" in self.api._temp_status:
-                    _first_char = msg_str[0] if msg_str else ""
-                    if _first_char and not _first_char.isdigit():
-                        _sidx = -1
-                        for _ci, _cc in enumerate(msg_str):
-                            if _cc in ("[", "{"):
-                                _sidx = _ci
-                                break
-                        if _sidx != -1:
-                            _payload = json.loads(msg_str[_sidx:])
-                            if (isinstance(_payload, list) and len(_payload) == 1
-                                    and isinstance(_payload[0], (list, dict))):
-                                _payload = _payload[0]
-                            if isinstance(_payload, dict) and "list" in _payload:
-                                _payload = _payload["list"]
-                            if isinstance(_payload, list) and _payload:
-                                self.api.instruments = _payload
-                                self.api._temp_status = ""
-                                _loop = getattr(self.api, "_async_loop", None)
-                                if _loop is not None and _loop.is_running():
-                                    asyncio.run_coroutine_threadsafe(
-                                        self.api.event_registry.set_event("instruments_ready", _payload),
-                                        _loop,
-                                    )
-                                logger.info(f"Instruments list received: {len(_payload)} assets")
-            except Exception as _e:
-                logger.debug(f"instruments payload fulfillment error: {_e}")
-
             message = None
             if len(msg_str) > 1 and msg_str[1] in ('[', '{'):
                 try:
@@ -3963,75 +4673,21 @@ class WebsocketClient:
 
             if isinstance(message, dict):
                 asset = message.get("asset")
-                # v14.8 (تقرير الفحص): الرد الفارغ (candles: []) ردٌّ حقيقي
-                # من الخادم عند فجوة أو عطلة نهاية أسبوع — يُرفع الحدث له
-                # أيضاً حتى لا ينتظر الجالب 30 ثانية كاملة ثم يفشل الجلب
-                # كلها بعد 3 فشلات متتالية وتبقى فجوات في التاريخ.
-                _payload_key = None
-                for _k in ("candles", "data", "history"):
-                    if _k in message:
-                        _payload_key = _k
-                        break
-                if asset and _payload_key is not None:
+                if asset and (message.get("candles") or message.get("data") or message.get("history")):
                     self.api.candle_v2_data[asset] = message
                     self.api.candles.candles_data = message.get("candles") or message.get("data") or message.get("history")
 
-                    # ===== FIX: توجيه حدث الجلب للرد الحقيقي فقط (v14.1) =====
-                    # مشكلة سببت «الرجوع للخلف لا يجلب شموعاً»:
-                    #   الحدث candles_ready_<asset> كان يُرفع لأي رسالة تحمل
-                    #   شموعاً لنفس العملة — بما فيها لقطات البث الحي
-                    #   (instruments/update) — فتسرق اللقطة الحية الحدث قبل وصول
-                    #   رد history/load الحقيقي، فيأخذ الانتظار شموعاً حديثة
-                    #   لا تنفع التمرير للخلف (تُفلتر كلها لأنها ليست أقدم من
-                    #   before_time) وتظهر النتيجة فارغة دائماً.
-                    # الحل (نفس بروتوكول pyquotex): رد history/load الحقيقي يرد
-                    #   بـ«index» مطابق للطلب — لذلك:
-                    #   - رسالة تحمل index = رد تاريخ حقيقي → ترفع الحدثين
-                    #     (العام + المفهرس) كما كان تماماً — طريقة الجلب الأصلية
-                    #     لم تُمَس حرفياً.
-                    #   - رسالة بلا index = لقطة بث حي → تُحدّث الكاش فقط، ولا
-                    #     ترفع حدث الجلب ما دام طلب history لهذه العملة معلّقاً
-                    #     وحديثاً (سجل _history_pending يملؤه send_websocket_request
-                    #     عند رؤية أي history/load صادر).
+                    asyncio.run_coroutine_threadsafe(
+                        self.api.event_registry.set_event(f'candles_ready_{asset}', message),
+                        loop
+                    )
+
                     index = message.get("index")
-                    pending = None
-                    try:
-                        pending = self.api._history_pending.get(asset)
-                    except Exception:
-                        pending = None
-                    pending_fresh = False
-                    if pending is not None:
-                        try:
-                            pending_fresh = (time.time() - float(pending[1])) < 15.0
-                        except Exception:
-                            pending_fresh = False
                     if index is not None:
-                        # رد history/load الحقيقي — نفس السلوك الأصلي كاملاً
-                        asyncio.run_coroutine_threadsafe(
-                            self.api.event_registry.set_event(f'candles_ready_{asset}', message),
-                            loop
-                        )
                         asyncio.run_coroutine_threadsafe(
                             self.api.event_registry.set_event(f'candles_ready_{asset}_{index}', message),
                             loop
                         )
-                        try:
-                            self.api._history_pending.pop(asset, None)
-                            self.api._history_reply_count += 1
-                        except Exception:
-                            pass
-                    elif not pending_fresh:
-                        # لقطة حية بلا أي طلب تاريخ معلّق — سلوك أصلي متوافق
-                        asyncio.run_coroutine_threadsafe(
-                            self.api.event_registry.set_event(f'candles_ready_{asset}', message),
-                            loop
-                        )
-                    else:
-                        # لقطة حية تحاول سرقة حدث جلب معلّق — تُسَقَط (الكاش تُحدّث أعلاه)
-                        try:
-                            self.api._history_stolen_suppressed += 1
-                        except Exception:
-                            pass
 
             if isinstance(message, dict) and (message.get("liveBalance") or message.get("demoBalance")):
                 self.api.account_balance = message
@@ -4039,17 +4695,6 @@ class WebsocketClient:
             if isinstance(message, list) and len(message) > 0 and isinstance(message[0], list) and len(message[0]) == 4:
                 asset = message[0][0]
                 self.api.realtime_candles[asset] = message[0]
-                # v14.8 (تقرير الفحص — سبب «أجسام الشموع صغيرة وقممها تضيع»):
-                # كل تيكات الرسالة تُحفظ في قائمة انتظار لكل عملة — التيكات
-                # التي تصل بين قراءتين لا تضيع بعد الآن والبث يقرؤها كلها
-                # (الشرط القديم message[0] كان يتجاهل بقية التيكات).
-                try:
-                    _tq = self.api._tick_queue.setdefault(asset, _v14_deque(maxlen=4096))
-                    for _tk in message:
-                        if isinstance(_tk, list) and len(_tk) == 4:
-                            _tq.append(_tk)
-                except Exception:
-                    pass
         except Exception as e:
             logger.debug(f"Error processing message: {e}")
 
@@ -4062,7 +4707,10 @@ class WebsocketClient:
         self.state.check_accepted_connection = False
         # ===== EVENT-DRIVEN FIX =====
         self.state.signal_ws_error()
-        mark_connection_dead(f"ws_error: {str(error)[:80]}")
+        try:
+            CONNECTION_ALIVE = False
+        except Exception:
+            pass
 
     def on_open(self, wss):
         logger.info("Websocket client connected.")
@@ -4090,7 +4738,10 @@ class WebsocketClient:
         self.state.check_accepted_connection = False
         # ===== EVENT-DRIVEN FIX =====
         self.state.signal_ws_closed()
-        mark_connection_dead("ws_closed")
+        try:
+            CONNECTION_ALIVE = False
+        except Exception:
+            pass
 
     def on_ping(self, wss, ping_msg): pass
     def on_pong(self, wss, pong_msg): pass
@@ -4169,18 +4820,6 @@ class QuotexAPI:
         self.event_registry = EventRegistry()
         self._async_loop: Optional[asyncio.AbstractEventLoop] = None
         self._temp_status = ""
-        # ===== v14.1: سجل طلبات history/load المعلّقة (توجيه رد الجلب الحقيقي) =====
-        # send_websocket_request يسجل هنا كل طلب history/load صادر:
-        #   asset -> (index, time_sent)
-        # وموجّه الرسائل يستخدمه لمنع لقطات البث الحي من سرقة حدث
-        # candles_ready_<asset> قبل وصول رد history/load الحقيقي.
-        self._history_pending: Dict[str, tuple] = {}
-        # v14.8 (تقرير الفحص): قائمة انتظار التيكات لكل عملة — كل تيك يُحفظ
-        # ويُعالَج، والتيكات بين قراءتين لا تضيع فتبقى قمم الشموع وقيعانها.
-        self._tick_queue: Dict[str, _v14_deque] = {}
-        self._tick_last_done: Dict[str, tuple] = {}
-        self._history_reply_count: int = 0
-        self._history_stolen_suppressed: int = 0
         # ===== STALE-WATCHDOG ADDITION =====
         # WS . watchdog
         # .
@@ -4274,20 +4913,6 @@ class QuotexAPI:
                 pass
         self.state.ssl_Mutual_exclusion_write = True
         try:
-            # ===== v14.1: سجّل أي طلب history/load صادر (توجيه رد الجلب الحقيقي) =====
-            # لا يغيّر الرسالة ولا طريقة الجلب بأي شكل — مجرد دفتر انتظار يقرؤه
-            # موجّه الرسائل لمنع لقطات البث من سرقة حدث candles_ready_<asset>.
-            if isinstance(data, str) and '"history/load"' in data:
-                try:
-                    _pl_start = data.find("{")
-                    _pl_end = data.rfind("}")
-                    if _pl_start >= 0 and _pl_end > _pl_start:
-                        _pl = json.loads(data[_pl_start:_pl_end + 1])
-                        if isinstance(_pl, dict) and _pl.get("asset"):
-                            self._history_pending[str(_pl["asset"])] = (
-                                _pl.get("index"), time.time())
-                except Exception:
-                    pass
             if self.websocket_client and self.websocket_client.wss:
                 self.websocket_client.wss.send(data)
         finally:
@@ -4575,90 +5200,8 @@ class Quotex:
         payload = {"demo": self.api.account_type, "tournamentId": 0}
         self.api.send_websocket_request(f'42["account/change",{json.dumps(payload)}]')
 
-    async def get_instruments(self, timeout: float = 12.0):
-        """طريقة pyquotex الرسمية: طلب قائمة instruments الكاملة عبر WebSocket
-        والانتظار حتى وصولها (event: instruments_ready)."""
-        if self.api is None:
-            return []
-        if self.api.instruments and len(self.api.instruments) > 0:
-            return self.api.instruments
-        try:
-            await self.api.event_registry.clear_event("instruments_ready")
-        except Exception:
-            pass
-        try:
-            self.api.send_websocket_request('42["instruments/get"]')
-        except Exception as e:
-            logmsg(f"[instruments] request failed: {e}")
-            return []
-        data = await self.api.event_registry.wait_event("instruments_ready", timeout=timeout)
-        if isinstance(data, dict) and data.get("_placeholder"):
-            data = await self.api.event_registry.wait_event("instruments_ready", timeout=5.0)
-        if isinstance(data, list) and data:
-            self.api.instruments = data
-        return list(self.api.instruments or [])
-
     async def get_all_assets(self):
-        """طريقة pyquotex الرسمية: خريطة اسم الأصل -> كوده الداخلي."""
-        if self.api is None:
-            return {}
-        try:
-            await self.get_instruments()
-        except Exception:
-            pass
-        for i in (self.api.instruments or []):
-            try:
-                if isinstance(i, (list, tuple)) and i[0] != "":
-                    self.codes_asset[i[1]] = i[0]
-            except Exception:
-                continue
-        return self.codes_asset
-
-    def get_payment(self):
-        """طريقة pyquotex الرسمية get_payment: نسبة الدفع + الحالة لكل الأصول."""
-        if self.api is None or not self.api.instruments:
-            return {}
-        assets_data = {}
-        for i in self.api.instruments:
-            try:
-                assets_data[str(i[2]).replace("\n", "")] = {
-                    "turbo_payment": i[18],
-                    "payment": i[5],
-                    "profit": {"24H": i[-10], "1M": i[-9], "5M": i[-8]},
-                    "open": i[14],
-                }
-            except Exception:
-                continue
-        return assets_data
-
-    def get_payout_by_asset(self, asset_name: str, timeframe: str = "1"):
-        """طريقة pyquotex الرسمية get_payout_by_asset: نسبة الدفع لأصل محدد.
-        timeframe: "1" (1M) أو "5" (5M) أو "24" (24H) أو "all"."""
-        if self.api is None or not self.api.instruments:
-            return None
-        data = None
-        for i in self.api.instruments:
-            try:
-                if isinstance(i, (list, tuple)) and len(i) > 1 and asset_name == i[1]:
-                    data = {
-                        "turbo_payment": i[18] if len(i) > 18 else None,
-                        "payment": i[5] if len(i) > 5 else None,
-                        "profit": {"24H": i[-10], "1M": i[-9], "5M": i[-8]},
-                        "open": i[14] if len(i) > 14 else None,
-                    }
-                    break
-            except Exception:
-                continue
-        if data is None:
-            return None
-        if timeframe == "all":
-            return data.get("profit")
-        profit = data.get("profit")
-        if profit:
-            if str(timeframe) == "24":
-                return profit.get("24H")
-            return profit.get(f"{timeframe}M")
-        return None
+        return {}
 
     async def start_candles_stream(self, asset="EURUSD", period=60):
         if self.api:
@@ -4675,37 +5218,15 @@ class Quotex:
     async def get_candles(self, asset, end_from_time, offset, period, progressive=False, timeout=30, use_cache=False):
         if self.api is None: return None
         if end_from_time is None: end_from_time = time.time()
-        # v14.8 (تقرير الفحص): رقم الطلب فريد من عدّاد الطلبات — طلبان في
-        # الثانية نفسها لم يكنا يحملان الرقم نفسه فيتداخل ردّاهما، وكل نداء
-        # ينتظر ردَّه هو فقط عبر الحدث المفهرس (نفس توجيه _fetch_historical_batch).
-        index = next(_request_counter)
+        index = calendar.timegm(time.gmtime())
         self.api.candles.candles_data = None
-        _indexed_event = f'candles_ready_{asset}_{index}'
-        await self.api.event_registry.clear_event(_indexed_event)
-        # v14.8: لا إعادة اشتراك في كل نداء — إعادة الاشتراك كانت تغيّر فترة
-        # البث الحي وتتسابق مع رد التاريخ. يُشترَك فقط إذا لم يكن البث الحي
-        # يعمل لهذه العملة أصلاً.
-        try:
-            _already_streaming = False
-            for _sa in ALL_STREAMING_ASSETS:
-                if getattr(_sa, "api_symbol", None) == asset and getattr(_sa, "streaming", False):
-                    _already_streaming = True
-                    break
-        except Exception:
-            _already_streaming = False
-        if not _already_streaming:
-            await self.start_candles_stream(asset, period)
+        await self.api.event_registry.clear_event(f'candles_ready_{asset}')
+        await self.start_candles_stream(asset, period)
         self.api.get_candles_ws(asset, index, int(end_from_time), offset, period)
         try:
-            history_data = await self.api.event_registry.wait_event(_indexed_event, timeout=timeout)
+            history_data = await self.api.event_registry.wait_event(f'candles_ready_{asset}', timeout=timeout)
         except Exception:
-            history_data = None
-        if history_data is None:
-            # تراجع آمن: الحدث العام (يُرفع دائماً لأي رد يحمل index)
-            try:
-                history_data = await self.api.event_registry.wait_event(f'candles_ready_{asset}', timeout=3)
-            except Exception:
-                return None
+            return None
         if history_data is None: return None
         candles = self.prepare_candles(asset, period, history_data)
         if progressive: return self.api.historical_candles.get("data", {})
@@ -4735,7 +5256,7 @@ class Quotex:
                 parsed.append(c)
         return parsed
 
-    async def get_historical_candles(self, asset, amount_of_seconds, period, timeout=30, max_workers=5, progress_callback=None, batch_callback=None):
+    async def get_historical_candles(self, asset, amount_of_seconds, period, timeout=30, max_workers=5, progress_callback=None):
         # ===== FIX 7: (5 workers + chunk=200) =====
         # .
         # (keepalive + watchdog ).
@@ -4752,7 +5273,6 @@ class Quotex:
             async with semaphore:
                 oldest_t = start_t
                 consecutive_failures_in_worker = 0
-                _same_anchor_tries = 0   # v14.9: محاولات على نفس المرساة قبل أي تخطٍّ
                 while oldest_t > end_t:
                     # ===== FIX 3: batch =====
                     if not self.api or not getattr(self.api.state, 'check_accepted_connection', False):
@@ -4761,45 +5281,17 @@ class Quotex:
                     index = next(_request_counter)
                     batch_data = await self._fetch_historical_batch(asset, oldest_t, chunk_seconds, period, index, timeout)
                     if not batch_data:
-                        # v14.9 (لقطة «مهذه المشاكل» — التاريخ يصل متناثراً):
-                        # كان أول رد فارغ يقفز المرساة كتلة كاملة (200 شمعة
-                        # تُفقد بلا محاولة) وأي 3 فشلات متتالية تقتل العامل
-                        # فيُترك كتله كاملاً بلا جلب. الآن: 3 محاولات على نفس
-                        # المرساة بفواصل أطول قبل أي تخطٍّ، وحد الموت 10 فشلات
-                        # متتالية — الطريقة نفسها (نفس الطلب، نفس المرساة،
-                        # نفس الإيقاع) بلا أي تغيير.
+                        oldest_t -= chunk_seconds
                         consecutive_failures_in_worker += 1
-                        _same_anchor_tries += 1
-                        if consecutive_failures_in_worker >= 10:
-                            # 10 consecutive failures = connection dead — exit
+                        if consecutive_failures_in_worker >= 3:
+                            # 3 consecutive failures = connection dead — exit
                             break
-                        if _same_anchor_tries >= 3:
-                            _same_anchor_tries = 0
-                            oldest_t -= chunk_seconds
                         # backoff
-                        await asyncio.sleep(FETCH_BATCH_DELAY * (2 + _same_anchor_tries * 2))
-                        continue
-                    consecutive_failures_in_worker = 0
-                    _same_anchor_tries = 0
-                    new_batch = self._parse_historical_candles(batch_data)
-                    if not new_batch:
-                        # v14.9: رد غير قابل للتحليل = محاولة على نفس المرساة
-                        # قبل التخطي (القديم كان يهمل كتلة كاملة من أول مرة)
-                        _same_anchor_tries += 1
-                        if _same_anchor_tries >= 3:
-                            _same_anchor_tries = 0
-                            oldest_t -= chunk_seconds
                         await asyncio.sleep(FETCH_BATCH_DELAY * 2)
                         continue
-                    # v14.6 (طلب المستخدم: «اي دفعة جلبها يرفعها الى الشارت»):
-                    # مرصد قراءة فقط — يسلّم كل دفعة فور وصولها للمستدعي الذي
-                    # يرفعها إلى الشارت في الحال. طريقة الجلب نفسها وسم Requests
-                    # والمرساة المتحركة كما هي حرفياً في الكود المرجعي دون أي تغيير.
-                    if batch_callback:
-                        try:
-                            batch_callback(list(new_batch), worker_id)
-                        except Exception:
-                            pass
+                    consecutive_failures_in_worker = 0
+                    new_batch = self._parse_historical_candles(batch_data)
+                    if not new_batch: oldest_t -= chunk_seconds; continue
                     batch_times = []
                     for c in new_batch:
                         ts = c['time']
@@ -4864,18 +5356,7 @@ def dbg(msg: str):
 
 LOG_FILE = Path("qxchart.log")
 def _log_to_file(line: str):
-    # v13: تدوير السجل — عند تجاوز 10MB يُنقل إلى qxchart.old.log ويبدأ ملف جديد
-    # (بدون هذه الحماية يمتلئ القرص بعد أسابيع من التشغيل المستمر).
     try:
-        _max = globals().get('LOG_MAX_BYTES', 10 * 1024 * 1024)
-        if LOG_FILE.exists() and LOG_FILE.stat().st_size > _max:
-            _old = LOG_FILE.with_suffix('.old.log')
-            try:
-                if _old.exists():
-                    _old.unlink()
-            except Exception:
-                pass
-            LOG_FILE.replace(_old)
         with open(LOG_FILE, "a", encoding="utf-8") as f: f.write(line + "\n")
     except Exception: pass
 
@@ -4898,9 +5379,19 @@ def logmsg(msg: str):
 
 def log_exception(context: str, exc: BaseException):
     ts = datetime.now().strftime("%H:%M:%S")
-    tb_text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-    print(f"  \033[91m[{ts}] FATAL in {context}: {exc}\033[0m")
-    _log_to_file(f"[{ts}] FATAL in {context}: {exc}\n{tb_text}")
+    try:
+        tb_text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        # Safe encoding - ignore problematic characters
+        error_msg = str(exc).encode('utf-8', errors='ignore').decode('utf-8', errors='ignore')
+        print(f"  \033[91m[{ts}] FATAL in {context}: {error_msg}\033[0m")
+        _log_to_file(f"[{ts}] FATAL in {context}: {error_msg}\n{tb_text}")
+    except Exception as e:
+        # Fallback if even the error handler fails
+        try:
+            print(f"  \033[91m[{ts}] FATAL in {context}: Encoding error occurred\033[0m")
+            _log_to_file(f"[{ts}] FATAL in {context}: Encoding error - {e}")
+        except:
+            pass
 
 def _thread_excepthook(args):
     log_exception(f"thread '{args.thread.name}'", args.exc_value)
@@ -4908,6 +5399,16 @@ threading.excepthook = _thread_excepthook
 
 def _main_excepthook(exc_type, exc_value, exc_tb):
     if issubclass(exc_type, KeyboardInterrupt): sys.__excepthook__(exc_type, exc_value, exc_tb); return
+    # Transient encoding errors should NOT kill the whole process.
+    if issubclass(exc_type, UnicodeError):
+        try:
+            ts = datetime.now().strftime("%H:%M:%S")
+            safe = str(exc_value).encode('utf-8', errors='ignore').decode('utf-8', errors='ignore')
+            print(f"  \033[93m[{ts}] SWALLOWED UnicodeError at top level: {safe}\033[0m")
+            _log_to_file(f"[{ts}] SWALLOWED UnicodeError at top level: {safe}")
+        except Exception:
+            pass
+        return
     log_exception("main thread (top level)", exc_value)
 sys.excepthook = _main_excepthook
 
@@ -5055,7 +5556,7 @@ def load_digits_config() -> dict:
         if DIGITS_CONFIG_FILE.exists():
             mtime = DIGITS_CONFIG_FILE.stat().st_mtime
             if not _digits_config_loaded or _digits_config_cache.get('_mtime', 0) < mtime:
-                _digits_config_cache = json.loads(DIGITS_CONFIG_FILE.read_text())
+                _digits_config_cache = json.loads(DIGITS_CONFIG_FILE.read_text(encoding='utf-8', errors='replace'))
                 _digits_config_cache['_mtime'] = mtime
                 _digits_config_loaded = True
         elif _digits_config_loaded:
@@ -5139,10 +5640,10 @@ def _validate_mt4_path(path: str) -> bool:
 
 def _save_mt4_path(path: str):
     try:
-        config = json.loads(MT4_CONFIG_FILE.read_text()) if MT4_CONFIG_FILE.exists() else {}
+        config = json.loads(MT4_CONFIG_FILE.read_text(encoding='utf-8', errors='replace')) if MT4_CONFIG_FILE.exists() else {}
         config["mt4_history_path"] = path
         config["saved_at"] = int(time.time())
-        MT4_CONFIG_FILE.write_text(json.dumps(config, indent=2))
+        MT4_CONFIG_FILE.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding='utf-8')
     except Exception: pass
 
 def find_mt4_history_path() -> str:
@@ -5174,7 +5675,7 @@ def find_mt4_history_path() -> str:
     if not all_servers: return ""
     if MT4_CONFIG_FILE.exists():
         try:
-            saved_path = json.loads(MT4_CONFIG_FILE.read_text()).get("mt4_history_path", "")
+            saved_path = json.loads(MT4_CONFIG_FILE.read_text(encoding='utf-8', errors='replace')).get("mt4_history_path", "")
             if saved_path and os.path.exists(saved_path):
                 for srv in all_servers:
                     if srv["full_path"] == saved_path and srv["is_writable"]: return saved_path
@@ -5196,6 +5697,10 @@ if not MT4_HISTORY_PATH:
     MT4_HISTORY_PATH = os.path.join(user_home, "Desktop", "MT4_History_Fallback")
     os.makedirs(MT4_HISTORY_PATH, exist_ok=True)
 
+# Credentials, session state and login state now live in app_data.db
+# (see SECTION 2B). The three constants below are kept only as legacy
+# references for any external code that still imports them; they are no
+# longer used for storage.
 SESSION_FILE = Path("session.json")
 SESSION_STATE_FILE = Path("session_state.json")
 EMAIL_FILE = Path("saved_email.txt")
@@ -5204,24 +5709,66 @@ class SessionManager:
     def __init__(self): self.state = self._load_state()
     def _load_state(self) -> dict:
         try:
-            if SESSION_STATE_FILE.exists(): return json.loads(SESSION_STATE_FILE.read_text())
-        except Exception: pass
-        return {"last_login": 0, "last_success": False, "failed_auth_count": 0, "email": "", "host": "qxbroker.com"}
+            with _db_lock:
+                conn = _db_conn()
+                try:
+                    row = conn.execute("SELECT * FROM app_state WHERE id=1").fetchone()
+                    if row:
+                        return {
+                            "last_login": row["last_login"] or 0,
+                            "last_success": bool(row["last_success"]),
+                            "failed_auth_count": row["failed_auth_count"] or 0,
+                            "email": row["email"] or "",
+                            "password": row["password"] or "",
+                            "host": row["host"] or "qxbroker.com",
+                        }
+                finally:
+                    conn.close()
+        except Exception:
+            pass
+        return {"last_login": 0, "last_success": False, "failed_auth_count": 0, "email": "", "password": "", "host": "qxbroker.com"}
     def _save_state(self):
-        try: SESSION_STATE_FILE.write_text(json.dumps(self.state, indent=2))
-        except Exception: pass
+        try:
+            with _db_lock:
+                conn = _db_conn()
+                try:
+                    conn.execute("""
+                        INSERT OR REPLACE INTO app_state
+                        (id, email, password, host, last_login, last_success, failed_auth_count)
+                        VALUES (1, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        1,
+                        self.state.get("email", ""),
+                        self.state.get("password", ""),
+                        self.state.get("host", "qxbroker.com"),
+                        self.state.get("last_login", 0),
+                        1 if self.state.get("last_success", False) else 0,
+                        self.state.get("failed_auth_count", 0),
+                    ))
+                    conn.commit()
+                finally:
+                    conn.close()
+        except Exception:
+            pass
     def should_force_fresh(self) -> bool:
         if not self.state.get("last_success", False): return True
         if self.state.get("failed_auth_count", 0) >= 2: return True
         if time.time() - self.state.get("last_login", 0) > 7 * 24 * 3600: return True
         return False
-    def record_success(self, email: str, host: str = None):
-        # FIX K:
-        update_dict = {"last_login": time.time(), "last_success": True, "failed_auth_count": 0, "email": email}
+    def record_success(self, email: str, password: str = "", host: str = None):
+        # Save credentials (email + password) and login state in app_data.db.
+        # password defaults to whatever was already stored, so callers that
+        # don't pass it explicitly won't wipe the saved value.
+        update_dict = {
+            "last_login": time.time(),
+            "last_success": True,
+            "failed_auth_count": 0,
+            "email": email,
+            "password": password or self.state.get("password", ""),
+        }
         if host: update_dict["host"] = host
         self.state.update(update_dict)
         self._save_state()
-        EMAIL_FILE.write_text(email)
     def record_failure(self, error: str):
         self.state["last_login"] = time.time()
         self.state["last_success"] = False
@@ -5229,17 +5776,28 @@ class SessionManager:
         self._save_state()
     def get_saved_email(self) -> str:
         email = self.state.get("email", "")
-        return email if email else (EMAIL_FILE.read_text().strip() if EMAIL_FILE.exists() else "")
-
+        return email if email else ""
+    def get_saved_password(self) -> str:
+        return self.state.get("password", "")
     def get_saved_host(self) -> str:
-        # FIX K:
         return self.state.get("host", "qxbroker.com")
     @staticmethod
     def delete_session_file():
-        if SESSION_FILE.exists():
-            try: SESSION_FILE.unlink(); return True
-            except Exception: pass
-        return False
+        # Clear the sessions table so the next login performs a fresh
+        # authentication (no stale cookies/token). The credentials row in
+        # app_state is intentionally preserved so the user doesn't have to
+        # retype email/password.
+        try:
+            with _db_lock:
+                conn = _db_conn()
+                try:
+                    conn.execute("DELETE FROM sessions")
+                    conn.commit()
+                    return True
+                finally:
+                    conn.close()
+        except Exception:
+            return False
     @staticmethod
     def delete_browser_dir():
         browser_dir = Path("browser")
@@ -5288,58 +5846,11 @@ PERIOD_SECONDS = 60
 IS_SUBSECOND = False
 SUBSECOND_SECONDS = 0   # 5, 10, 15, or 30
 SUBSECOND_LABEL = ""    # "5S", "10S", "15S", "30S"
-SUBSECOND_MAX_CANDLES = 500  # v8.1: raised from 200 -> 500 to match SUBSECOND_HISTORY_CANDLES (user asked: keep >=500 5s candles in memory)
+SUBSECOND_MAX_CANDLES = 200  # keep last 200 subsecond candles in memory (rolling)
 SUBSECOND_HISTORY_CANDLES = 500  # fetch up to 500 historical subsecond candles at startup (was 1000, reduced for speed)
 # Semaphore to limit concurrent subsecond history fetches (3 at a time, not 41)
 # Created lazily on first use to avoid event loop binding issues at import time
 _SUBSECOND_FETCH_SEMAPHORE = None
-# v8.1: explicit asset-to-asset delay for subsecond mode (user asked: ~1 second between currencies)
-SUBSECOND_ASSET_DELAY = 2.0   # v8.3: raised from 1.0 -> 2.0 (server needs more breathing room between assets)
-# v8.3: target fewer 1s candles -- the server throttles after ~5 chunks per asset, so 2.0x margin
-# was pointless (we'd never reach it anyway). 1.3x targets 3250 1s = enough for 500 5s after dedup.
-SUBSECOND_FETCH_MARGIN = 1.3  # v8.3: was 2.0 -- reduced to lower request count per asset
-SUBSECOND_MAX_CHUNKS = 5      # v8.3: was 60 -- 5 chunks * 500s = 2500s = exactly 500 5s candles; more is wasted
-# v8.3: user explicitly asked -- if the server returns >=85 5s candles from the first chunk, do not
-# keep repeating the requests. Accept the server's per-asset history limit and move on.
-SUBSECOND_EARLY_EXIT_CANDLES = 85  # stop fetching more chunks once we have >=85 aggregated 5s candles
-# v8.3: graceful stop -- after this many consecutive zero-candle assets, the WebSocket is dead.
-# Break the startup loop cleanly instead of burning 8 * 30s = 240s in reconnect attempts.
-SUBSECOND_MAX_ZERO_STREAK = 3  # was effectively infinite (relied on MAX_RECONNECTS_DURING_FETCH=8)
-# v8.4/v8.6: NEW feature for M1 timeframe -- fetch 1s candles first, aggregate
-# to 1m, use them as the most granular bridge between the historical 1m fetch
-# and the live stream. Disables the old _bridge_fetch_recent_candles for M1.
-#
-# v8.6 change: switched from 5s aggregation -> 1s aggregation. 1s is the most
-# granular source -- if the server's 1s data is continuous, the aggregated 1m
-# candle has NO gaps (60 consecutive 1s candles -> 1 perfect 1m candle). With
-# 5s aggregation, a missing 5s candle leaves a partial gap in the 1m candle.
-M1_USE_1S_BRIDGE = True       # set False to fall back to the old M1 bridge fetch
-M1_1S_BRIDGE_TARGET = 750     # v8.6: target 1s candles for the bridge (=> ~12 1m candles)
-M1_BRIDGE_TIMEOUT = 30        # seconds, bounded wait for the 1s fetch
-# v8.11: delays to prevent server throttling in M1 bridge mode.
-# User explicitly asked: "مهلات لكي لا لا يتوقف السرفر" (delays so the
-# server doesn't stop). The pattern per asset is:
-#   1s fetch -> M1_INTRA_ASSET_DELAY -> 1000 historical fetch -> M1_ASSET_DELAY -> next asset
-M1_INTRA_ASSET_DELAY = 1.0    # v8.11: delay between 1s fetch and 1000 historical fetch (same asset)
-M1_ASSET_DELAY = 1.0          # v8.11: delay between assets in M1 bridge mode (was 0.1s)
-# v8.13: cap the bridge to the NEWEST N candles only, then REPLACE matching
-# historical candles. User explicitly asked: "نربط 6 شموع الاولى فقط" (only
-# bridge the first 6). The max gap between live stream and historical is 5
-# candles, so 6 bridge candles guarantee full coverage. The server returns
-# a variable count of 1s candles (8/12/13), so we always take the last 6.
-M1_BRIDGE_REPLACE_COUNT = 6   # v8.13: only the newest N bridge candles replace historical
-# v8.7: TEST MODE -- when True, for M1 timeframe, SKIP the 1000 historical
-# 1m fetch entirely and display ONLY the 1s->1m aggregated candles on the chart.
-# This lets us verify that the 1s aggregation produces valid 1m candles that MT4
-# can render correctly. Once verified, set False to restore the full flow
-# (historical 1000 1m + 1s->1m bridge merged).
-# v8.10: TEST MODE disabled -- full flow is now active:
-#   1) fetch 1s candles -> aggregate to 1m (8-13 bridge candles, no gaps)
-#   2) fetch 1000 historical 1m candles via fetch_candles_with_retry
-#   3) merge: [1000 historical] + [bridge where ts > last historical ts]
-#   4) the bridge fills the 4-5 missing candles between historical and live
-# Set to True to re-enter TEST MODE (1s->1m only, no historical fetch).
-M1_TEST_1S_ONLY = False       # v8.10: TEST MODE disabled, full flow active
 # ===== FIX 4: 1000 ( ) =====
 # 500 1000 (4s).
 # : workers=5 + chunk=200 ( ) .
@@ -5347,45 +5858,9 @@ INITIAL_CANDLES = 1000
 MIN_CANDLES_THRESHOLD = 100
 HISTORY_DAYS = 0.75
 FETCH_DURATION_SECONDS = int(86400 * HISTORY_DAYS)
-# v9.0: STREAM_POLL_INTERVAL reduced from 0.15s -> 0.05s for fastest possible tick updates.
-# This is the loop inside realtime_stream / subsecond_stream that polls CLIENT.api.realtime_candles.
-# Lower = faster live tick rendering on the chart.
-STREAM_POLL_INTERVAL = 0.05
-# v10.0: Flask web dashboard REMOVED — MT4 .hst files are the ONLY output channel.
-# WRITE_HST_FILES_ENABLED must stay True, otherwise the server produces no output.
-WRITE_HST_FILES_ENABLED = True
+STREAM_POLL_INTERVAL = 0.15
 # ===== FIX 4: WRITE_INTERVAL = 0.5s 3.0s ( 500ms) =====
 WRITE_INTERVAL = 0.5
-# ===== v13: ثوابت التحميل المسبق والبث المتعدد والقرص =====
-# BRLUSD_otc = عملة فتح الشارت (طلب المستخدم) — تُحمّل فوراً بعد الدخول.
-PRELOAD_FIRST_SYMBOL = "BRLUSD_otc"
-# v14.7 (طلب المستخدم حرفياً): «اريد ان تجلب 700 شمعة بدل 300 شمعة كدفعة
-# مباشرة للعملة ويمكن تعديلها في الاعدادات الى 1000 شمعة في الدفعة» —
-# الدفعة المباشرة عند فتح العملة 700 شمعة (بدل 300)، وقابلة للتعديل من
-# بطاقة الإعدادات حتى 1000 شمعة في الدفعة (التطبيق يضبط القيمتين معاً).
-PRELOAD_CANDLES = 700          # الدفعة المباشرة عند فتح العملة — 700 شمعة (v14.7)
-PAGINATION_BATCH = 700         # حجم الدفعة المرفوعة إلى الشارت — 700 شمعة (v14.7)
-# v14.3 (طلب المستخدم حرفياً): «عند فتح العملة يجلب دفعة 300 شمعة ثم يجلب
-# 300 اخرى مثل ماكانت تفعل في السابق خليها تجلب 2 يوم ... ضع في الاعدادات
-# كم يريد ان يسحب عدد الايام تبع الشموع ... الافتراضي 2 يوم يمكنه جعله
-# 1 يوم 0.5 يوم 3 يوم حتا ل 30 يوم». التطبيق يضبط هذه القيمة من بطاقة الإعدادات.
-QX_HISTORY_DAYS = 2.0          # الافتراضي يومان (0.5 حتى 30 يوم)
-PRELOAD_MIN_CANDLES = 30       # أقل عدد مقبول من الشموع لعملة واحدة
-PRELOAD_ASSET_DELAY = 1.0      # ثانية واحدة بين عملة وأخرى (واحدة تلو الأخرى)
-PRELOAD_TIMEOUT = 25.0         # مهلة طلب الشموع لكل عملة
-PRELOAD_WAIT_INSTRUMENTS = 120 # أقصى انتظار لقائمة العملات بعد الدخول
-PRELOAD_REFRESH_INTERVAL = 900 # كل 15 دقيقة: أصول فتحت حديثاً / أصول أُغلقت
-# التيكات: في الذاكرة فقط، وتُحذف تلقائياً بعد 5 دقائق (طلب المستخدم صراحةً
-# حتى لا يمتلئ القرص بالتيكس بعد شهر من التشغيل).
-TICK_RETENTION_SECONDS = 300
-TICK_PURGE_INTERVAL = 30
-TICK_CACHE_MAXLEN = 600        # حد أقصى للتيكات المحفوظة لكل عملة
-# أمان القرص:
-MT4_WRITE_THROTTLE = 1.0       # كان 0.2s لعملة واحدة؛ مع ~90 عملة = 1.0s لكتابة HST
-ASSET_MAX_CANDLES = 45000      # v14.3: كان 3000؛ رُفع ليستوعب دفعات التاريخ المتسلسلة حتى 30 يوم من شموع الدقيقة
-CANDLESTORE_KEEP_PER_SYMBOL = 50000  # v14.3: أقصى شموع محفوظة في candles.db لكل عملة
-DB_TRIM_INTERVAL = 3600        # فحص حجم candles.db كل ساعة
-LOG_MAX_BYTES = 10 * 1024 * 1024    # تدوير qxchart.log عند 10MB
 STALE_DATA_TIMEOUT = 180
 STALE_RATIO_TRIGGER = 0.8
 # ===== FIX 7: KEEPALIVE_PING_INTERVAL = 5s =====
@@ -5565,268 +6040,15 @@ def _aggregate_sub_minute(candles: list, target_period: int) -> list:
             b['volume'] += int(c.get('volume', 0) or 0)
     return list(buckets.values())
 
-# ==============================================================================
-# ===== GEO DOMAIN (التعرف التلقائي على البلد عبر IP) — v10.0 =====
-# ==============================================================================
-# القاعدة (طلب المستخدم):
-#   بنغلاديش (BD)  -> market-qx.info   (نطاق بنغلاديش)
-#   أي دولة أخرى   -> quotex.com       (النطاق الرسمي العالمي)
-# يتم التعرف على "البلد فقط" (وليس الموقع الدقيق) عبر IP عند كل تشغيل.
-DEFAULT_DOMAIN_BANGLADESH = "market-qx.info"
-DEFAULT_DOMAIN_GLOBAL = "quotex.com"
-QX_HOST = DEFAULT_DOMAIN_GLOBAL
-_GEO_CACHE = {"country": None, "checked_at": 0.0}
-
-def detect_country_code(timeout: float = 4.0):
-    """يرجع رمز البلد فقط (مثل BD / SA / EG) عبر IP العام. لا يجلب أي موقع دقيق."""
-    if _GEO_CACHE["country"] and time.time() - _GEO_CACHE["checked_at"] < 3600:
-        return _GEO_CACHE["country"]
-    endpoints = [
-        ("http://ip-api.com/json/?fields=status,countryCode", lambda d: (d or {}).get("countryCode")),
-        ("https://ipapi.co/json/", lambda d: (d or {}).get("country_code")),
-        ("https://api.ip.sb/geoip", lambda d: (d or {}).get("country_code")),
-    ]
-    for url, extract in endpoints:
-        try:
-            r = requests.get(url, timeout=timeout, headers={"User-Agent": USER_AGENT})
-            code = extract(r.json())
-            if code:
-                _GEO_CACHE["country"] = str(code).upper()
-                _GEO_CACHE["checked_at"] = time.time()
-                return _GEO_CACHE["country"]
-        except Exception:
-            continue
-    return None
-
-def resolve_qx_host() -> str:
-    """يحدد النطاق تلقائياً حسب البلد ويضبط QX_HOST العام:
-    بنغلاديش -> market-qx.info ، أي دولة أخرى (أو فشل التعرف) -> quotex.com."""
-    global QX_HOST
-    country = detect_country_code()
-    if country == "BD":
-        QX_HOST = DEFAULT_DOMAIN_BANGLADESH
-    else:
-        QX_HOST = DEFAULT_DOMAIN_GLOBAL
-    return QX_HOST
-
-# ==============================================================================
-# ===== SINGLE AUTHORITY FOR CONNECTION DEATH (منع الانقطاعات الوهمية) =====
-# ==============================================================================
-# المشكلة السابقة: on_error و on_close و stale_message_watchdog و health_monitor
-# كانوا يكتبون CONNECTION_ALIVE = False كلٌّ على حدة (سباق حالة + سجلات مكررة +
-# كتابة مكررة لـ LAST_CONNECTION_DROP_TIME). الآن كل الطرق تمر من هنا وحدها.
-_CONN_DEATH_LOCK = threading.Lock()
-
-def mark_connection_dead(source: str):
-    """السلطة الوحيدة للإعلان عن موت الاتصال: تكتب العلم تحت قفل، تسقط وقت
-    الانقطاع مرة واحدة فقط، وتسجل مصدر الإعلان."""
-    global CONNECTION_ALIVE, LAST_CONNECTION_DROP_TIME
-    was_alive = True
-    try:
-        with _CONN_DEATH_LOCK:
-            was_alive = CONNECTION_ALIVE
-            CONNECTION_ALIVE = False
-            if LAST_CONNECTION_DROP_TIME == 0:
-                LAST_CONNECTION_DROP_TIME = time.time()
-    except Exception:
-        pass
-    if was_alive:
-        try:
-            logmsg(f"[connection] marked DEAD by {source}")
-        except Exception:
-            pass
-
-# ==============================================================================
-# ===== FULL ASSET LIST + PAYOUT % + OPEN/CLOSED (طريقة pyquotex الرسمية) =====
-# ==============================================================================
-# الطريقة الرسمية من مستودع pyquotex (cleitonleonel/pyquotex):
-#   1) الإرسال عبر نفس WebSocket:  42["instruments/get"]
-#   2) الرد يصل بصيغة:             451-["instruments/list", [ ... ]]
-#   3) كل عنصر في القائمة يحتوي:
-#        i[1]  = اسم الأصل (EURUSD_otc)     i[2]  = الاسم المعروض
-#        i[5]  = نسبة الدفع payout %        i[14] = الحالة (True=مفتوح / False=مغلق)
-#        i[18] = نسبة دفع التيربو turbo     i[-10],i[-9],i[-8] = أرباح 24H/1M/5M
-PAYOUT_REFRESH_INTERVAL = 60
-try:
-    ASSETS_PAYOUT_FILE = Path(__file__).resolve().parent / "qx_assets_payouts.json"
-except Exception:
-    ASSETS_PAYOUT_FILE = Path("qx_assets_payouts.json")
-
-def _instruments_snapshot():
-    """يبني قائمة الأصول الكاملة (الاسم + نسبة الدفع + الحالة) من instruments."""
-    if CLIENT is None or CLIENT.api is None:
-        return []
-    insts = CLIENT.api.instruments or []
-    out = []
-    for i in insts:
-        try:
-            if not isinstance(i, (list, tuple)) or len(i) < 6:
-                continue
-            entry = {
-                "asset": str(i[1]) if len(i) > 1 else "",
-                "name": str(i[2]).replace("\n", " ").strip() if len(i) > 2 else "",
-                "payout": i[5] if len(i) > 5 else None,
-            }
-            try:
-                entry["id"] = str(i[0])
-            except Exception:
-                entry["id"] = ""
-            try:
-                entry["turbo_payout"] = i[18] if len(i) > 18 else None
-            except Exception:
-                entry["turbo_payout"] = None
-            try:
-                entry["open"] = bool(i[14]) if len(i) > 14 else None
-            except Exception:
-                entry["open"] = None
-            # أرباح الفريمات (طريقة get_payment الرسمية): -10=24H ، -9=1M ، -8=5M
-            try:
-                entry["profit_24h"] = i[-10]
-            except Exception:
-                entry["profit_24h"] = None
-            try:
-                entry["profit_1m"] = i[-9]
-            except Exception:
-                entry["profit_1m"] = None
-            try:
-                entry["profit_5m"] = i[-8]
-            except Exception:
-                entry["profit_5m"] = None
-            out.append(entry)
-        except Exception:
-            continue
-    return out
-
-def _save_assets_payout_file(entries):
-    """يحفظ لقطة كاملة إلى qx_assets_payouts.json بجانب الملف."""
-    try:
-        payload = {
-            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "host": QX_HOST,
-            "count": len(entries),
-            "open_count": sum(1 for e in entries if e.get("open")),
-            "closed_count": sum(1 for e in entries if e.get("open") is False),
-            "assets": entries,
-        }
-        ASSETS_PAYOUT_FILE.write_text(
-            json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-        return True
-    except Exception as e:
-        logmsg(f"[payout] failed to save {ASSETS_PAYOUT_FILE}: {e}")
-        return False
-
-async def fetch_instruments_now(timeout: float = 12.0):
-    """طريقة pyquotex الرسمية: إرسال 42["instruments/get"] عبر نفس WebSocket
-    والانتظار حتى وصول 451-["instruments/list"] ثم تخزينها في CLIENT.api.instruments.
-    طريقة الدخول وطريقة جلب الشموع لا تتأثر إطلاقاً."""
-    if CLIENT is None or CLIENT.api is None:
-        return []
-    try:
-        await CLIENT.api.event_registry.clear_event("instruments_ready")
-    except Exception:
-        pass
-    try:
-        CLIENT.api.send_websocket_request('42["instruments/get"]')
-    except Exception as e:
-        logmsg(f"[payout] instruments request failed: {e}")
-    data = await CLIENT.api.event_registry.wait_event("instruments_ready", timeout=timeout)
-    if isinstance(data, dict) and data.get("_placeholder"):
-        # الرد كان placeholder — ننتظر الرد الحقيقي (نفس سلوك المكتبة الرسمية)
-        data = await CLIENT.api.event_registry.wait_event("instruments_ready", timeout=5.0)
-    if isinstance(data, list) and data:
-        CLIENT.api.instruments = data
-    return list(CLIENT.api.instruments or [])
-
-def _print_payout_table(entries, updated_at=None):
-    """طباعة الجدول الكامل في الترمينال: العملة / الاسم / الدفع / الحالة.
-    v12 (طلب المستخدم: العرض في الترمينال): يُعاد رسم الجدول عند أي تغيير،
-    والترتيب: المفتوحة أولاً ثم حسب نسبة الدفع الأعلى."""
-    open_entries = [e for e in entries if e.get("open")]
-    closed_entries = [e for e in entries if e.get("open") is False]
-
-    def _payout_val(e):
-        p = e.get("payout")
-        return p if isinstance(p, (int, float)) else -1
-
-    entries_sorted = sorted(
-        entries,
-        key=lambda e: (0 if e.get("open") else 1, -_payout_val(e)),
-    )
-    print(f"\n{Colors.CYAN}{'═' * 92}{Colors.RESET}")
-    print(f"{Colors.BOLD}  FULL ASSET LIST — PAYOUT % — OPEN/CLOSED{Colors.RESET}")
-    _updated_str = f"  |  Updated: {updated_at}" if updated_at else ""
-    print(f"  Total: {len(entries)}  |  {Colors.GREEN}OPEN: {len(open_entries)}{Colors.RESET}"
-          f"  |  {Colors.RED}CLOSED: {len(closed_entries)}{Colors.RESET}"
-          f"  |  Domain: {QX_HOST}{_updated_str}")
-    print(f"{Colors.CYAN}{'─' * 92}{Colors.RESET}")
-    print(f"  {'ASSET':<16}{'NAME':<20}{'PAYOUT':>7}  {'TURBO':>6}  {'1M':>5}  {'5M':>5}  STATUS")
-    print(f"{Colors.DIM}{'─' * 92}{Colors.RESET}")
-    for e in entries_sorted:
-        name = (e.get("asset") or "?")[:16]
-        dname = ((e.get("name") or "").replace("\n", " ").strip() or "-")[:20]
-        payout = e.get("payout")
-        turbo = e.get("turbo_payout")
-        p1 = e.get("profit_1m")
-        p5 = e.get("profit_5m")
-        payout_str = f"{payout}%" if isinstance(payout, (int, float)) else "-"
-        turbo_str = f"{turbo}%" if isinstance(turbo, (int, float)) else "-"
-        p1_str = f"{p1}%" if isinstance(p1, (int, float)) else "-"
-        p5_str = f"{p5}%" if isinstance(p5, (int, float)) else "-"
-        if e.get("open"):
-            status = f"{Colors.GREEN}OPEN{Colors.RESET}"
-        else:
-            status = f"{Colors.RED}CLOSED{Colors.RESET}"
-        print(f"  {name:<16}{dname:<20}{payout_str:>7}  {turbo_str:>6}  {p1_str:>5}  {p5_str:>5}  {status}")
-    print(f"{Colors.CYAN}{'═' * 92}{Colors.RESET}")
-    print(f"{Colors.DIM}  Full snapshot saved to: {ASSETS_PAYOUT_FILE}{Colors.RESET}\n")
-
-async def asset_payout_monitor():
-    """يجلب قائمة العملات الكاملة + نسبة الدفع + حالة الزوج (مفتوح/مغلق) بعد
-    تسجيل الدخول، يطبع الجدول الكامل في الترمينال فوراً، يحفظ لقطة JSON، ثم
-    يعيد طباعة الجدول في الترمينال عند أي تغيير (كل PAYOUT_REFRESH_INTERVAL ثانية).
-    v12: يعيد المحاولة حتى 3 مرات قبل الانتظار للدورة التالية."""
-    await asyncio.sleep(1.5)  # مهلة قصيرة حتى يستقر WebSocket بعد الدخول
-    first = True
-    last_signature = None
-    while True:
-        try:
-            if CLIENT is None or CLIENT.api is None or not CONNECTION_ALIVE:
-                await asyncio.sleep(5.0)
-                continue
-            entries = []
-            # v12: حتى 3 محاولات قبل الانتظار للدورة التالية
-            for _attempt in range(1, 4):
-                try:
-                    await fetch_instruments_now(timeout=12.0)
-                    entries = _instruments_snapshot()
-                except Exception as e:
-                    logmsg(f"[payout] refresh failed: {e}")
-                if entries:
-                    break
-                logmsg(f"[payout] attempt {_attempt}: empty list, retrying...")
-                await asyncio.sleep(3.0)
-            if entries:
-                _save_assets_payout_file(entries)
-                _updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                signature = tuple(sorted(
-                    (e.get("asset"), str(e.get("payout")), str(e.get("open")))
-                    for e in entries))
-                if first:
-                    _print_payout_table(entries, updated_at=_updated_at)
-                    first = False
-                elif signature != last_signature:
-                    # v12 (طلب المستخدم): العرض في الترمينال — إعادة رسم الجدول عند أي تغيير
-                    _print_payout_table(entries, updated_at=_updated_at)
-                    open_n = sum(1 for e in entries if e.get("open"))
-                    closed_n = sum(1 for e in entries if e.get("open") is False)
-                    logmsg(f"[payout] updated: {len(entries)} assets "
-                           f"({open_n} open / {closed_n} closed) — snapshot saved")
-                last_signature = signature
-            else:
-                logmsg("[payout] no instruments response from server — will retry next cycle")
-        except Exception as e:
-            log_exception("asset_payout_monitor", e)
-        await asyncio.sleep(PAYOUT_REFRESH_INTERVAL)
+# ===== FIX K: Quotex =====
+# Domain list. Labels are intentionally NEUTRAL (no country/region labels) so
+# no user feels singled out. Just the domain name as the broker publishes it.
+DOMAINS = [
+    ("qxbroker.com",    "qxbroker.com"),
+    ("market-qx.info",  "market-qx.info"),
+]
+# — session_state
+QX_HOST = "qxbroker.com"
 
 ASYNC_LOOP = None
 ASYNC_ENGINE_GENERATION = 0
@@ -5870,39 +6092,19 @@ def start_async_engine():
             _ENGINE_READY.set()
             if gen > 1:
                 logmsg(f"[AsyncEngine] event loop recreated (gen {gen}). Rescheduling tasks...")
-                mark_connection_dead(f"async engine restart (gen {gen})")
+                CONNECTION_ALIVE = False
                 asyncio.run_coroutine_threadsafe(health_monitor(), ASYNC_LOOP)
                 asyncio.run_coroutine_threadsafe(auto_reconnect(), ASYNC_LOOP)
                 asyncio.run_coroutine_threadsafe(keepalive_loop(), ASYNC_LOOP)
                 # ===== FIX: stale watchdog loop =====
                 asyncio.run_coroutine_threadsafe(stale_message_watchdog(), ASYNC_LOOP)
-                # ===== v14.2 FIX: الحلقات التي كانت تموت مع الحلقة القديمة =====
-                # سد الثغرات (mt4_gap_filler) وحلقات طبقة التقوية (v14) كانت
-                # تُجدول مرة واحدة فقط عند الدخول — عند إعادة إنشاء الحلقة
-                # (إعادة الاتصال) تموت بصمت وتبقى ميتة للأبد: سد الثغرات
-                # ومراقب الفجوات وحارس الانقطاع كلهم يتوقفون. الآن تُعاد
-                # جدولتها على الحلقة الجديدة فوراً (نفس الدوال كما هي).
-                try:
-                    asyncio.run_coroutine_threadsafe(mt4_gap_filler(), ASYNC_LOOP)
-                except Exception as _e:
-                    logmsg(f"[AsyncEngine] gap filler reschedule failed: {_e}")
-                try:
-                    _v14_loops = globals().get("v14_build_background_loops")
-                    _supervise = globals().get("v14_supervise")
-                    if callable(_v14_loops) and callable(_supervise):
-                        for _v14_name, _v14_factory in _v14_loops():
-                            asyncio.run_coroutine_threadsafe(
-                                _supervise(_v14_name, _v14_factory), ASYNC_LOOP)
-                        logmsg(f"[AsyncEngine] v14 strengthening loops rescheduled (gen {gen})")
-                except Exception as _e:
-                    logmsg(f"[AsyncEngine] v14 loops reschedule failed: {_e}")
                 for asset in ALL_STREAMING_ASSETS:
                     asset.stream_task = None
                     asset.streaming = False
             new_loop.run_forever()
         except Exception as e:
             log_exception(f"AsyncEngine (gen {ASYNC_ENGINE_GENERATION})", e)
-            mark_connection_dead("async engine crash")
+            CONNECTION_ALIVE = False
             time.sleep(1)
 
 async_thread = threading.Thread(target=start_async_engine, daemon=True, name="AsyncEngine")
@@ -5966,10 +6168,6 @@ class Asset:
     def mark_dirty(self): self.dirty = True
 
     def write(self, force=False):
-        # v10.0: skip HST writing entirely when WRITE_HST_FILES_ENABLED is False.
-        # HST files are now the ONLY output channel (Flask dashboard removed).
-        if not WRITE_HST_FILES_ENABLED:
-            return False
         if not force and not self.has_new_data(): return False
         temp = self.path + ".tmp"
         # For sub-minute timeframes, write period=1 (M1) in the header so MT4 opens it
@@ -6086,8 +6284,7 @@ class WriterThread(threading.Thread):
                     if asset.symbol in MT4_WRITER.sync_state:
                         continue
                     if asset.dirty and (now - asset.last_write >= WRITE_INTERVAL):
-                        if asset.write():
-                            dirty_count += 1
+                        if asset.write(): dirty_count += 1
                 if dirty_count > 0: refresh_mt4()
                 time.sleep(0.1)
             except Exception as e:
@@ -6124,8 +6321,9 @@ async def connect_quotex(email, password, force_fresh=False, max_attempts=3):
                 try: await CLIENT.get_all_assets()
                 except Exception: pass
                 CONNECTION_ALIVE = True
-                # FIX K:
-                session_manager.record_success(email, host=QX_HOST)
+                # FIX K: persist email + password + host in app_data.db so the
+                # next launch can auto-login without re-prompting the user.
+                session_manager.record_success(email, password=password, host=QX_HOST)
                 return True
             else:
                 error_msg = str(reason) if reason else "Unknown error"
@@ -6134,7 +6332,7 @@ async def connect_quotex(email, password, force_fresh=False, max_attempts=3):
             error_msg = str(e)[:200]
             session_manager.record_failure(error_msg)
             if attempt < max_attempts: await asyncio.sleep(5 * attempt)
-    mark_connection_dead("connect_quotex: all attempts failed")
+    CONNECTION_ALIVE = False
     return False
 
 async def keepalive_loop():
@@ -6190,7 +6388,10 @@ async def stale_message_watchdog():
                 # ===== FIX B: =====
                 # LONG_DISCONNECT_THRESHOLD (1h)
                 # .
-                mark_connection_dead(f"stale_watchdog: silent {silent_for:.1f}s > {STALE_MESSAGE_TIMEOUT}s")
+                if LAST_CONNECTION_DROP_TIME == 0:
+                    LAST_CONNECTION_DROP_TIME = time.time()
+                    logmsg(f"[stale_watchdog] drop time recorded at {LAST_CONNECTION_DROP_TIME:.0f}")
+                CONNECTION_ALIVE = False
                 # WS close frame on_close
                 try:
                     if CLIENT.api.websocket_client and CLIENT.api.websocket_client.wss:
@@ -6218,7 +6419,8 @@ async def health_monitor():
             is_dead = True
             dead_reason = f"stale ratio {stale_count}/{len(ALL_STREAMING_ASSETS)} exceeded {STALE_RATIO_TRIGGER}"
         if is_dead:
-            mark_connection_dead(f"health_monitor: {dead_reason}")
+            logmsg(f"[health_monitor] marking connection DEAD: {dead_reason}")
+            CONNECTION_ALIVE = False
             consecutive_dead_checks = 0
 
 async def auto_reconnect():
@@ -6246,11 +6448,16 @@ async def auto_reconnect():
         RECONNECTING = True
         try:
             email = session_manager.get_saved_email()
+            # Prefer the in-memory PASSWORD global (always set after the first
+            # successful connect_quotex call). If that's not available yet, fall
+            # back to the password persisted in app_data.db so auto-reconnect can
+            # still work after a fresh process start.
+            password_for_reconnect = PASSWORD or session_manager.get_saved_password()
             # ===== FIX: try RECONNECTING =====
             # : `if not (email and PASSWORD): continue`
             # => try RECONNECTING = True =>
             # => !
-            if not (email and PASSWORD):
+            if not (email and password_for_reconnect):
                 # RECONNECTING
                 RECONNECTING = False
                 continue
@@ -6260,10 +6467,12 @@ async def auto_reconnect():
                 await asyncio.sleep(delay)
             else:
                 logmsg("[reconnect] connection lost, reconnecting immediately...")
-            # GEO-DOMAIN (v10.0): QX_HOST تم تحديده تلقائياً عند التشغيل من البلد
-            # (بنغلاديش -> market-qx.info ، غير ذلك -> quotex.com).
-            # لم نعد نتجاوزه بالنطاق المحفوظ القديم حتى لا يخالف قاعدة التعرف الجغرافي.
-            success = await connect_quotex(email, PASSWORD, force_fresh=True, max_attempts=1)
+            # FIX K:
+            _saved_host = session_manager.get_saved_host()
+            if _saved_host and QX_HOST != _saved_host:
+                QX_HOST = _saved_host
+                logmsg(f"[reconnect] using saved host: {QX_HOST}")
+            success = await connect_quotex(email, password_for_reconnect, force_fresh=True, max_attempts=1)
             if success:
                 logmsg("[reconnect] reconnect successful, restarting streams...")
                 consecutive_failures = 0
@@ -6365,8 +6574,6 @@ async def fetch_candles_once(asset: Asset, idx=1, total=1):
             while len(all_candles_1s) < target_1s_count and chunks_done < max_chunks:
                 chunk_end = current_end - (chunks_done * chunk_seconds)
                 try:
-                    # v14.4: النداء الأصلي عاد حرفياً كما في الكود المرجعي
-                    # (CLIENT.get_candles مباشرة — دون أي بوابة فوقه).
                     res_chunk = await asyncio.wait_for(
                         CLIENT.get_candles(api_name, chunk_end, chunk_seconds, fetch_period),
                         timeout=20,
@@ -6521,8 +6728,6 @@ async def _bridge_fetch_recent_candles(asset: Asset, existing_candles: list) -> 
                 # هذا يضمن أن الجسر يغطي 75 شمعة 5s — أكثر من كافٍ لأي فجوة
                 bridge_1s_offset = BRIDGE_FETCH_CANDLES * PERIOD_SECONDS * 5
                 try:
-                    # v14.4: النداء الأصلي عاد حرفياً كما في الكود المرجعي
-                    # (CLIENT.get_candles مباشرة — دون أي بوابة فوقه).
                     bridge_1s = await asyncio.wait_for(
                         CLIENT.get_candles(
                             asset.api_symbol,
@@ -6704,16 +6909,13 @@ async def fetch_candles_with_retry(asset: Asset, max_retries=3, idx=1, total=1):
         if len(candles) >= threshold:
             # Merge historical candles with any live ticks collected during fetch
             # (realtime_stream may have appended live candles to asset.candles)
-            # v14.8 (سبب «تختفي شموعها»): الدفعة القصيرة لا تمحو التاريخ
-            # المجلوب — كل شمعة أقدم من الدفعة تبقى في الذاكرة كما هي
-            # (لا فقدان للشموع أبداً) والجديد يُدمج فقط.
-            _old_all = list(asset.candles or [])
-            _btimes = set(c['time'] for c in candles)
-            _b_lo = min(c['time'] for c in candles) if candles else 0
-            _b_hi = max(c['time'] for c in candles) if candles else 0
-            _kept_old = [c for c in _old_all if c['time'] < _b_lo and c['time'] not in _btimes]
-            _live_c2 = [c for c in _old_all if c['time'] > _b_hi and c['time'] not in _btimes]
-            asset.candles = sorted(_kept_old + list(candles) + _live_c2, key=lambda x: x['time'])
+            live_candles = []
+            if asset.candles:
+                hist_times = set(c['time'] for c in candles)
+                for c in asset.candles:
+                    if c['time'] not in hist_times and c['time'] > (candles[-1]['time'] if candles else 0):
+                        live_candles.append(c)
+            asset.candles = candles + live_candles
             if asset.candles: asset.price = asset.candles[-1]['close']
             asset.write(force=True)
             # Update MT4_WRITER.sync_state with the full historical + live candles
@@ -6727,18 +6929,15 @@ async def fetch_candles_with_retry(asset: Asset, max_retries=3, idx=1, total=1):
             return len(asset.candles), attempt
 
         # Merge even for low counts
-        # v14.8 (سبب «تختفي شموعها»): الرد الفارغ أو القصير لا يمحو الذاكرة —
-        # الشموع الموجودة تبقى كما هي ولا يُستبدل التاريخ بشيء أقل منه.
-        if candles:
-            _old_all = list(asset.candles or [])
-            _btimes = set(c['time'] for c in candles)
-            _b_lo = min(c['time'] for c in candles)
-            _b_hi = max(c['time'] for c in candles)
-            _kept_old = [c for c in _old_all if c['time'] < _b_lo and c['time'] not in _btimes]
-            _live_c2 = [c for c in _old_all if c['time'] > _b_hi and c['time'] not in _btimes]
-            asset.candles = sorted(_kept_old + list(candles) + _live_c2, key=lambda x: x['time'])
-            if asset.candles: asset.price = asset.candles[-1]['close']
-            asset.write(force=True)
+        live_candles = []
+        if asset.candles:
+            hist_times = set(c['time'] for c in candles)
+            for c in asset.candles:
+                if c['time'] not in hist_times and c['time'] > (candles[-1]['time'] if candles else 0):
+                    live_candles.append(c)
+        asset.candles = candles + live_candles
+        if asset.candles: asset.price = asset.candles[-1]['close']
+        asset.write(force=True)
         # Update sync_state even for low counts
         if asset.candles:
             MT4_WRITER.sync_state[asset.symbol] = {
@@ -6829,27 +7028,15 @@ def _subsecond_write_hst(asset_symbol: str, candles: list):
             try: os.remove(temp_path)
             except Exception: pass
 
-async def fetch_subsecond_history(
-    asset: Asset,
-    idx: int = 1,
-    total: int = 1,
-    subsecond_seconds: int = None,
-    target_candles: int = None,
-    label: str = None,
-):
+async def fetch_subsecond_history(asset: Asset, idx=1, total=1):
     """Fetch historical subsecond candles by fetching 1s candles and aggregating.
 
     Strategy (per Quotex server limitations):
     1. Use `get_candles` (single request, NOT parallel get_historical_candles)
-       with period=1 -- server returns ~500 1s candles per request
+       with period=1 — server returns ~500 1s candles per request
     2. Make multiple staggered requests going backwards in time
     3. Stop when server returns 3 empty chunks in a row (hit history limit)
     4. Aggregate 1s candles locally into 5s/10s/15s/30s
-
-    v8.4: added optional parameters subsecond_seconds/target_candles/label.
-    They fall back to SUBSECOND_SECONDS / SUBSECOND_HISTORY_CANDLES / SUBSECOND_LABEL
-    when None. This lets M1 mode call us with subsecond_seconds=5 even when
-    IS_SUBSECOND is False.
 
     Uses a semaphore (3 concurrent) to avoid overwhelming server.
     """
@@ -6858,22 +7045,15 @@ async def fetch_subsecond_history(
         return []
     api_name = asset.api_symbol
     display_name = asset.symbol
-    # v8.4: resolve optional parameters -- fall back to globals if not provided
-    _sec = subsecond_seconds if subsecond_seconds is not None else SUBSECOND_SECONDS
-    _target = target_candles if target_candles is not None else SUBSECOND_HISTORY_CANDLES
-    _label = label if label is not None else (SUBSECOND_LABEL or f"{_sec}S")
-    if _sec is None or _sec <= 0:
-        logmsg(f"[subfetch:{display_name}] invalid subsecond_seconds={_sec}")
-        return []
-    # Target: target_candles aggregated candles
-    # = target_candles * subsecond_seconds 1s candles (with SUBSECOND_FETCH_MARGIN margin)
-    # v8.3: use SUBSECOND_FETCH_MARGIN (1.3x) -- was hardcoded 1.5x in v8.0, 2.0x in v8.1
-    target_1s_count = int(_target * _sec * SUBSECOND_FETCH_MARGIN)
+    # Target: SUBSECOND_HISTORY_CANDLES aggregated candles
+    # = SUBSECOND_HISTORY_CANDLES * SUBSECOND_SECONDS 1s candles
+    # هامش 1.5x (بدل 2x) لتقليل وقت الجلب → تقليل الفجوة الزمنية بين التاريخي والبث
+    target_1s_count = int(SUBSECOND_HISTORY_CANDLES * SUBSECOND_SECONDS * 1.5)
     chunk_seconds = 500  # ~500 1s candles per request (server limit)
     all_candles_1s = []
     current_end = time.time()
-    # v8.3: use SUBSECOND_MAX_CHUNKS (5) -- was 40 in v8.0, 60 in v8.1, now 5
-    max_chunks = SUBSECOND_MAX_CHUNKS
+    # زيادة max_chunks من 20 → 40
+    max_chunks = 40
     chunks_done = 0
     empty_chunks_in_a_row = 0
     # Semaphore (3 concurrent fetches, not 41) — created lazily on the running loop
@@ -6916,25 +7096,8 @@ async def fetch_subsecond_history(
                 empty_chunks_in_a_row = 0
                 all_candles_1s.extend(res_chunk)
                 chunks_done += 1
-                # v8.3: bigger inter-chunk delay (0.03 -> 0.15s) -- the server was
-                # throttling us after a few assets because we hammered it at 30 req/s.
-                await asyncio.sleep(0.15)
-                # v8.3/v8.6: user explicitly asked: if we already have enough 1s
-                # candles to cover >=425 seconds of data (the original "85 5s
-                # candles" threshold = 425 seconds), stop fetching more chunks.
-                # v8.6: made TIME-BASED so the threshold scales correctly for any
-                # _sec value. For 5s mode: 425s/5 = 85 (matches the original
-                # SUBSECOND_EARLY_EXIT_CANDLES). For 1s mode: 425s/1 = 425
-                # 1s candles, which is the right scale (1 chunk yields ~700 1s
-                # candles = ~12 1m candles, plenty for the M1 bridge).
-                _projected = len(all_candles_1s) // max(1, _sec)
-                _time_based_threshold = max(1, 425 // max(1, _sec))
-                if chunks_done >= 1 and _projected >= _time_based_threshold:
-                    logmsg(
-                        f"[subfetch:{display_name}] early-exit: {_projected} projected {_label} candles "
-                        f">= {_time_based_threshold} threshold ({425}s of data); stopping chunk requests"
-                    )
-                    break
+                # Small delay between chunks to avoid server rate limiting
+                await asyncio.sleep(0.03)
         except Exception as e:
             logmsg(f"[subfetch:{display_name}] FAILED: {e}")
             return []
@@ -6947,7 +7110,7 @@ async def fetch_subsecond_history(
             if ts not in seen_ts:
                 seen_ts.add(ts)
                 unique_1s.append(c)
-    logmsg(f"[subfetch:{display_name}] got {len(unique_1s)} 1s candles from {chunks_done} chunks, aggregating to {_label}")
+    logmsg(f"[subfetch:{display_name}] got {len(unique_1s)} 1s candles from {chunks_done} chunks, aggregating to {SUBSECOND_LABEL}")
     # Format 1s candles with TZ offset
     formatted_1s = []
     for c in unique_1s:
@@ -6968,165 +7131,12 @@ async def fetch_subsecond_history(
         except Exception:
             continue
     formatted_1s.sort(key=lambda x: x['time'])
-    # v8.4: aggregate into the resolved _sec (not SUBSECOND_SECONDS global) and
-    # limit to the resolved _target (not SUBSECOND_HISTORY_CANDLES global).
-    aggregated = _aggregate_sub_minute(formatted_1s, _sec)
-    result = aggregated[-_target:]
-    logmsg(f"[subfetch:{display_name}] DONE: {len(unique_1s)} 1s -> {len(result)} {_label} candles")
-    # v8.1: explicit verification -- warn if below the requested 500 target
-    if len(result) < SUBSECOND_HISTORY_CANDLES:
-        logmsg(
-            f"[subfetch:{display_name}] WARNING: only {len(result)} {SUBSECOND_LABEL} candles "
-            f"(target={SUBSECOND_HISTORY_CANDLES}). Server history may be limited for this asset."
-        )
+    # Aggregate 1s candles into target subsecond timeframe
+    aggregated = _aggregate_sub_minute(formatted_1s, SUBSECOND_SECONDS)
+    # Limit to SUBSECOND_HISTORY_CANDLES
+    result = aggregated[-SUBSECOND_HISTORY_CANDLES:]
+    logmsg(f"[subfetch:{display_name}] DONE: {len(unique_1s)} 1s -> {len(result)} {SUBSECOND_LABEL} candles")
     return result
-
-
-async def fetch_1s_and_aggregate_to_1m(asset: Asset, idx: int = 1, total: int = 1) -> list:
-    """v8.6: Fetch 1-second candles and aggregate them to 1-minute candles.
-
-    This is used as the most granular bridge for M1 mode -- the resulting 1m candles
-    fill the gap between the historical 1m fetch's last candle and the live stream's
-    current candle. Because each 1m candle is built from 60 consecutive 1s candles,
-    there are NO gaps in the aggregated 1m candle (assuming the server's 1s data is
-    continuous, which it is for popular OTC pairs).
-
-    Args:
-        asset: the Asset to fetch 1s candles for
-        idx, total: progress info for logging
-
-    Returns:
-        (candles_1m, n_1s) -- the aggregated 1m candles and the raw 1s source count
-    """
-    # v8.5: return (candles_1m, n_1s) tuple so the caller can print the 1s
-    # source count in the console before the historical fetch begins.
-    if not M1_USE_1S_BRIDGE:
-        return [], 0
-    _fetch_start = time.time()
-    try:
-        candles_1s = await asyncio.wait_for(
-            fetch_subsecond_history(
-                asset,
-                idx=idx,
-                total=total,
-                subsecond_seconds=1,
-                target_candles=M1_1S_BRIDGE_TARGET,
-                label="1S",
-            ),
-            timeout=M1_BRIDGE_TIMEOUT,
-        )
-    except asyncio.TimeoutError:
-        logmsg(f"[1s_bridge:{asset.symbol}] 1s fetch timeout after {M1_BRIDGE_TIMEOUT}s")
-        return [], 0
-    except Exception as e:
-        logmsg(f"[1s_bridge:{asset.symbol}] 1s fetch failed: {e}")
-        return [], 0
-    if not candles_1s:
-        logmsg(f"[1s_bridge:{asset.symbol}] 1s returned 0 candles")
-        return [], 0
-    # Aggregate 1s -> 1m (every 60 consecutive 1s candles = 1 1m candle).
-    # This is the most granular aggregation -- if the 1s data is continuous,
-    # the resulting 1m candle has NO gaps (the user's explicit request).
-    candles_1m = _aggregate_sub_minute(candles_1s, 60)
-    _fetch_elapsed = time.time() - _fetch_start
-    # v8.5/v8.6: print a clear console line showing the 1s fetch happened --
-    # the user explicitly asked "must print the loading of those candles before
-    # loading 1-minute candles". Use 'print' (not logmsg) so it shows on the
-    # console, not just the verbose log. This print fires BEFORE the historical
-    # 1m fetch begins.
-    _display = pretty_asset_name(asset.symbol)
-    print(
-        f"\r{Colors.CLEAR_LINE}  {Colors.CYAN}{_display:<25}{Colors.RESET} "
-        f"{Colors.DIM}fetched {len(candles_1s)} 1s candles in {_fetch_elapsed:.1f}s "
-        f"-> {len(candles_1m)} 1m bridge{Colors.RESET}"
-    )
-    logmsg(
-        f"[1s_bridge:{asset.symbol}] {len(candles_1s)} 1s -> {len(candles_1m)} 1m bridge candles"
-    )
-    return candles_1m, len(candles_1s)
-
-
-async def apply_1s_bridge_to_asset(asset: Asset, idx: int = 1, total: int = 1) -> bool:
-    """v14.3 — خط آلة سد الثغرات الحرفي من qx_server_v10.py (fetch_loop).
-
-    المستخدم طلب حرفياً: «لقد ارسلت لك الكود الصحيح كيف تقوم بسدها عن طريق
-    جلب شموع 1 ثانية ثم تركيبهم لماذا لا تفهم». هذا هو الكود نفسه من v10
-    (خطوات b/c/d في حلقة الجلب الأصلية) بلا أي تغيير في المنهج:
-
-      a) fetch_1s_and_aggregate_to_1m — جلب شموع 1 ثانية ثم تجميعها إلى 1m
-         (نفس الدالة الأصلية كما هي).
-      b) الدمج: استبدال آخر M1_BRIDGE_REPLACE_COUNT شمعة تاريخية بشموع
-         1s المركّبة (الأدق بلا ثغرات — 60 شمعة 1s متتالية = شمعة 1m كاملة)
-         + إضافة شموع الجسر الأحدث من آخر شمعة تاريخية.
-      c) sort + إزالة التكرار بالوقت (نفس منطق _bridge_fetch_recent_candles).
-      d) الكتابة: HST + sync_state + snapshot (نفس خطوة d في v10).
-
-    تُعيد True إذا أضافت/استبدلت شيئاً فعلاً. أي فشل لا يكسر التحميل أبداً.
-    """
-    if PERIOD_SECONDS != 60:
-        return False
-    # ── (a) جلب شموع 1 ثانية وتركيبها إلى 1m — الدالة الأصلية كما هي ──────
-    try:
-        bridge_1m_candles, _n_1s_fetched = await fetch_1s_and_aggregate_to_1m(
-            asset, idx=idx, total=total)
-    except Exception as e:
-        logmsg(f"[1s_bridge:{asset.symbol}] bridge failed (non-fatal): {e}")
-        return False
-    if not bridge_1m_candles or not asset.candles:
-        return False
-    # ── (b) الدمج — الكود الحرفي من v10 (fetch_loop خطوة c) ────────────────
-    # v8.13: cap the bridge to the NEWEST M1_BRIDGE_REPLACE_COUNT candles
-    # (default 6). The max gap between live stream and historical is 5
-    # candles, so 6 bridge candles guarantee full coverage.
-    bridge_for_merge = bridge_1m_candles[-M1_BRIDGE_REPLACE_COUNT:]
-    bridge_by_time = {c['time']: c for c in bridge_for_merge}
-    merged_list = []
-    _replaced_count = 0
-    for c in asset.candles:
-        if c['time'] in bridge_by_time:
-            # REPLACE: bridge candle is more accurate (no gaps)
-            merged_list.append(bridge_by_time.pop(c['time']))
-            _replaced_count += 1
-        else:
-            merged_list.append(c)
-    # APPEND remaining bridge candles (newer than last historical)
-    _appended_count = len(bridge_by_time)
-    merged_list.extend(bridge_by_time.values())
-    # Sort + dedup by time
-    seen = set()
-    deduped = []
-    for c in sorted(merged_list, key=lambda x: x['time']):
-        if c['time'] not in seen:
-            seen.add(c['time'])
-            deduped.append(c)
-    asset.candles = deduped
-    # ── (c) write merged HST + update sync_state — v10 خطوة d حرفياً ──────
-    if asset.candles:
-        asset.price = asset.candles[-1]['close']
-    try:
-        asset.write(force=True)
-    except Exception:
-        pass
-    MT4_WRITER.sync_state[asset.symbol] = {
-        'period': PERIOD,
-        'candles': list(asset.candles),
-        'last_write': 0,
-        'last_price': float(asset.candles[-1]['close']) if asset.candles else 0.0,
-    }
-    try:
-        MT4_WRITER.write_to_file(asset.symbol, PERIOD, asset.candles)
-    except Exception:
-        pass
-    try:
-        MT4_WRITER.save_snapshot(asset.symbol, asset.candles)
-    except Exception:
-        pass
-    logmsg(
-        f"[1s_bridge:{asset.symbol}] merged: REPLACED {_replaced_count} historical "
-        f"+ APPENDED {_appended_count} new bridge (source: {_n_1s_fetched} 1s)"
-    )
-    return _appended_count > 0 or _replaced_count > 0
-
 
 async def subsecond_stream(asset: Asset):
     """Dedicated stream for subsecond timeframes (5s/10s/15s/30s).
@@ -7291,17 +7301,7 @@ async def realtime_stream(asset: Asset):
             return
         # For sub-minute timeframes, subscribe to period=1 (1s candles, always supported)
         # _align_time then buckets ticks into PERIOD_SECONDS (5s, 10s, 15s, 30s)
-        #
-        # v8.10: when M1_USE_1S_BRIDGE is True (which includes both TEST MODE
-        # and the full flow), FORCE stream_period=1 even though PERIOD_SECONDS
-        # == 60. This subscribes to 1s ticks (NOT 1m snapshots), so the server
-        # doesn't send the 199-candle initial 1m burst. The 1s ticks are
-        # bucketed into 1m candles by update_candle via _align_time, updating
-        # the last candle for live price every second.
-        if PERIOD_SECONDS == 60 and M1_USE_1S_BRIDGE:
-            stream_period = 1  # 1s ticks, aggregate to 1m locally
-        else:
-            stream_period = 1 if PERIOD_SECONDS < 60 else PERIOD_SECONDS
+        stream_period = 1 if PERIOD_SECONDS < 60 else PERIOD_SECONDS
         await CLIENT.start_candles_stream(internal, stream_period)
         await asyncio.sleep(0.3)  # reduced from 1.5s to minimize gap with historical fetch
         asset.streaming = True
@@ -7331,28 +7331,8 @@ async def realtime_stream(asset: Asset):
                 await asyncio.sleep(0.2)
                 continue
             candle = None
-            if hasattr(CLIENT, 'api') and CLIENT.api:
-                # v14.8 (تقرير الفحص): تُقرأ كل التيكات المتراكمة من قائمة
-                # الانتظار لكل عملة — لا تيك يضيع بين قراءتين فتبقى قمم
-                # الشموع وقيعانها كاملة.
-                try:
-                    _tq = CLIENT.api._tick_queue.get(internal)
-                    candle = _tq.popleft() if _tq else None
-                except Exception:
-                    candle = None
-                if candle is None:
-                    _rc = CLIENT.api.realtime_candles.get(internal)
-                    try:
-                        _sig = (int(_rc[1]), float(_rc[2])) if isinstance(_rc, list) and len(_rc) >= 3 else None
-                    except Exception:
-                        _sig = None
-                    if _rc is not None and _sig is not None:
-                        try:
-                            _done = CLIENT.api._tick_last_done.get(internal)
-                        except Exception:
-                            _done = None
-                        if _done != _sig:
-                            candle = _rc
+            if not candle and hasattr(CLIENT, 'api') and CLIENT.api:
+                candle = CLIENT.api.realtime_candles.get(internal)
             if candle:
                 consecutive_errors = 0
                 if isinstance(candle, list) and len(candle) >= 3:
@@ -7364,10 +7344,6 @@ async def realtime_stream(asset: Asset):
                     await asyncio.sleep(STREAM_POLL_INTERVAL)
                     continue
                 if price > 0 and ts > 0:
-                    try:
-                        CLIENT.api._tick_last_done[internal] = (ts, price)
-                    except Exception:
-                        pass
                     # ===== FIX 10: MT4_WRITER.update_candle asset.mark_dirty =====
                     # HST MT4Writer.write_to_file ( )
                     # MT4_WRITER.update_candle sync_state[derived_symbol] + HST 200ms
@@ -7381,7 +7357,6 @@ async def realtime_stream(asset: Asset):
                     # tz_offset => 1+ HST.
                     aligned_time = _align_time(ts)
                     # FIX STALE-CANDLE v2: same logic as update_candle
-                    _is_new_candle = False
                     if asset.candles:
                         last_candle = asset.candles[-1]
                         if aligned_time < last_candle['time']:
@@ -7392,7 +7367,6 @@ async def realtime_stream(asset: Asset):
                             last_candle['close'] = price
                         else:
                             # new candle - fill gap with flat candles first
-                            _is_new_candle = True
                             period_secs = PERIOD_SECONDS if PERIOD_SECONDS > 0 else 60
                             gap = (aligned_time - last_candle['time']) // period_secs
                             if gap > 1:
@@ -7407,11 +7381,8 @@ async def realtime_stream(asset: Asset):
                                     fill_time += period_secs
                             asset.candles.append({'time': aligned_time, 'open': price, 'high': price, 'low': price, 'close': price, 'volume': 1})
                     else:
-                        _is_new_candle = True
                         asset.candles.append({'time': aligned_time, 'open': price, 'high': price, 'low': price, 'close': price, 'volume': 1})
-                    # v13: الحد رُفع من 1000 إلى ASSET_MAX_CANDLES (3000) حتى تتراكم
-                    # دفعات التمرير للخلف (fetch_older_batch) مثل المنصات الاحترافية.
-                    if len(asset.candles) > ASSET_MAX_CANDLES: asset.candles = asset.candles[-ASSET_MAX_CANDLES:]
+                    if len(asset.candles) > INITIAL_CANDLES: asset.candles = asset.candles[-INITIAL_CANDLES:]
                     # FIX G: ( )
                     if asset.price != price:
                         asset.previous_price = asset.price
@@ -7588,42 +7559,6 @@ class CandleStore:
         self._init_schema()
 
     def _init_schema(self):
-        # v14.3 (سبب حقيقي لـ«الة سد الثغرات لا تعمل»): قاعدة candles.db التالفة
-        # (database disk image is malformed) تجعل كل عمليات الآلة — علامات
-        # التجمد، اللقطات، القراءات — تفشل بصمت. هنا نكشف التلف وننعزل الملف
-        # باسم candles.db.corrupt-<وقت> ونعيد إنشاء قاعدة نظيفة تلقائياً.
-        try:
-            probe = _sqlite3.connect(self.db_path, timeout=10.0, isolation_level=None)
-            try:
-                rows = probe.execute("PRAGMA quick_check;").fetchall()
-            finally:
-                probe.close()
-            healthy = bool(rows) and len(rows) == 1 and str(rows[0][0]).strip().lower() == "ok"
-            if not healthy:
-                stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                for suffix in ("", "-wal", "-shm"):
-                    p = self.db_path + suffix
-                    if os.path.exists(p):
-                        try:
-                            os.rename(p, f"{p}.corrupt-{stamp}")
-                        except Exception:
-                            try:
-                                os.remove(p)
-                            except Exception:
-                                pass
-        except Exception:
-            # الاتصال نفسه فشل (تلف شديد) — عزل أيضاً
-            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            for suffix in ("", "-wal", "-shm"):
-                p = self.db_path + suffix
-                if os.path.exists(p):
-                    try:
-                        os.rename(p, f"{p}.corrupt-{stamp}")
-                    except Exception:
-                        try:
-                            os.remove(p)
-                        except Exception:
-                            pass
         try:
             conn = _sqlite3.connect(self.db_path, timeout=10.0, isolation_level=None)
             try:
@@ -7652,17 +7587,6 @@ class CandleStore:
                         last_fill_at  REAL NOT NULL DEFAULT 0
                     )
                 """)
-                # ===== v14.2 MIGRATION (مرة واحدة عند كل بدء تشغيل) =====
-                # «طريقة سد الثغرات لا تعمل إطلاقاً»: علامات التجمد المكتوبة
-                # من جلسات سابقة (filled=1) كانت تُخرج الطريقة الأصلية فوراً
-                # دون أي عمل — فتبقى الفجوات القديمة بلا سد للأبد. عند بدء
-                # التشغيل تُصفَّر العلامات مرة واحدة: أول دورة سد تعمل
-                # (بخوارزمية الأصل نفسها) وتسد الفجوات الموجودة، ثم تُعاد
-                # كتابة العلامة ويستمر السلوك الأصلي كما هو حرفياً.
-                try:
-                    conn.execute("UPDATE gap_state SET filled=0, last_fill_at=0;")
-                except Exception:
-                    pass
             finally:
                 conn.close()
         except Exception as e:
@@ -7887,60 +7811,6 @@ def get_candle_store() -> CandleStore:
         return _CANDLE_STORE
 
 
-def reset_gap_flags() -> int:
-    """v14.3 — تصفير علامات تجمّد سد الثغرات القديمة (جدول gap_state في candles.db).
-
-    لماذا؟ آلة سد الثغرات الأصلية (MT4Writer.fill_gap_once كما هي من v10)
-    تتجمّد لكل عملة بعد أول سد ناجح. الجلسات السابقة كانت تجمّد العملات على
-    شموع ما زالت فيها ثغرات، والعلامة القديمة المحفوظة في القاعدة تجعل
-    fill_gap_once يعود فوراً بلا أي لمس — فتبقى الثغرات في الشارت للأبد
-    («الالة لا تعمل»). تصفير العلامات يعيد للآلة الأصلية نفسها حق السد من
-    جديد عند هذا التشغيل، وتُتجمّد طبيعياً بعد أول سد ناجح (نفس سلوك v10
-    عند أول تشغيل نظيف). لا يعدّل خوارزمية السد بشيء — يصحّح حالة القاعدة فقط.
-    """
-    try:
-        store = get_candle_store()
-        conn = _sqlite3.connect(store.db_path, timeout=10.0, isolation_level=None)
-        try:
-            cur = conn.execute("DELETE FROM gap_state;")
-            return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
-        finally:
-            conn.close()
-    except Exception:
-        return 0
-
-
-def clear_gap_flag_any(symbol_variants) -> int:
-    """v14.4 — رفع تجمّد سد الثغرات عن عملة واحدة فقط عند اكتشاف ثغرات حقيقية.
-
-    لماذا؟ هذا هو السبب الجذري لـ«آلية سد الثغرات لا تفعل معا كل العملات»:
-    الجلسة تجمّد العملة (gap_state.filled=1) بعد أول سد — فإن اكتشف المدقق
-    لاحقاً ثغرات حقيقية في خط شموعها واستدعى fill_gap_once الأصلية، كانت
-    العلامة تجعله يعود فوراً بلا أي سد — فتبقى العملة مثقوبة للأبد بينما
-    العملات الأخرى سليمة. الآن: عند ثغرات حقيقية فقط تُرفع العلامة لهذه
-    العملة وحدها ثم تُنفَّد الخوارزمية الأصلية نفسها كما هي (بلا أي تغيير
-    فيها) — فتُسد العملة مثل بقية العملات دون تفاوت."""
-    n = 0
-    try:
-        store = get_candle_store()
-        conn = _sqlite3.connect(store.db_path, timeout=10.0, isolation_level=None)
-        try:
-            for _s in symbol_variants:
-                _s = str(_s or "").strip()
-                if not _s:
-                    continue
-                try:
-                    cur = conn.execute("DELETE FROM gap_state WHERE symbol=?;", (_s,))
-                    n += int(cur.rowcount or 0)
-                except Exception:
-                    continue
-        finally:
-            conn.close()
-    except Exception:
-        pass
-    return n
-
-
 # ==============================================================================
 # SECTION 9.1: MT4 WRITER (uses CandleStore instead of JSON snapshots)
 # ==============================================================================
@@ -8106,28 +7976,21 @@ class MT4Writer:
                 'time': aligned_time, 'open': tick['price'], 'high': tick['price'],
                 'low': tick['price'], 'close': tick['price'], 'volume': 1,
             })
-        # v13: الحد رُفع من 1000 إلى ASSET_MAX_CANDLES (3000) لتراكم دفعات التمرير للخلف
-        if len(state['candles']) > ASSET_MAX_CANDLES:
-            state['candles'] = state['candles'][-ASSET_MAX_CANDLES:]
+        if len(state['candles']) > 1000:
+            state['candles'] = state['candles'][-1000:]
         state['last_price'] = tick['price']
         now = time.time()
-        # v13: MT4_WRITE_THROTTLE (1.0s) بدل 0.2s — مع عشرات العملات المتدفقة
-        # يبقى تحديث الشارت حياً (كل ثانية) دون إرهاق القرص.
-        if now - state['last_write'] > MT4_WRITE_THROTTLE:
+        if now - state['last_write'] > 0.2:
             self.write_to_file(asset, period, state['candles'])
             state['last_write'] = now
 
     def write_to_file(self, asset: str, period: int, candles: list):
         """ HST {asset}{period}.hst ( AUDJPY-OTC1.hst).
-
+ 
  Args:
  asset: derived_symbol ( "AUDJPY-OTC")
  period: MT4 timeframe (PERIOD=1 for M1)
-"""
-        # DISABLED: server no longer writes HST files (user request).
-        # HST files are the ONLY output (Flask dashboard removed) — no web writes.
-        if not WRITE_HST_FILES_ENABLED:
-            return
+ """
         if asset in self._writing_queue: return
         self._writing_queue.add(asset)
         file_name = f"{asset}{period}.hst"
@@ -8211,13 +8074,6 @@ class MT4Writer:
             snap = self.load_snapshot(derived_symbol)
             if snap and len(snap) >= 2:
                 snap = sorted(snap, key=lambda x: x['time'])[-INITIAL_CANDLES:]
-                # v14.1: اللقطة نفسها قد تحمل فجوات (حُفظت في جلسة انقطع فيها
-                # البث) — سدّها بنفس الطريقة الأصلية قبل العرض حتى لا يعود
-                # الثغل من قاعدة البيانات إلى الشارت في كل إعادة تشغيل.
-                try:
-                    snap = _fill_missing_slots(snap, PERIOD_SECONDS, max_gap=1440)
-                except Exception:
-                    pass
                 # populate sync_state from the snapshot
                 self.sync_state[derived_symbol] = {
                     'period': period,
@@ -8242,8 +8098,6 @@ class MT4Writer:
             offset_seconds = int(days * 86400)
             # ===== FIX 10: get_candles PERIOD_SECONDS (60s ) =====
             # PERIOD (1 = M1 timeframe)
-            # v14.4: النداء الأصلي عاد حرفياً كما في الكود المرجعي
-            # (client.get_candles مباشرة — دون أي بوابة فوقه).
             candles = await client.get_candles(api_symbol, time.time(), offset_seconds, PERIOD_SECONDS)
             if candles and len(candles) > 0:
                 # ===== FIX L7: _align_time ( tz_offset + ) =====
@@ -8290,30 +8144,6 @@ class MT4Writer:
                 pass  # — main fetch loop
             return False
 
-    def _scan_line_holes(self, candles: list, period_seconds: int,
-                         max_reasonable_gap_periods: int = 120) -> bool:
-        """فحص قرائي فقط: هل خط الشموع يحتوي فجوات زمنية حقيقية؟
-
-        v14.1 — يستعمله فرع علامة التجمد في fill_gap_once ليعرف إن كانت
-        الطريقة الأصلية مطلوبة فعلاً. الفجوة «حقيقية» إذا فرق الوقت بين شمعتين
-        متجاورتين أكثر من فترة واحدة وأقل من حد الإغلاق المعقول (120 فترة
-        = ساعتين للفريم الدقيقة — إغلاقات الأسواق الحقيقية أطول من ذلك
-        ولا تُعتبر فقداناً، نفس عتبة مدقق v14).
-        """
-        try:
-            if not candles or len(candles) < 2:
-                return False
-            period_s = max(1, int(period_seconds or PERIOD_SECONDS))
-            max_gap_s = period_s * int(max_reasonable_gap_periods)
-            line = sorted(candles, key=lambda c: int(c.get('time', 0)))
-            for a, b in zip(line, line[1:]):
-                gap = int(b.get('time', 0)) - int(a.get('time', 0))
-                if period_s < gap <= max_gap_s:
-                    return True
-            return False
-        except Exception:
-            return False
-
     async def fill_gap_once(self, client, asset_obj, period: int):
         """ GAP_FILL_CANDLES + .
 
@@ -8345,27 +8175,10 @@ class MT4Writer:
         # at all. This is the entire fix for the 'candles flicker' symptom -
         # the original algorithm is preserved 1:1, we only skip it after the
         # first successful run.
-        #
-        # v14.2: الفرع أعلاه عاد إلى الكود الأصلي حرفياً (نفس الكود الملصوق
-        # من المستخدم — دون أي إضافة فحص ثغرات فوقه).
         try:
             is_filled, _last_at = self.candle_store.is_gap_filled(derived_symbol)
             if is_filled:
-                # v14.8 (تقرير الفحص): لا تجميد ما دامت في الخط شموع اصطناعية
-                # (volume=0 خارج الشمعة الحية) — السد الحقيقي يبقى محاولاً
-                # حتى تُستبدل كل الشموع الاصطناعية بشموع حقيقية، فلا تبقى
-                # عملة مجمّدة بثغراتها للأبد.
-                _has_artificial = False
-                try:
-                    _cps = _align_time(int(time.time()))
-                    for _fc in (asset_obj.candles or []):
-                        if _fc.get('time', 0) < _cps and _v14_is_synth_flat(_fc):
-                            _has_artificial = True
-                            break
-                except Exception:
-                    _has_artificial = False
-                if not _has_artificial:
-                    return    # frozen - keep candles exactly as they were
+                return    # frozen - keep candles exactly as they were
         except Exception:
             pass
 
@@ -8397,29 +8210,7 @@ class MT4Writer:
 
         try:
             # Fetch last GAP_FILL_CANDLES (10) recent candles to replace incomplete ones
-            # v14.8 (تقرير الفحص): النافذة تمتد حتى أقدم شمعة اصطناعية في
-            # الخط (بحد أقصى 200 شمعة) — أي ثغرة أقدم من 10 شموع كانت
-            # مستحيلة الإصلاح في النسخة السابقة لأن السدّ يجلب آخر 10 شموع فقط.
-            _oldest_artificial = 0
-            try:
-                _cps0 = _align_time(int(time.time()))
-                for _fc in state['candles']:
-                    if _fc.get('time', 0) < _cps0 and _v14_is_synth_flat(_fc):
-                        if _oldest_artificial == 0 or _fc['time'] < _oldest_artificial:
-                            _oldest_artificial = _fc['time']
-            except Exception:
-                _oldest_artificial = 0
-            _window_candles = GAP_FILL_CANDLES
-            if _oldest_artificial:
-                try:
-                    _span = int((time.time() - _oldest_artificial) // PERIOD_SECONDS) + 2
-                    _window_candles = min(200, max(GAP_FILL_CANDLES, _span))
-                except Exception:
-                    _window_candles = GAP_FILL_CANDLES
-            small_days = (_window_candles * PERIOD_SECONDS) / 86400.0
-            # v14.2 (طلب المستخدم حرفياً: «ضعها كما هي هنا») — النداء الأصلي
-            # عاد كما هو في الكود المرجعي: client.get_candles مباشرة
-            # (نفس طريقة الجلب الرسمية دون أي بوابة فوقها).
+            small_days = (GAP_FILL_CANDLES * PERIOD_SECONDS) / 86400.0
             candles = await client.get_candles(api_symbol, time.time(), int(small_days * 86400), PERIOD_SECONDS)
             if not candles:
                 # Fill existing gaps even without new data
@@ -8428,10 +8219,11 @@ class MT4Writer:
                 state['candles'] = merged
                 self.write_to_file(derived_symbol, period, merged)
                 asset_obj.candles = merged
+                self._gap_filled[derived_symbol] = True
+                self._gap_filled_at[derived_symbol] = now_ts
                 self.save_snapshot(derived_symbol, merged)
-                # v14.8 (تقرير الفحص): الرد الفارغ ليس نجاحاً — لا علامة
-                # تجميد هنا (كانت تُثبَّت حتى عند فشل الجلب أو رد فارغ فتبقى
-                # العملة مجمّدة حتى بعد إعادة التشغيل ولا تُسدّ ثغراتها أبداً).
+                # mark as permanently filled in the DB so the next cycle skips
+                self.candle_store.set_gap_filled(derived_symbol, True, now_ts)
                 return
 
             # Build candle_map: replace incomplete closed candles with real API data
@@ -8486,26 +8278,15 @@ class MT4Writer:
                 asset_obj.price = merged[-1]['close']
 
             # 9) mark gap as filled
-            # v14.8 (تقرير الفحص): علامة التجميد تُثبَّت فقط إذا خرج الخط من
-            # الشموع الاصطناعية — ما دامت فيه شموع مسطحة (volume=0) يبقى السد
-            # الحقيقي محاولاً في الدورات التالية حتى تُستبدل كلها.
-            _still_artificial = False
-            try:
-                _cps2 = _align_time(int(time.time()))
-                for _fc in merged:
-                    if _fc.get('time', 0) < _cps2 and _v14_is_synth_flat(_fc):
-                        _still_artificial = True
-                        break
-            except Exception:
-                _still_artificial = False
+            self._gap_filled[derived_symbol] = True
+            self._gap_filled_at[derived_symbol] = now_ts
+            # 10) persist candles to the SQLite store (so the next restart
+            # loads them from the DB instead of re-fetching from the API).
             self.save_snapshot(derived_symbol, merged)
-            if not _still_artificial:
-                self._gap_filled[derived_symbol] = True
-                self._gap_filled_at[derived_symbol] = now_ts
-                # 11) set the permanent freeze flag - subsequent fill_gap_once
-                # calls for this asset will return immediately without touching
-                # the candles. This is the entire fix for the 'flicker' symptom.
-                self.candle_store.set_gap_filled(derived_symbol, True, now_ts)
+            # 11) set the permanent freeze flag - subsequent fill_gap_once
+            # calls for this asset will return immediately without touching
+            # the candles. This is the entire fix for the 'flicker' symptom.
+            self.candle_store.set_gap_filled(derived_symbol, True, now_ts)
         except Exception as e:
             err_str = str(e).lower()
             if not any(x in err_str for x in ['winerror', 'permission', 'access', 'closed', 'connection']):
@@ -8531,7 +8312,7 @@ async def mt4_gap_filler():
             GAP_FILL_ACTIVE = False
             await asyncio.sleep(GAP_FILL_REFRESH_INTERVAL)
             continue
-        GAP_FILL_ACTIVE = True
+        GAP_FILL_ACTIVE = True  # FIX L10:
         filled_count = 0
         skipped_count = 0
         failed_count = 0
@@ -8541,6 +8322,7 @@ async def mt4_gap_filler():
             if not CLIENT or not CLIENT.api:
                 GAP_FILL_SUMMARY = f"GAP FILL: ABORTED (connection lost) | {filled_count}/{total} filled | {skipped_count} skipped"
                 GAP_FILL_ACTIVE = False
+
                 await asyncio.sleep(5)
                 break
             try:
@@ -8554,13 +8336,13 @@ async def mt4_gap_filler():
                 skipped_count += 1
                 failed_count += 1
                 failed_assets.append(asset.symbol)
-            # live progress update in banner
+            # —
             GAP_FILL_SUMMARY = (
                 f"GAP FILL c{cycle}: {i}/{total} done | {filled_count} filled | "
                 f"{skipped_count} skipped | {failed_count} failed | {time.time()-t0:.1f}s"
             )
         else:
-            # loop completed normally (no connection loss break)
+            # ( connection loss)
             elapsed = time.time() - t0
             fail_str = f" | Failed: {', '.join(failed_assets[:5])}" if failed_assets else ""
             GAP_FILL_SUMMARY = (
@@ -8568,5086 +8350,272 @@ async def mt4_gap_filler():
                 f"{skipped_count} skipped{fail_str} | next in {GAP_FILL_REFRESH_INTERVAL}s"
             )
             GAP_FILL_ACTIVE = False
+            # (5 )
             await asyncio.sleep(GAP_FILL_REFRESH_INTERVAL)
+            # ( / )
             total = len(ALL_STREAMING_ASSETS)
             continue
-        # reached here only on connection loss (break)
+        # connection loss —
         GAP_FILL_ACTIVE = False
         await asyncio.sleep(GAP_FILL_REFRESH_INTERVAL)
         total = len(ALL_STREAMING_ASSETS)
 
-
-# ==============================================================================
-# SECTION 10 (v13.2): CHART-DRIVEN 300 + PAGINATION 300 + TICK RETENTION 5 MIN
-# ==============================================================================
-# محرك التحميل المسبق (بطلب المستخدم حرفياً):
-#   1) بعد الدخول مباشرة: 300 شمعة لـ BRLUSD_otc (هي العملة التي تفتح الشارت)
-#      مع حالتها (مفتوح/مغلق) ونسبة دفعها.
-#   2) بقية الأصول المفتوحة تتحمل واحدة تلو الأخرى: 300 شمعة لكل عملة.
-#   3) البث الحي يبقى يعمل لكل عملة محمّلة — لذلك عندما يُفتح أي شارت لاحقاً
-#      يكون جاهزاً فوراً (الأسعار تتدفق داخله باستمرار).
-#   4) fetch_older_batch(): عند التمرير للخلف في الشارت يجلب دفعة صغيرة من
-#      300 شمعة أقدم، وكلما زاد التمرير للخلف تظهر شموع أخرى مثل المنصات
-#      الاحترافية. الدالة جاهزة الآن على الخادم؛ ربطها بالتطبيق يُضاف لاحقاً
-#      (طلب المستخدم: ليس الآن).
-#   5) التيكات تُحفظ في الذاكرة فقط ولا تُكتب على القرص أبداً، وتُحذف تلقائياً
-#      بعد 5 دقائق (لأن الشموع تكون قد تشكّلت منها) — بهذا لا يمتلئ القرص
-#      بالتيكس ولا بالشموع مهما طال عمر التشغيل.
-# طريقة الدخول وطريقة جلب الشموع الأصلية لم تُمَس إطلاقاً.
-# ==============================================================================
-from collections import deque as _deque
-
-# كاش التيكات في الذاكرة فقط: api_symbol -> deque[(ts, price)]
-_TICK_CACHE = {}
-_TICK_LOCK = threading.Lock()
-_PRELOADED_INFO = {}      # api_symbol -> {"candles": n, "at": "HH:MM:SS", "oldest": ts, "closed": bool}
-_ASSET_OBJECTS = {}       # api_symbol -> Asset (مسمّيات الكائنات المعاد استخدامها)
-_OPENER_STATUS_SHOWN = False
-
-
-def _get_or_create_asset(api_symbol: str) -> Asset:
-    """يعيد كائن Asset موجود أو ينشئه (بدون تكرار)."""
-    for a in list(ALL_STREAMING_ASSETS):
-        if a.api_symbol == api_symbol:
-            return a
-    a = _ASSET_OBJECTS.get(api_symbol)
-    if a is None:
-        a = Asset(api_symbol)
-        _ASSET_OBJECTS[api_symbol] = a
-    return a
-
-
-# ==============================================================================
-# SECTION 10.5 (v13.1): FETCH GATE — منع اختلاط عمليات الجلب (طلب المستخدم حرفياً)
-# ==============================================================================
-# ما أبلغ عنه المستخدم: «تعليق والاختلاط بين عمليات الجلب — يختلط بين اكتمال
-# كل تلك العملات وجلب عملة نريد الرجوع للخلف فيها» — فراغات في الشموع،
-# شارتات تُفتح بلا شموع، والتمرير للخلف لا يجلب شيئاً.
-#
-# السبب الجذري (من قراءة الكود): CLIENT.get_candles ينتظر الحدث
-# candles_ready_<asset> — وعنصر هذا الحدث هو اسم العملة فقط. أي رسالة حية
-# لنفس العملة تحمل candles (لقطات البث) تُشغّل الحدث قبل وصول رد
-# history/load الحقيقي فيأخذ الانتظار رداً مكسوراً (شموع قليلة/خاطئة)،
-# وطلبَان لنفس العملة في نفس اللحظة يستهلك كل منهما رد الآخر.
-#
-# الحل — وطريقة الجلب نفسها لم تُمَس حرفياً (نفس CLIENT.get_candles ونفس
-# رسالة history/load):
-#   1) بوابة واحدة: طلب جلب واحد فقط في كل لحظة على مستوى الخادم كله —
-#      لا يوجد أي طلبان متزامنان بعد الآن.
-#   2) أولوية أمامية: طلبات المستخدم (تمرير للخلف / جلب عملة فُتح شارتها
-#      فارغة / فريم أعلى للعملة المعروضة) تحمل foreground=True، وحلقة
-#      التحميل المسبق الخلفية تتوقف مؤقتاً ما دام هناك طلب أمامي معلّق.
-#   3) تحقق وإعادة محاولة: إذا كان الرد أقل بوضوح من نافذة الزمن المطلوبة
-#      (يعني رسالة حية سرقت الحدث) يُعاد الطلب بنفس الطريقة الأصلية.
-#   4) debounce: نفس النافذة (عملة/فريم/نهاية) خلال 3 ثوانٍ يعيد النتيجة
-#      المخزنة بدل إرسال طلب مكرر يختلط مع السابق.
-_FETCH_GATE_LOCK: Optional[asyncio.Lock] = None   # تُنشأ في أول استدعاء
-_FETCH_GATE_LOCK_LOOP: Optional[asyncio.AbstractEventLoop] = None  # v14.2: الحلقة المرتبة
-_FETCH_GATE_FG = 0                                # عدد الطلبات الأمامية المعلّقة
-_FETCH_GATE_CACHE: Dict[tuple, tuple] = {}        # (asset,period,end,seconds) -> (ts, raw_res)
-_FETCH_GATE_CACHE_TTL = 3.0                       # ثوانٍ
-
-
-def _fetch_gate_lock() -> asyncio.Lock:
-    """قفل البوابة — v14.2: مرتبط بالحلقة الحالية.
-
-    السبب (الجذر الحقيقي لـ«الرجوع للخلف لا يجلب شموعاً» و«سد الثغرات
-    لا يعمل إطلاقاً»): كان القفل يُنشأ مرة واحدة على حلقة gen-1، وعند
-    إعادة إنشاء الحلقة (start_async_engine على إعادة الاتصال — gen 2+)
-    كان كل 'async with lock' يرفع RuntimeError («bound to a different
-    event loop") — فيموت جلب كل دفعة تمرير للخلف (دُفعة فارغة →
-    «لا يوجد أقدم» في الواجهة) وسد الثغرات (الاستثناء يُبتلع صامتاً)
-    بينما التيكات الحية تُبقى تعمل لأنها لا تمر بالبوابة.
-    الآن: إن تغيّرت الحلقة الجارية يُعاد إنشاء القفل تلقائياً."""
-    global _FETCH_GATE_LOCK, _FETCH_GATE_LOCK_LOOP
-    loop = None
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-    if (_FETCH_GATE_LOCK is None or loop is None
-            or _FETCH_GATE_LOCK_LOOP is not loop):
-        _FETCH_GATE_LOCK = asyncio.Lock()
-        _FETCH_GATE_LOCK_LOOP = loop
-    return _FETCH_GATE_LOCK
-
-
-def fetch_gate_foreground_pending() -> int:
-    """كم طلب أمامي (من المستخدم) معلّق الآن — حلقة التحميل المسبق تنتظرها."""
-    return _FETCH_GATE_FG
-
-
-async def _fetch_gate_wait_foreground(max_wait: float = 45.0):
-    """ينتظر حتى لا يبقى أي طلب أمامي معلّق (تستعملها الحلقة الخلفية فقط)."""
-    waited = 0.0
-    while _FETCH_GATE_FG > 0 and waited < max_wait:
-        await asyncio.sleep(0.4)
-        waited += 0.4
-
-
-async def qx_fetch_window_raw(api_symbol: str, end_time: int, seconds: int,
-                              period: int, foreground: bool = False,
-                              timeout: float = None, retries: int = 2):
-    """نفس طريقة الجلب الأصلية حرفياً (CLIENT.get_candles → history/load)
-    لكن عبر البوابة المرتبة: طلب واحد في كل لحظة + أولوية أمامية + تحقق.
-
-    يعيد رد الخادم الخام كما هو (نفس عقد CLIENT.get_candles) — التنسيق
-    يبقى في يد المستدعي كما كان تماماً قبل البوابة."""
-    global _FETCH_GATE_FG
-    if CLIENT is None or CLIENT.api is None:
-        return None
-    if timeout is None:
-        timeout = PRELOAD_TIMEOUT
-    end_time = int(end_time)
-    seconds = max(int(period), int(seconds))
-    # 4) debounce: نفس الطلب خلال ثوانٍ → نفس النتيجة بلا طلب مكرر يختلط
-    key = (api_symbol, int(period), end_time, int(seconds))
-    now = time.time()
-    hit = _FETCH_GATE_CACHE.get(key)
-    if hit is not None and (now - hit[0]) < _FETCH_GATE_CACHE_TTL:
-        return hit[1]
-    if foreground:
-        _FETCH_GATE_FG += 1
-    try:
-        # 3) تحقق: الحد الأدنى المقبول من الشموع مقارنة بنافذة الزمن المطلوبة.
-        #    طلب 300 شمعة لا يُقبل بـ 3 شموع — هذا رد حي مكسور يُعاد طلبه.
-        expected = max(1, int(seconds) // max(1, int(period)))
-        min_ok = max(3, min(PRELOAD_MIN_CANDLES, expected // 4))
-        raw = None
-        for attempt in range(max(1, int(retries) + 1)):
-            # 1) البوابة: طلب واحد فقط في كل لحظة على مستوى الخادم كله
-            async with _fetch_gate_lock():
-                raw = await asyncio.wait_for(
-                    CLIENT.get_candles(api_symbol, end_time, int(seconds), period),
-                    timeout=float(timeout) + 5.0,
-                )
-            if raw is None:
-                break
-            try:
-                n_ok = len(_quick_count_candles(raw, period))
-            except Exception:
-                n_ok = expected
-            if n_ok >= min_ok:
-                break
-            # الرد مكسور (رسالة حية سرقت الحدث candles_ready) — أعد بنفس الطريقة
-            logmsg(f"[gate:{api_symbol}] broken response ({n_ok} candles < {min_ok}) "
-                   f"— retry {attempt + 1}/{max(1, int(retries) + 1)}")
-            await asyncio.sleep(0.8)
-        try:
-            # v14.1: لا نخزّن رداً None في الكاش — الرد الفاشل المُخزَّن كان
-            # يسمّم نفس نافذة التمرير للخلف لمدة TTL كاملة (كل إعادة طلب
-            # لنفس before_time كانت ترجع None فوراً من الكاش بدل الخادم).
-            if raw is not None:
-                _FETCH_GATE_CACHE[key] = (time.time(), raw)
-                if len(_FETCH_GATE_CACHE) > 96:
-                    for _k in list(_FETCH_GATE_CACHE.keys())[:48]:
-                        _FETCH_GATE_CACHE.pop(_k, None)
-            elif key in _FETCH_GATE_CACHE:
-                _FETCH_GATE_CACHE.pop(key, None)
-        except Exception:
-            pass
-        return raw
-    finally:
-        if foreground:
-            _FETCH_GATE_FG = max(0, _FETCH_GATE_FG - 1)
-
-
-def _quick_count_candles(raw, period: int) -> list:
-    """عدّاد سريع لشموع الرد الخام (للتحقق داخل البوابة فقط) — محاذاة على
-    حدود الفريم المطلوب نفسها التي يستعملها التنسيق الرسمي."""
-    out = []
-    if not raw:
-        return out
-    for c in raw:
-        if not isinstance(c, dict):
-            continue
-        try:
-            ts = int(float(c.get("time", c.get("timestamp", 0))))
-            if ts <= 0:
-                continue
-            out.append(ts - (ts % max(1, int(period))))
-        except Exception:
-            continue
-    return set(out)
-
-
-def _cache_tick(api_symbol: str, ts: int, price: float):
-    """يخزن تيكاً في الذاكرة فقط (لا يوجد أي ملف تيكات على القرص في v13)."""
-    with _TICK_LOCK:
-        d = _TICK_CACHE.get(api_symbol)
-        if d is None:
-            d = _deque(maxlen=TICK_CACHE_MAXLEN)
-            _TICK_CACHE[api_symbol] = d
-        d.append((int(ts), float(price)))
-
-
-def _prune_tick_cache() -> int:
-    """v13 (طلب المستخدم): حذف كل تيك أقدم من 5 دقائق — التيكات القديمة لا
-    فائدة منها لأن الشموع تشكّلت منها، وحذفها يمنع امتلاء الذاكرة والقرص."""
-    cutoff = time.time() - TICK_RETENTION_SECONDS
-    removed = 0
-    with _TICK_LOCK:
-        for sym in list(_TICK_CACHE.keys()):
-            d = _TICK_CACHE[sym]
-            n0 = len(d)
-            while d and d[0][0] < cutoff:
-                d.popleft()
-            removed += n0 - len(d)
-            if not d:
-                _TICK_CACHE.pop(sym, None)
-    return removed
-
-
-def get_recent_ticks(api_symbol: str, seconds: int = TICK_RETENTION_SECONDS) -> list:
-    """يعيد تيكات آخر N ثانية لعملة معينة من الكاش (للتطبيق لاحقاً)."""
-    with _TICK_LOCK:
-        d = _TICK_CACHE.get(api_symbol)
-        if not d:
-            return []
-        cutoff = time.time() - max(1, int(seconds))
-        return [[t, p] for (t, p) in d if t >= cutoff]
-
-
-async def tick_cache_collector():
-    """يجمع تيكات كل الأصول المتدفقة في الذاكرة فقط — كل 0.25 ثانية يقرأ آخر
-    سعر من realtime_candles لكل عملة ويخزنه. لا يكتب أي شيء على القرص."""
-    last_ts = {}
-    while True:
-        try:
-            if CLIENT is not None and CLIENT.api is not None and CONNECTION_ALIVE:
-                for asset in list(ALL_STREAMING_ASSETS):
-                    c = CLIENT.api.realtime_candles.get(asset.api_symbol)
-                    try:
-                        if isinstance(c, list) and len(c) >= 3:
-                            ts, price = int(c[1]), float(c[2])
-                        elif isinstance(c, dict):
-                            ts = int(c.get("time", c.get("timestamp", 0)))
-                            price = float(c.get("price", c.get("close", 0)))
-                        else:
-                            continue
-                        if ts > 0 and price > 0 and ts > last_ts.get(asset.api_symbol, 0):
-                            last_ts[asset.api_symbol] = ts
-                            _cache_tick(asset.api_symbol, ts, price)
-                    except Exception:
-                        continue
-            await asyncio.sleep(0.25)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            await asyncio.sleep(1.0)
-
-
-async def tick_retention_loop():
-    """v13: حلقة الحذف الدوري — كل TICK_PURGE_INTERVAL ثانية تحذف التيكات
-    الأقدم من TICK_RETENTION_SECONDS (5 دقائق)."""
-    while True:
-        await asyncio.sleep(TICK_PURGE_INTERVAL)
-        try:
-            removed = _prune_tick_cache()
-            kept = sum(len(d) for d in _TICK_CACHE.values())
-            if removed:
-                logmsg(f"[ticks] purged {removed} ticks older than "
-                       f"{TICK_RETENTION_SECONDS // 60} min (kept {kept} in memory only — "
-                       f"no tick is ever written to disk)")
-        except Exception as e:
-            logmsg(f"[ticks] purge error: {e}")
-
-
-async def candlestore_trim_loop():
-    """v13: ترميم candles.db كل ساعة — يحتفظ بأحدث CANDLESTORE_KEEP_PER_SYMBOL
-    شمعة لكل عملة ويحذف الأقدم، ثم يفرّغ ملف WAL. بهذا لا ينمو حجم قاعدة
-    الشموع بلا حدود حتى لو اشتغل السيرفر شهراً كاملاً."""
-    while True:
-        await asyncio.sleep(DB_TRIM_INTERVAL)
-        try:
-            db_path = get_candle_store().db_path
-            conn = _sqlite3.connect(db_path, timeout=10.0, isolation_level=None)
-            try:
-                cur = conn.execute("SELECT DISTINCT symbol FROM candles;")
-                symbols = [r[0] for r in cur.fetchall()]
-                trimmed = 0
-                for sym in symbols:
-                    c2 = conn.execute(
-                        "DELETE FROM candles WHERE symbol=? AND time < ("
-                        " SELECT time FROM candles WHERE symbol=?"
-                        " ORDER BY time DESC LIMIT 1 OFFSET ?);",
-                        (sym, sym, CANDLESTORE_KEEP_PER_SYMBOL))
-                    if c2.rowcount and c2.rowcount > 0:
-                        trimmed += c2.rowcount
-                if trimmed:
-                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
-                    logmsg(f"[db] trimmed {trimmed} old candle rows "
-                           f"(keep newest {CANDLESTORE_KEEP_PER_SYMBOL}/symbol)")
-            finally:
-                conn.close()
-        except Exception as e:
-            logmsg(f"[db] trim error: {e}")
-
-
-def _format_raw_candles(res) -> list:
-    """تحويل رد الخادم إلى شموع منسقة (نفس منطق وتنسيق fetch_candles_once
-    الأصلي دون أي تغيير في طريقة الجلب نفسها)."""
-    out = []
-    if not res:
-        return out
-    for c in res:
-        if not isinstance(c, dict):
-            continue
-        try:
-            ts = int(float(c.get("time", c.get("timestamp", 0))))
-            if ts <= 0:
-                continue  # v13: تجاهل الردود بلا وقت صالح (حماية من شموع تالفة)
-            aligned = _align_time(ts, period_seconds=PERIOD_SECONDS)
-            o = float(c.get("open", 0))
-            h = float(c.get("high", c.get("max", 0)))
-            l = float(c.get("low", c.get("min", 0)))
-            cl = float(c.get("close", 0))
-            if o > 0 and h > 0 and l > 0 and cl > 0:
-                out.append({'time': aligned, 'open': o, 'high': h, 'low': l,
-                            'close': cl, 'volume': random.randint(50, 200)})
-        except Exception:
-            continue
-    seen, unique = set(), []
-    for c in out:
-        if c['time'] not in seen:
-            seen.add(c['time'])
-            unique.append(c)
-    unique.sort(key=lambda x: x['time'])
-    return unique
-
-
-async def _fetch_candle_window(api_symbol: str, end_time: int, seconds: int,
-                               foreground: bool = False):
-    """طلب شموع واحد عبر نفس CLIENT.get_candles الأصلي (نفس طريقة الجلب
-    الرسمية دون أي تعديل): end_time = نهاية النافذة، seconds = طولها بالثواني.
-
-    v13.1: الطلب يمر الآن عبر بوابة الجلب الواحدة (fetch gate) حتى لا يختلط
-    مع أي جلب آخر — foreground=True يعني طلب المستخدم الأمامي (تمرير للخلف
-    أو عملة فُتح شارتها) فيتقدم على التحميل المسبق الخلفي."""
-    res = await qx_fetch_window_raw(
-        api_symbol, int(end_time), int(seconds), PERIOD_SECONDS,
-        foreground=foreground, timeout=PRELOAD_TIMEOUT,
-    )
-    return res
-
-
-def _apply_candles_to_asset(asset: Asset, candles: list):
-    """تخزين الشموع في كل القنوات الرسمية: ذاكرة العملة + ملف HST الأول
-    + sync_state + ملف HST الثاني + قاعدة candles.db.
-
-    v13.1 (طلب المستخدم): آلية سد الثغرات مُشغَّلة الآن عند التخزين نفسه —
-    _fill_missing_slots نفسها بلا أي تغيير تملأ أي فجوة زمنية بشموع مسطحة
-    (إغلاق الشمعة السابقة) حتى لا يظهر فارغ في الشموع أبداً."""
-    candles = _fill_missing_slots(list(candles), PERIOD_SECONDS, max_gap=1440)
-    asset.candles = list(candles)
-    if candles:
-        asset.price = float(candles[-1]['close'])
-    try:
-        asset.write(force=True)
-    except Exception:
-        pass
-    MT4_WRITER.sync_state[asset.symbol] = {
-        'period': PERIOD,
-        'candles': list(asset.candles),
-        'last_write': 0,
-        'last_price': float(asset.candles[-1]['close']) if asset.candles else 0.0,
-    }
-    try:
-        MT4_WRITER.write_to_file(asset.symbol, PERIOD, asset.candles)
-    except Exception:
-        pass
-    try:
-        MT4_WRITER.save_snapshot(asset.symbol, asset.candles)
-    except Exception:
-        pass
-
-
-def _print_opener_banner(api_symbol: str, entry, candles_count: int, elapsed: float):
-    """لوحة جاهزية عملة فتح الشارت: الشموع + الحالة + نسب الدفع."""
-    def _p(v):
-        return f"{v}%" if isinstance(v, (int, float)) else "-"
-    name = (entry.get("name") or "-") if entry else "-"
-    payout = entry.get("payout") if entry else None
-    turbo = entry.get("turbo_payout") if entry else None
-    p1 = entry.get("profit_1m") if entry else None
-    p5 = entry.get("profit_5m") if entry else None
-    if entry is None:
-        status_str = f"{Colors.DIM}UNKNOWN (asset list not ready yet){Colors.RESET}"
-    elif entry.get("open"):
-        status_str = f"{Colors.GREEN}OPEN{Colors.RESET}"
-    else:
-        status_str = f"{Colors.RED}CLOSED{Colors.RESET}"
-    print()
-    print(f"{Colors.CYAN}{'═' * 70}{Colors.RESET}")
-    print(f"{Colors.BOLD}  CHART OPENER READY — {api_symbol}{Colors.RESET}")
-    print(f"  Name: {name}  |  Candles: {candles_count}  |  Loaded in {elapsed:.1f}s")
-    print(f"  Payout: {_p(payout)}  |  Turbo: {_p(turbo)}  |  1M: {_p(p1)}  |  5M: {_p(p5)}"
-          f"  |  Status: {status_str}")
-    print(f"  {Colors.DIM}Live stream: ON — الشارت جاهز للفتح فوراً والأسعار تتدفق داخله{Colors.RESET}")
-    print(f"{Colors.CYAN}{'═' * 70}{Colors.RESET}")
-
-
-async def preload_one_asset(api_symbol: str, idx: int = 1, total: int = 1):
-    """تحميل عملة واحدة: 300 شمعة عبر نفس طريقة الجلب الأصلية، ثم تشغيل
-    البث الحي لها. تعيد عدد الشموع أو None عند الفشل."""
-    asset = _get_or_create_asset(api_symbol)
-    have_data = (asset.symbol in MT4_WRITER.sync_state and asset.candles
-                 and len(asset.candles) >= PRELOAD_CANDLES)
-    if not have_data:
-        res = await _fetch_candle_window(
-            api_symbol, int(time.time()), PRELOAD_CANDLES * PERIOD_SECONDS + PERIOD_SECONDS)
-        candles = _format_raw_candles(res)[-PRELOAD_CANDLES:]
-        if not candles or len(candles) < PRELOAD_MIN_CANDLES:
-            logmsg(f"[preload {idx}/{total}] {api_symbol}: only {len(candles)} candles — skipped")
-            return None
-        _apply_candles_to_asset(asset, candles)
-    # التأكد من أن البث الحي يعمل لهذه العملة (لأن أي شارت يُفتح لاحقاً يجب
-    # أن يجد الأسعار تتدفق داخله — طلب المستخدم).
-    task = asset.stream_task
-    task_running = False
-    try:
-        task_running = task is not None and not task.done()
-    except Exception:
-        task_running = False
-    if not (asset.streaming and task_running):
-        try:
-            asset.stream_task = asyncio.run_coroutine_threadsafe(realtime_stream(asset), ASYNC_LOOP)
-            await asyncio.sleep(0.05)
-        except Exception as e:
-            logmsg(f"[preload {idx}/{total}] {api_symbol}: stream start failed: {e}")
-    if asset not in ALL_STREAMING_ASSETS:
-        ALL_STREAMING_ASSETS.append(asset)
-    # v14.3 (طلب المستخدم حرفياً: «سدها عن طريق جلب شموع 1 ثانية ثم تركيبهم»)
-    # خط آلة سد الثغرات من qx_server_v10.py كما هو — يُنفَّذ عند فتح العملة
-    # مباشرة بعد أول 300 شمعة وبداية البث الحي: جلب شموع 1 ثانية وتركيبها
-    # إلى 1m لسد الفجوة بين آخر شمعة تاريخية والشمعة الحية.
-    if PERIOD_SECONDS == 60:
-        try:
-            await apply_1s_bridge_to_asset(asset, idx, total)
-        except Exception as _bridge_e:
-            logmsg(f"[preload {idx}/{total}] {api_symbol}: 1s bridge skipped (non-fatal): {_bridge_e}")
-    # v14.4 (طلب المستخدم حرفياً: «يجب ان تجلبها من هنا وتجعلها تعمل معا كل
-    # العملات دون تخلف»): خط الجسر الثاني من qx_server_v10.py كما هو حرفياً —
-    # _bridge_fetch_recent_candles تجلب آخر BRIDGE_FETCH_CANDLES شمعة تنتهي
-    # عند time.time() الحالي وتدمجها (لإطارات 60s+ عبر _fetch_historical_batch
-    # وبفهرس فريد، وللثواني الفرعية عبر شموع 1s) — نفس الدالة نفسها التي يستدعيها
-    # fetch_candles_with_retry في الكود المرجعي بعد كل جلب تاريخي. هي الطبقة
-    # التي تغلق فجوة «بين شمعة الحية والشموع التي قبلها بـ 5 دقائق» بشموع حقيقية
-    # لكل العملات حتى لو كان تاريخ الثانية-واحدة محدوداً لها. أي فشل غير مُتلف.
-    try:
-        _bridged = await _bridge_fetch_recent_candles(asset, list(asset.candles or []))
-        if _bridged and len(_bridged) > len(asset.candles or []):
-            _apply_candles_to_asset(asset, _bridged)
-    except Exception as _bridge2_e:
-        logmsg(f"[preload {idx}/{total}] {api_symbol}: recent bridge skipped (non-fatal): {_bridge2_e}")
-    _PRELOADED_INFO[api_symbol] = {
-        "candles": len(asset.candles) if asset.candles else 0,
-        "at": datetime.now().strftime("%H:%M:%S"),
-        "oldest": asset.candles[0]['time'] if asset.candles else 0,
-        "closed": _PRELOADED_INFO.get(api_symbol, {}).get("closed", False),
-    }
-    return len(asset.candles) if asset.candles else 0
-
-
-async def ensure_asset_loaded(api_symbol: str) -> int:
-    """v13.1 (طلب المستخدم): جلب فوري بأولوية أمامية لعملة فتح التطبيق شارتها
-    ووجدها بلا شموع — السبب كان أن التحميل المسبق الخلفي يمر على كل العملات
-    واحدة تلو الأخرى (قد يستغرق دقائق)، فتُفتح عملة لم يصل دورها بعد فيُعرض
-    شارت فارغ. هذه الدالة تجلب العملة فوراً عبر نفس المسار الرسمي
-    (preload_one_asset → _fetch_candle_window → البوابة الأمامية) وتشغّل
-    بثها الحي، فتمتلئ الشارت خلال ثوانٍ. تعيد عدد الشموع أو 0."""
-    if CLIENT is None or CLIENT.api is None or not CONNECTION_ALIVE:
-        return 0
-    api_symbol = str(api_symbol or "").strip()
-    if not api_symbol:
-        return 0
-    asset = _get_or_create_asset(api_symbol)
-    if asset.candles and len(asset.candles) >= PRELOAD_MIN_CANDLES:
-        # الشموع موجودة — تأكد فقط أن البث الحي يعمل لها
-        task = asset.stream_task
-        try:
-            running = task is not None and not task.done()
-        except Exception:
-            running = False
-        if not (asset.streaming and running):
-            try:
-                asset.stream_task = asyncio.run_coroutine_threadsafe(
-                    realtime_stream(asset), ASYNC_LOOP)
-            except Exception:
-                pass
-        return len(asset.candles)
-    try:
-        n = await preload_one_asset(api_symbol, 1, 1)
-        return int(n or 0)
-    except Exception as e:
-        logmsg(f"[ensure:{api_symbol}] failed: {e}")
-        return 0
-
-
-async def preload_all_assets():
-    """v13.2 (طلب المستخدم حرفياً): لا تحميل مسبق شامل بعد الآن —
-    «العملة اللي نفتح الشارت تبعها يتم جلب 300 شمعة منها، واللي لم نفتح
-    شارتها لا تجلب»:
-      1) BRLUSD_otc (عملة فتح الشارت) تُجلب فوراً بعد الدخول — 300 شمعة + بث حي.
-      2) أي عملة أخرى تُجلب فقط عند فتح التطبيق شارتها عبر ensure_asset_loaded()
-         (متصلة ببوابة الجلب الأمامية، واحدة تلو الأخرى بلا تسرّع).
-      3) هذه الحلقة لا تجلب أي شموع — فقط تراقب الأصول التي أُغلقت لإيقاف
-         بثها، وتعيد تشغيل بث الأصول المفتوحة التي كان التطبيق يعرضها."""
-    global _OPENER_STATUS_SHOWN
-    logmsg(f"[preload] fetching {PRELOAD_FIRST_SYMBOL} immediately (chart opener)...")
-    t0 = time.time()
-    try:
-        n = await preload_one_asset(PRELOAD_FIRST_SYMBOL, 1, 1)
-        if n:
-            logmsg(f"[preload] {PRELOAD_FIRST_SYMBOL}: {n} candles + live stream ON "
-                   f"({time.time() - t0:.1f}s)")
-            _print_opener_banner(PRELOAD_FIRST_SYMBOL, None, n, time.time() - t0)
-    except Exception as e:
-        logmsg(f"[preload] {PRELOAD_FIRST_SYMBOL} immediate fetch failed: {e} (will retry)")
-    while True:
-        cycle_start = time.time()
-        try:
-            if CLIENT is None or CLIENT.api is None or not CONNECTION_ALIVE:
-                await asyncio.sleep(5.0)
-                continue
-            entries = _instruments_snapshot()
-            waited = 0.0
-            while not entries and waited < PRELOAD_WAIT_INSTRUMENTS:
-                await asyncio.sleep(2.0)
-                waited += 2.0
-                if CLIENT is None or CLIENT.api is None or not CONNECTION_ALIVE:
-                    break
-                entries = _instruments_snapshot()
-            if entries:
-                by_asset = {}
-                for e in entries:
-                    if e.get("asset"):
-                        by_asset[e["asset"]] = e
-                if not _OPENER_STATUS_SHOWN and PRELOAD_FIRST_SYMBOL in by_asset:
-                    _OPENER_STATUS_SHOWN = True
-                    _e = by_asset[PRELOAD_FIRST_SYMBOL]
-                    _pv = _e.get("payout")
-                    _pv_str = f"{_pv}%" if isinstance(_pv, (int, float)) else "-"
-                    logmsg(f"[preload] {PRELOAD_FIRST_SYMBOL} status: "
-                           f"{'OPEN' if _e.get('open') else 'CLOSED'} | payout {_pv_str}")
-            else:
-                by_asset = {}
-            # v13.2: لا جلب شامل — الشموع تجلب عند فتح الشارت فقط (طلب المستخدم).
-            # الحفاظ فقط على بث الأصول التي يعرضها التطبيق فعلاً (ولا نلمس بث فاتح الشارت).
-            n_stream = len(ALL_STREAMING_ASSETS)
-            logmsg(f"[preload] chart-driven mode: {n_stream} asset(s) streaming — "
-                   f"candles load on chart open (one by one), no mass preload")
-            # إيقاف بث الأصول التي أُغلقت (الشموع تبقى محفوظة في DB وHST،
-            # وإذا أعيد فتحها لاحقاً يعود بثها تلقائياً في الدورة التالية).
-            if by_asset:
-                closed_syms = {a for a, e in by_asset.items() if e.get("open") is False}
-                for asset in list(ALL_STREAMING_ASSETS):
-                    if asset.api_symbol in closed_syms:
-                        try:
-                            if asset.stream_task is not None and not asset.stream_task.done():
-                                asset.stream_task.cancel()
-                        except Exception:
-                            pass
-                        asset.streaming = False
-                        try:
-                            ALL_STREAMING_ASSETS.remove(asset)
-                        except ValueError:
-                            pass
-                        _info = _PRELOADED_INFO.get(asset.api_symbol)
-                        if _info is not None:
-                            _info["closed"] = True
-                        logmsg(f"[preload] {asset.api_symbol}: CLOSED — live stream stopped "
-                               f"(candles kept in DB/HST)")
-            logmsg(f"[preload] cycle done in {time.time() - cycle_start:.0f}s — "
-                   f"{len(ALL_STREAMING_ASSETS)} assets streaming live, "
-                   f"{len(_PRELOADED_INFO)} loaded with candles")
-        except Exception as e:
-            log_exception("preload_all_assets", e)
-        await asyncio.sleep(PRELOAD_REFRESH_INTERVAL)
-
-
-async def fetch_older_batch(api_symbol: str, before_time=None, count: int = PAGINATION_BATCH):
-    """v13.2: دفعة التمرير للخلف (scroll-back) — تجلب 300 شمعة أقدم (وليس 170،
-    طلب المستخدم) من before_time عبر نفس طريقة الجلب الأصلية، ويدمجها مع
-    الشموع الموجودة في الذاكرة وHST وcandles.db مع سد أي فجوة بين الدفعة
-    والرأس الحالي. مثل المنصات الاحترافية: كلما مررت للخلف تظهر دفعة جديدة."""
-    if CLIENT is None or CLIENT.api is None or not CONNECTION_ALIVE:
-        logmsg(f"[older:{api_symbol}] no connection — batch skipped")
-        return 0
-    asset = _get_or_create_asset(api_symbol)
-    if before_time is None:
-        if asset.candles:
-            before_time = int(asset.candles[0]['time'])
-        else:
-            before_time = int(time.time()) - PRELOAD_CANDLES * PERIOD_SECONDS
-    before_time = int(before_time)
-    # v13.1: التمرير للخلف = طلب أمامي بأولوية عالية (يتقدم على التحميل المسبق
-    # ولا يختلط معه بعد الآن — البوابة الواحدة + أولوية المستخدم)
-    # v14.1: تحقق وأعد المحاولة مرة واحدة — إن جاء الرد بلا شموع أقدم من
-    # before_time فالمرجح أن لقطة حية سرقت الحدث أو الرد مكسور؛ إعادة الطلب
-    # بنفس الطريقة الأصلية (نفس CLIENT.get_candles عبر البوابة) تعطي الفرصة
-    # للرد الحقيقي أن يصل.
-    older = []
-    candles = []
-    for _attempt in range(2):
-        res = await _fetch_candle_window(api_symbol, before_time,
-                                         count * PERIOD_SECONDS + PERIOD_SECONDS,
-                                         foreground=True)
-        candles = _format_raw_candles(res)
-        older = [c for c in candles if c['time'] < before_time][-count:]
-        if older:
+def print_dashboard():
+    _tf_label = "Unknown"
+    for tf_tuple in TIMEFRAMES:
+        mt4_p, secs, label = tf_tuple[0], tf_tuple[1], tf_tuple[2]
+        if mt4_p == PERIOD and secs == PERIOD_SECONDS:
+            _tf_label = label
             break
-        # لا شموع أقدم في هذا الرد — إعادة محاولة واحدة صامتة قبل الاستسلام
-        if _attempt == 0:
-            await asyncio.sleep(0.6)
-    if not older:
-        return 0
-    merged = list(older) + list(asset.candles or [])
-    seen, unique = set(), []
-    for c in merged:
-        if c['time'] not in seen:
-            seen.add(c['time'])
-            unique.append(c)
-    unique.sort(key=lambda x: x['time'])
-    unique = unique[-ASSET_MAX_CANDLES:]
-    _apply_candles_to_asset(asset, unique)
-    # v13: تحديث معلومات التحميل المسبق ليعكس عدد الشموع بعد الدفعة الجديدة
-    _prev_info = _PRELOADED_INFO.get(api_symbol, {})
-    _PRELOADED_INFO[api_symbol] = {
-        "candles": len(asset.candles) if asset.candles else 0,
-        "at": datetime.now().strftime("%H:%M:%S"),
-        "oldest": asset.candles[0]['time'] if asset.candles else 0,
-        "closed": _prev_info.get("closed", False),
-        "last_older_batch": len(older),
-    }
-    logmsg(f"[older:{api_symbol}] +{len(older)} candles (batch {count})")
-    return len(older)
-
-
-# نقطة ربط مستقبلية للتطبيق (عند ربطه لاحقاً كما طلب المستخدم):
-#   PAGINATION_API["fetch_older_batch"]("BRLUSD_otc")  -> +300 شمعة أقدم
-#   PAGINATION_API["get_recent_ticks"]("BRLUSD_otc")   -> تيكات آخر 5 دقائق
-#   PAGINATION_API["preload_status"]()                 -> حالة التحميل المسبق
-PAGINATION_API = {
-    "fetch_older_batch": fetch_older_batch,
-    "get_recent_ticks": get_recent_ticks,
-    "preload_status": lambda: dict(_PRELOADED_INFO),
-    "tick_cache": _TICK_CACHE,
-    # v13.1 (طلب المستخدم): واجهة الجلب المرتبة — التطبيق يستدعيها بدل
-    # CLIENT.get_candles المباشر فلا يختلط أي جلب مع آخر:
-    "ensure_asset_loaded": ensure_asset_loaded,      # جلب فوري لعملة فُتحت بشارت فارغ
-    "fetch_window_raw": qx_fetch_window_raw,         # نفس get_candles عبر البوابة
-    "fetch_gate_pending": fetch_gate_foreground_pending,
-}
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# ═══════════════════ QX SERVER v14 — STRENGTHENING LAYER (طبقة التقوية) ═════
-# ════════════════════════════════════════════════════════════════════════════
-#
-# ─────────────────────────────── v14.1 (2026-11-14) ──────────────────────────
-# إصلاح طلبات المستخدم الحرفية:
-#
-#   «الرجوع الى الخلف مزال لا يجلب الشموع ... كما تفعل المنصات الحديثة مثل
-#    تريدنغ فيو»
-#   «طريقة سد الثغرات يجب ان تاخذها من هذا الكود لانني رايت صارت لا تعمل
-#    اطلاقا»
-#
-# 1) سبب «التمرير للخلف لا يجلب شموعاً» — الجذر الحقيقي (توجيه رد الجلب):
-#    الحدث candles_ready_<asset> كان يُرفع لأي رسالة تحمل شموعاً لنفس
-#    العملة — بما فيها لقطات البث الحي (instruments/update) — فتسرق اللقطة
-#    الحية الحدث قبل وصول رد history/load الحقيقي، فيأخذ انتظار الجلب شموعاً
-#    حديثة لا تنفع التمرير للخلف (تُفلتر كلها لأنها ليست أقدم من before_time)
-#    فتظهر النتيجة فارغة دائماً. الحل (بروتوكول pyquotex نفسه): رد history/load
-#    الحقيقي يرد بـ«index» مطابق للطلب — موجّه الرسائل الآن يميّز الرد الحقيقي
-#    (يحمل index → يرفع الحدث كما كان) عن اللقطة الحية (بلا index → تحديث
-#    الكاش فقط وما دام طلب history معلّقاً). send_websocket_request يسجّل كل
-#    طلب history/load صادر في _history_pending — لا تغيير على طريقة الجلب
-#    نفسها ولا على الرسائل المرسلة.
-#
-# 2) fetch_older_batch: تحقق + إعادة محاولة واحدة عند رد بلا شموع أقدم
-#    (حماية إضافية من أي لقطة متسللة)، وكاش البوابة لا يخزّن رداً None
-#    بعد الآن (كان يسمّم نفس المرساة لمدة TTL).
-#
-# 3) سد الثغرات (الطريقة الأصلية حرفياً من الكود المرجعي):
-#    علامة التجمد الدائمة (gap_state.filled=1 في candles.db) كانت تمنع
-#    fill_gap_once من العمل للأبد بعد أول سد ناجح — حتى بعد إعادة التشغيل —
-#    فتبدو «لا تعمل اطلاقاً». الآن: عند وجود التجمد يُفحص خط الشموع — سليم
-#    → خروج كما كان (لا وميض)؛ فيه فجوات حقيقية → تُرفع التجمد وتنفذ
-#    الخوارزمية الأصلية نفسها (جلب GAP_FILL_CANDLES شمعة حديثة + دمج +
-#    _fill_missing_slots). ولقطة seed_history تُسدّ بنفس _fill_missing_slots
-#    قبل العرض حتى لا تعود الفجوات من قاعدة البيانات في كل إعادة تشغيل.
-#
-# ─────────────────────────────────────────────────────────────────────────────
-#
-# v14.0 (طلب المستخدم الحرفي):
-#
-#   «من المفترض السرفر والتطبيق يصلو الى 15الف سطر لو دمجا بشكل صحيح وليس
-#    11الف سطر مزالت 4000 سطر تخص في تقويت السرفر وطريقة العمل دون انهيار
-#    الخوادم»
-#
-#   «طريقة سد الثغرات لا تغيرها عن الكود لي اريتك يجب ان تنفذ على كل عملة
-#    تم فتحها ولا يتم فقدان»
-#
-#   «ولا تيكس النوم ايضا لا يجب ان ينام مثل الكود لي اريتك»
-#
-#   «ابحث في المكتبة لي ارسلت لك سابقا في غيت هاب كيف تقوي نقاط الخوادم
-#    وتفرز الطلبات»
-#
-#   «الكود يجب ان يصل الى 15الف سطر على الاقل»
-#
-# ────────────────────────────────────────────────────────────────────────────
-# إجابة كل بند أعلاه موجودة في هذه الطبقة — والقاعدة الذهبية:
-#
-#   1) تسجيل الدخول (connect_quotex) وطريقة جلب الشموع الأصلية
-#      (CLIENT.get_candles → history/load) وطريقة سد الثغرات الأصلية
-#      (MT4Writer.fill_gap_once + _fill_missing_slots + mt4_gap_filler)
-#      لم تُمَس حرفياً — صفر تغيير على الكود الأساسي.
-#      v14 يبني فوقها فقط.
-#
-#   2) الأنماط المستخدمة هنا مأخوذة من مكتبة pyquotex التي أرسلها المستخدم
-#      على GitHub (pyquotex/ws/client.py، pyquotex/_api/_waits.py،
-#      pyquotex/qxtypes.py — ReconnectPolicy) وهي:
-#        • ReconnectPolicy: backoff أُسّي مع jitter + ساعة كسر الاتصال القديم
-#          (stale watchdog) + إعادة تشغيل الاشتراكات بعد إعادة الاتصال.
-#        • backoff_sleep:  delay = min(cap, base * 2**attempt) مع ±jitter.
-#        • WaitableSlot / SlotRegistry: انتظار موجّه بالأحداث بدل النوم
-#          (event-driven waits) — وهذا أساس «التكس لا ينام».
-#        • send() الذي يسجّل الخطأ بدل الانهيار (log instead of crash).
-#
-# ────────────────────────────────────────────────────────────────────────────
-# الوحدات التسع (الوحدات 1-3 في هذا الملف الجزء A، 4-6 في الجزء B، 7-9 في C):
-#
-#   1) V14 CORE POLICY      — سياسة إعادة الاتصال + backoff + WaitableSlot
-#                             (منقول من pyquotex كما هو).
-# ═══ (بقية الوحدات مفهرسة في الأسفل) ═══
-#   2) V14 METRICS          — عدادات + نافذة متدحرجة + سجل جلسة JSONL.
-#   3) V14 REQUEST GATE     — بوابة الطلبات ذات الأولوية «تفرز الطلبات»:
-#                             طلب واحد في كل لحظة، سلسلة لكل عملة (لا اختلاط)،
-#                             أعمار للطلبات ضد الجوع، مهل وفاة، dedupe.
-#   4) V14 ENDPOINTS        — تقوي نقاط الخوادم: مسبح نقاط + قاطع دائرة
-#                             (circuit breaker) + مسابر RTT + تقرير نطاقات.
-#   5) V14 TICK ENGINE      — «التكس لا ينام»: مضخة تيكات مُيقَظة بالأحداث
-#                             (لا sleep في مسار المعالجة) + ترقيم متسلسل
-#                             وكاشف فقدان + توزيع على المشتركين.
-#   6) V14 GAP GUARD        — طريقة سد الثغرات نفسها بلا تغيير لكن تُنفَّذ
-#                             على كل عملة تم فتحها + مراجع فقدان دوري
-#                             (لا يتم فقدان).
-#   7) V14 SUPERVISOR       — دون انهيار الخوادم: مشرف على كل حلقة خلفية
-#                             (إعادة تشغيل مع backoff) + خطاف استثناءات عام
-#                             + حصاد المهام الميتة + حارس ذاكرة/قرص + تفريغ
-#                             حمل + نبضة حياة heartbeat.
-#   8) V14 RESILIENCE       — مراقب إعادة الاتصال + إعادة تشغيل البث لكل
-#                             الأصول بعد العودة (subscription replay من
-#                             pyquotex) + ساعة كسر الاتصال القديم.
-#   9) V14 RATE LIMITER     — دلو رموز (token bucket) لكل صنف طلب + إيقاع
-#                             مهزوز بين الطلبات — خوادم كوتكس لا تُتعب.
-#
-# كل الحلقات الجديدة تُشغَّل عبر المشرف (Supervisor) في وضع الترمينال (__main__)
-# وفي وضع التطبيق (BadiChartsStudio_live يبدأها بعد الدخول بنفس الطريقة).
-# ════════════════════════════════════════════════════════════════════════════
-
-# ─── v14: استيرادات الطبقة (كلها مكتبة قياسية — لا تبعيات جديدة إطلاقاً) ───
-import asyncio as _v14_asyncio
-import collections as _v14_collections
-import errno as _v14_errno
-import gc as _v14_gc
-import heapq as _v14_heapq
-import inspect as _v14_inspect
-import itertools as _v14_itertools
-import json as _v14_json
-import os as _v14_os
-import random as _v14_random
-if os.name != "nt":                     # resource غير متاح على ويندوز — لينكس/ماك فقط
-    import resource as _v14_resource  # noqa: F401
-else:
-    _v14_resource = None               # لا يُستخدم في أي مكان آخر — استيراد ميت
-import shutil as _v14_shutil
-import socket as _v14_socket
-import statistics as _v14_statistics
-import sys as _v14_sys
-import threading as _v14_threading
-import time as _v14_time
-import traceback as _v14_traceback
-from collections import deque as _v14_deque
-from dataclasses import dataclass as _v14_dataclass
-from dataclasses import field as _v14_field
-from enum import IntEnum as _v14_IntEnum
-from typing import Any as _v14_Any
-from typing import Awaitable as _v14_Awaitable
-from typing import Callable as _v14_Callable
-from typing import Dict as _v14_Dict
-from typing import List as _v14_List
-from typing import Optional as _v14_Optional
-from typing import Set as _v14_Set
-from typing import Tuple as _v14_Tuple
-
-_V14_VERSION = "14.4"
-_V14_STARTED_AT = time.time()
-
-
-def _v14_base_dir() -> str:
-    """المجلد الأساس لملفات v14 (سجل الجلسة، النبضة، تقرير النقاط).
-
-    القاعدة: بجانب ملف الخادم نفسه (__file__) — يعمل صحيحاً سواء شُغّل
-    الخادم من الترمينال أو استورد من التطبيق؛ ولو تعذر تحديده: مجلد العمل.
-    """
-    try:
-        base = _v14_os.path.dirname(
-            _v14_os.path.abspath(globals().get("__file__") or ""))
-        if base and _v14_os.path.isdir(base):
-            return base
-    except Exception:
-        pass
-    try:
-        return _v14_os.getcwd()
-    except Exception:
-        return "."
-
-try:
-    # ملف قفل يمنع تثبيت خطافات v14 مرتين إذا وُردد الموديول مرتين
-    _V14_HOOKS_INSTALLED = False
-except Exception:
-    pass
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# الوحدة 1 — V14 CORE POLICY (منقولة من مكتبة pyquotex المرسلة)
-# ════════════════════════════════════════════════════════════════════════════
-# المصدر: pyquotex/qxtypes.py (ReconnectPolicy) + pyquotex/_api/_waits.py
-# (backoff_sleep / wait_until / WaitableSlot / SlotRegistry) — نفس الأنماط
-# حرفياً مع تسمية v14 حتى لا تتصادم مع أي شيء في الكود الأساسي.
-# ════════════════════════════════════════════════════════════════════════════
-
-class V14ReconnectPolicy:
-    """منقول من pyquotex (qxtypes.ReconnectPolicy).
-
-    يضبط سلوك إعادة الاتصال التلقائي لكل مكونات v14:
-
-    enabled:
-        المفتاح الرئيسي. عند False تتصرف كل الحلقات بلا إعادة تشغيل.
-    max_attempts:
-        التوقف بعد هذا العدد من المحاولات الفاشلة المتتالية. 0 = محاولات
-        لا نهائية (الموصى به لخادم يعمل شهوراً — كما يقول مستند pyquotex).
-    base_delay / max_delay / jitter:
-        معاملات الـ backoff الأُسّي. التأخير = base_delay * 2**attempt
-        مقيّد بـ max_delay مع jitter نسبة ±jitter (0.1 = ±10%).
-    stale_timeout:
-        ثوانٍ بدون أي رسالة واردة قبل اعتبار الاتصال قديماً وإعادة تدويره.
-        0 يعطل الساعة (الاعتماد على ping/pong فقط).
-    """
-
-    __slots__ = ("enabled", "max_attempts", "base_delay", "max_delay",
-                 "jitter", "stale_timeout")
-
-    def __init__(self,
-                 enabled: bool = True,
-                 max_attempts: int = 0,
-                 base_delay: float = 1.0,
-                 max_delay: float = 30.0,
-                 jitter: float = 0.1,
-                 stale_timeout: float = 60.0) -> None:
-        self.enabled = enabled
-        self.max_attempts = max_attempts
-        self.base_delay = base_delay
-        self.max_delay = max_delay
-        self.jitter = jitter
-        self.stale_timeout = stale_timeout
-
-    def delay_for(self, attempt: int) -> float:
-        """نفس صيغة pyquotex backoff_sleep: min(cap, base*2**attempt)*jitter."""
-        return v14_backoff_delay(attempt, base=self.base_delay,
-                                 cap=self.max_delay, jitter=self.jitter)
-
-    def as_dict(self) -> dict:
-        return {
-            "enabled": self.enabled,
-            "max_attempts": self.max_attempts,
-            "base_delay": self.base_delay,
-            "max_delay": self.max_delay,
-            "jitter": self.jitter,
-            "stale_timeout": self.stale_timeout,
-        }
-
-
-# السياسة الافتراضية للخادم — قيم pyquotex نفسها (موصى بها للبوتات طويلة العمر)
-V14_POLICY = V14ReconnectPolicy(
-    enabled=True,
-    max_attempts=0,        # لا استسلام أبداً — خادم يجب ألا ينهار
-    base_delay=1.0,
-    max_delay=30.0,
-    jitter=0.1,
-    stale_timeout=60.0,
-)
-
-# سياسة أسرع للحلقات القصيرة (فحوصات/مراقبات) — إعادة أسرع وبلا استسلام
-V14_POLICY_FAST = V14ReconnectPolicy(
-    enabled=True,
-    max_attempts=0,
-    base_delay=0.5,
-    max_delay=10.0,
-    jitter=0.15,
-    stale_timeout=30.0,
-)
-
-
-def v14_backoff_delay(attempt: int, *,
-                      base: float = 1.0,
-                      cap: float = 30.0,
-                      jitter: float = 0.1) -> float:
-    """منقول من pyquotex/_api/_waits.py::backoff_sleep (نسخة متزامنة).
-
-    تأخير أُسّي مع jitter: delay = min(cap, base * 2**attempt) ثم يُضرب في
-    (1 ± jitter). «attempt» يبدأ من صفر (0, 1, 2, ...).
-
-    يستخدم في كل حلقات إعادة المحاولة في v14 حتى لا تضرب الخوادم العليا
-    بإيقاع ثابت ميكانيكي (نمط pyquotex نفسه).
-    """
-    try:
-        attempt = max(0, int(attempt))
-    except Exception:
-        attempt = 0
-    delay = min(float(cap), float(base) * (2 ** attempt))
-    if jitter and jitter > 0:
-        delay = delay * (1.0 + _v14_random.uniform(-abs(jitter), abs(jitter)))
-    return max(0.0, delay)
-
-
-async def v14_backoff_sleep(attempt: int, *,
-                            base: float = 1.0,
-                            cap: float = 30.0,
-                            jitter: float = 0.1) -> None:
-    """منقول من pyquotex/_api/_waits.py::backoff_sleep — نسخة async كما هي."""
-    await _v14_asyncio.sleep(
-        v14_backoff_delay(attempt, base=base, cap=cap, jitter=jitter))
-
-
-async def v14_wait_until(predicate: Callable[[], bool], *,
-                         timeout: float = 10.0,
-                         poll_interval: float = 0.05) -> None:
-    """منقول من pyquotex/_api/_waits.py::wait_until.
-
-    يفحص predicate() حتى يصبح صحيحاً أو يرفع asyncio.TimeoutError.
-    يُستعمل فقط حين لا يمكن إشارة الحالة المطلوبة من معالج الرسائل.
-    """
-    async def _loop() -> None:
-        while not predicate():
-            await _v14_asyncio.sleep(poll_interval)
-
-    await _v14_asyncio.wait_for(_loop(), timeout=timeout)
-
-
-class WaitableSlot:
-    """منقول من pyquotex/_api/_waits.py::WaitableSlot.
-
-    خانة انتظار بمنتج/مستهلك:
-      - المستهلك: await slot.wait(timeout)
-      - المنتج (معالج الرسائل عادة): slot.set(value)
-    هذا هو البديل الموجّه بالأحداث عن asyncio.sleep polling — وهو أساس
-    مبدأ «التكس لا ينام»: يُعالَج التكس لحظة وصوله لا عند نوم مؤقت.
-
-    تحسين v14: set() آمن من أي خيط (آمن التوليد عبر call_soon_threadsafe)
-    لأن الخادم يخلط خيط UI (التطبيق) وحلقة asyncio.
-    """
-
-    __slots__ = ("_value", "_event", "_loop")
-
-    def __init__(self, loop: Optional[Any] = None) -> None:
-        self._value = None
-        self._loop = loop
-        try:
-            self._event = _v14_asyncio.Event()
-        except Exception:
-            self._event = None
-
-    def _bind_loop(self, loop) -> None:
-        if self._loop is None and loop is not None:
-            self._loop = loop
-            try:
-                self._event = _v14_asyncio.Event()
-            except Exception:
-                pass
-
-    def set(self, value) -> None:
-        """يخزن القيمة ويوقظ كل المنتظرين. يرفع ValueError لو القيمة None —
-        استعمل clear() لتصفير الخانة (نفس عقد pyquotex)."""
-        if value is None:
-            raise ValueError("WaitableSlot.set() does not accept None; "
-                             "use clear() to reset")
-        self._value = value
-        ev = self._event
-        if ev is None:
-            return
-        try:
-            loop = ev._loop  # noqa: SLF001 — الطريق الوحيد الآمن للتحقق
-        except Exception:
-            loop = self._loop
-        current = None
-        try:
-            current = _v14_asyncio.get_running_loop()
-        except Exception:
-            current = None
-        try:
-            if loop is not None and current is not None and loop is not current:
-                # مناداة من خيط آخر — أرسل التعيين إلى حلقة الحدث نفسها
-                loop.call_soon_threadsafe(ev.set)
-            else:
-                ev.set()
-        except Exception:
-            try:
-                ev.set()
-            except Exception:
-                pass
-
-    def clear(self) -> None:
-        self._value = None
-        try:
-            self._event.clear()
-        except Exception:
-            pass
-
-    def is_set(self) -> bool:
-        try:
-            return self._event.is_set()
-        except Exception:
-            return False
-
-    async def wait(self, timeout: float = 10.0):
-        """يحجب حتى set() أو يرفع asyncio.TimeoutError عند انتهاء المهلة."""
-        await _v14_asyncio.wait_for(self._event.wait(), timeout=timeout)
-        return self._value
-
-
-class SlotRegistry:
-    """منقول من pyquotex/_api/_waits.py::SlotRegistry.
-
-    حاوية خانات انتظار مسماة ومفتاحية تستعملها مكونات v14:
-      - المسماة: أحداث لمرة واحدة (اتصال جاهز، إعادة اتصال اكتملت ...).
-      - المفتاحية: تُنشأ عند الطلب لكل (asset) أو (request_id) وتحرر بعد
-        قراءتها — نفس عقد pyquotex تماماً.
-    """
-
-    def __init__(self) -> None:
-        # خانات مسماة (أحداث دورة حياة الخادم)
-        self.connection_ready: WaitableSlot = WaitableSlot()
-        self.reconnect_done: WaitableSlot = WaitableSlot()
-        self.gate_drained: WaitableSlot = WaitableSlot()
-        self.opener_ready: WaitableSlot = WaitableSlot()
-
-        # خانات مفتاحية — لكل عملة
-        self._window_ready: Dict[str, WaitableSlot] = {}
-        self._gap_done: Dict[str, WaitableSlot] = {}
-        self._stream_ready: Dict[str, WaitableSlot] = {}
-
-    def window_ready(self, api_symbol: str) -> WaitableSlot:
-        slot = self._window_ready.get(api_symbol)
-        if slot is None:
-            slot = WaitableSlot()
-            self._window_ready[api_symbol] = slot
-        return slot
-
-    def release_window_ready(self, api_symbol: str) -> None:
-        self._window_ready.pop(api_symbol, None)
-
-    def gap_done(self, api_symbol: str) -> WaitableSlot:
-        slot = self._gap_done.get(api_symbol)
-        if slot is None:
-            slot = WaitableSlot()
-            self._gap_done[api_symbol] = slot
-        return slot
-
-    def release_gap_done(self, api_symbol: str) -> None:
-        self._gap_done.pop(api_symbol, None)
-
-    def stream_ready(self, api_symbol: str) -> WaitableSlot:
-        slot = self._stream_ready.get(api_symbol)
-        if slot is None:
-            slot = WaitableSlot()
-            self._stream_ready[api_symbol] = slot
-        return slot
-
-    def release_stream_ready(self, api_symbol: str) -> None:
-        self._stream_ready.pop(api_symbol, None)
-
-    def stats(self) -> dict:
-        return {
-            "named": 3,
-            "window_ready": len(self._window_ready),
-            "gap_done": len(self._gap_done),
-            "stream_ready": len(self._stream_ready),
-        }
-
-
-# السجل العام — كل مكونات v14 تستعمله
-V14_SLOTS = SlotRegistry()
-
-
-class V14Retryer:
-    """مُعيد محاولة عام بنمط pyquotex run_forever.
-
-    من pyquotex/ws/client.py::run_forever:
-      attempt = 0  # النجاح يصفّر العداد
-      ...
-      if self.policy.max_attempts and attempt >= self.policy.max_attempts:
-          give up
-      await backoff_sleep(attempt, ...)
-      attempt += 1
-
-    V14Retryer يلف أي دالة async بهذا النمط مع تصنيف الأخطاء:
-      - أخطاء عابرة (شبكة/مهلة/كسر اتصال) → إعادة محاولة بالسياسة.
-      - أخطاء قاتلة (رفض منطقي، بيانات سيئة) → فشل فوري بلا إعادة.
-
-    لا يلمس أي مسار رسمي — الكود الأساسي كما هو؛ هذا المُعيد تستعمله
-    مكونات v14 فقط.
-    """
-
-    TRANSIENT_MARKERS = (
-        "timeout", "timed out", "connection", "disconnect", "reset",
-        "closed", "broken", "socket", "network", "temporarily",
-        "unavailable", "busy", "ssl", "websocket", "handshake", "eof",
-    )
-    FATAL_MARKERS = (
-        "invalid", "unauthorized", "forbidden", "bad request", "wrong",
-        "not found", "denied", "syntax", "keyerror", "valueerror",
-    )
-
-    def __init__(self, policy: Optional[V14ReconnectPolicy] = None,
-                 label: str = "retryer") -> None:
-        self.policy = policy or V14_POLICY
-        self.label = label
-        self.attempts = 0
-        self.last_error = None
-        self.last_error_at = 0.0
-
-    @classmethod
-    def is_transient(cls, exc: Exception) -> bool:
-        """تصنيف الخطأ: عابر (يعاد) أم قاتل (يفشل فوراً)."""
-        s = str(exc).lower()
-        if any(m in s for m in cls.FATAL_MARKERS):
-            return False
-        if any(m in s for m in cls.TRANSIENT_MARKERS):
-            return True
-        # الأخطاء المجهولة تعتبر عابرة افتراضياً (خادم لا يستسلم)
-        return True
-
-    def reset(self) -> None:
-        self.attempts = 0
-        self.last_error = None
-
-    async def run(self, fn: Callable[[], _v14_Awaitable], *,
-                  give_up_after: Optional[float] = None):
-        """يشغّل fn() حتى النجاح أو العتبات.
-
-        give_up_after: مهلة كلية اختيارية بالثواني (منذ البداية) — لو انقضت
-        قبل النجاح يرفع آخر خطأ. None = بلا مهلة كلية (السياسة تحكم).
-        """
-        t0 = time.monotonic()
-        while True:
-            try:
-                result = await fn()
-                # النجاح يصفّر العداد — نمط pyquotex run_forever حرفياً
-                self.attempts = 0
-                return result
-            except _v14_asyncio.CancelledError:
-                raise
-            except Exception as e:
-                self.last_error = e
-                self.last_error_at = time.time()
-                if not self.policy.enabled:
-                    raise
-                if not self.is_transient(e):
-                    raise
-                if (self.policy.max_attempts
-                        and self.attempts >= self.policy.max_attempts):
-                    raise
-                if give_up_after is not None and \
-                        (time.monotonic() - t0) >= give_up_after:
-                    raise
-                await v14_backoff_sleep(
-                    self.attempts,
-                    base=self.policy.base_delay,
-                    cap=self.policy.max_delay,
-                    jitter=self.policy.jitter,
-                )
-                self.attempts += 1
-
-
-class V14SupervisedFlag:
-    """علم مشترك آمن بين الخيوط تستعمله حلقات v14 للتنسيق (تفريغ حمل، إيقاف
-    مؤقت، إشارات ضغط) — بديل آمن عن المتغيرات العالمية المجردة."""
-
-    __slots__ = ("_event", "_value")
-
-    def __init__(self, initial: bool = False) -> None:
-        self._value = initial
-        self._event = _v14_asyncio.Event()
-        if initial:
-            self._event.set()
-
-    def set(self, value: bool = True) -> None:
-        self._value = bool(value)
-        try:
-            if self._value:
-                self._event.set()
-            else:
-                self._event.clear()
-        except Exception:
-            pass
-
-    def get(self) -> bool:
-        return self._value
-
-    async def wait_off(self, timeout: Optional[float] = None) -> None:
-        """ينتظر حتى يُسقط العلم (قيمة False)."""
-        ev = self._event
-        if ev is None:
-            return
-        if timeout is None:
-            await ev.wait()
-        else:
-            try:
-                await _v14_asyncio.wait_for(ev.wait(), timeout=timeout)
-            except _v14_asyncio.TimeoutError:
-                pass
-
-
-# أعلام التنسيق العامة لطبقة v14
-V14_PAUSE_PRELOAD = V14SupervisedFlag(False)   # تفريغ الحمل: أوقف الجلب الخلفي فقط
-V14_SHED_PRESSURE = V14SupervisedFlag(False)   # حالة ضغط RED
-V14_RECONNECT_HINT = V14SupervisedFlag(False)  # توصية قاطع الدائرة بإعادة اتصال
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# الوحدة 2 — V14 METRICS (عدادات + نافذة متدحرجة + سجل جلسة)
-# ════════════════════════════════════════════════════════════════════════════
-# لماذا؟ «دون انهيار الخوادم» يحتاج عيناً: لو انهارت حلقة أو تجمّدت البوابة
-# أو فقدت تيكات — يجب أن يظهر في لوحة الترمينال وسجل الجلسة فوراً، لا أن
-# نكتشفه من شارت فارغ عند المستخدم.
-# ════════════════════════════════════════════════════════════════════════════
-
-class V14RollingRate:
-    """نافذة متدحرجة لحساب معدل (تيكات/ثانية، رسائل/ثانية ...) — deque
-    بطوابع زمنية مع حذف الأقدم من رأس الصف. آمنة على حلقة واحدة + قفل خفيف."""
-
-    __slots__ = ("_dq", "_window", "_lock")
-
-    def __init__(self, window_seconds: float = 30.0,
-                 maxlen: int = 20000) -> None:
-        self._dq = _v14_deque(maxlen=maxlen)
-        self._window = float(window_seconds)
-        self._lock = _v14_threading.Lock()
-
-    def mark(self, ts: Optional[float] = None) -> None:
-        ts = time.monotonic() if ts is None else ts
-        with self._lock:
-            self._dq.append(ts)
-
-    def rate(self, window: Optional[float] = None) -> float:
-        w = self._window if window is None else float(window)
-        cutoff = time.monotonic() - w
-        with self._lock:
-            while self._dq and self._dq[0] < cutoff:
-                self._dq.popleft()
-            return len(self._dq) / max(w, 1e-6)
-
-    def count(self, window: Optional[float] = None) -> int:
-        w = self._window if window is None else float(window)
-        cutoff = time.monotonic() - w
-        with self._lock:
-            while self._dq and self._dq[0] < cutoff:
-                self._dq.popleft()
-            return len(self._dq)
-
-    def __len__(self) -> int:
-        with self._lock:
-            return len(self._dq)
-
-
-class V14Metrics:
-    """سجل مقاييس مركزي لطبقة v14.
-
-    أنواع القياس:
-      - counters: عدادات تراكمية فقط تزيد (طلبات، تيكات، إعادة اتصال...)
-      - gauges:   قياسات لحظية تُحدَّث (عمق البوابة، الذاكرة، الحالة...)
-      - hists:    توزيع زمني مبسّط بقيم ملخصة (انتظار البوابة، تنفيذ الجلب)
-
-    snapshot() يعيد قاموساً نظيفاً للتقارير و heartbeat.
-    format_report() يطبع كتلة مرتبة في الترمينال.
-    """
-
-    def __init__(self) -> None:
-        self._lock = _v14_threading.RLock()
-        self._counters: _v14_Dict[str, float] = {}
-        self._gauges: _v14_Dict[str, float] = {}
-        self._hists: _v14_Dict[str, _v14_List[float]] = {}
-        self.started_at = time.time()
-
-    # ---------- العدادات ----------
-    def inc(self, name: str, amount: float = 1.0) -> None:
-        with self._lock:
-            self._counters[name] = self._counters.get(name, 0.0) + amount
-
-    def counter(self, name: str) -> float:
-        with self._lock:
-            return self._counters.get(name, 0.0)
-
-    # ---------- القياسات اللحظية ----------
-    def gauge(self, name: str, value: float) -> None:
-        with self._lock:
-            self._gauges[name] = float(value)
-
-    def get_gauge(self, name: str) -> float:
-        with self._lock:
-            return self._gauges.get(name, 0.0)
-
-    # ---------- التوزيعات ----------
-    def observe(self, name: str, value: float, keep: int = 512) -> None:
-        with self._lock:
-            h = self._hists.get(name)
-            if h is None:
-                h = []
-                self._hists[name] = h
-            h.append(float(value))
-            if len(h) > keep:
-                del h[: len(h) - keep]
-
-    def hist_summary(self, name: str) -> Optional[dict]:
-        with self._lock:
-            h = self._hists.get(name)
-            if not h:
-                return None
-            vals = sorted(h)
-            n = len(vals)
-            return {
-                "n": n,
-                "avg": sum(vals) / n,
-                "p50": vals[n // 2],
-                "p90": vals[min(n - 1, int(n * 0.9))],
-                "p99": vals[min(n - 1, int(n * 0.99))],
-                "max": vals[-1],
-            }
-
-    # ---------- لقطة كاملة ----------
-    def snapshot(self) -> dict:
-        with self._lock:
-            return {
-                "uptime_s": round(time.time() - self.started_at, 1),
-                "counters": dict(self._counters),
-                "gauges": {k: round(v, 3) for k, v in self._gauges.items()},
-                "hists": {k: self._hist_summary_unlocked(v)
-                          for k, v in self._hists.items() if v},
-            }
-
-    def _hist_summary_unlocked(self, vals: _v14_List[float]) -> Optional[dict]:
-        if not vals:
-            return None
-        svals = sorted(vals)
-        n = len(svals)
-        return {
-            "n": n,
-            "avg": round(sum(svals) / n, 4),
-            "p90": round(svals[min(n - 1, int(n * 0.9))], 4),
-            "max": round(svals[-1], 4),
-        }
-
-    # ---------- تقرير الترمينال ----------
-    def format_report(self, title: str = "V14 METRICS") -> str:
-        snap = self.snapshot()
-        lines = [
-            f"{Colors.CYAN}┌─ {title} "
-            f"(uptime {snap['uptime_s']:.0f}s){Colors.RESET}"
-        ]
-        counters = snap["counters"]
-        if counters:
-            lines.append(f"{Colors.BOLD}│ counters:{Colors.RESET}")
-            width = max(len(k) for k in counters)
-            for k in sorted(counters):
-                lines.append(f"│   {k:<{width}}  {counters[k]:,.0f}")
-        gauges = snap["gauges"]
-        if gauges:
-            lines.append(f"{Colors.BOLD}│ gauges:{Colors.RESET}")
-            width = max(len(k) for k in gauges)
-            for k in sorted(gauges):
-                lines.append(f"│   {k:<{width}}  {gauges[k]}")
-        hists = snap["hists"]
-        if hists:
-            lines.append(f"{Colors.BOLD}│ timings (avg/p90/max):{Colors.RESET}")
-            width = max(len(k) for k in hists)
-            for k in sorted(hists):
-                h = hists[k]
-                if h:
-                    lines.append(
-                        f"│   {k:<{width}}  {h['avg']:.3f} / "
-                        f"{h['p90']:.3f} / {h['max']:.3f} (n={h['n']})")
-        lines.append(f"{Colors.CYAN}└{'─' * 50}{Colors.RESET}")
-        return "\n".join(lines)
-
-
-# السجل العام للمقاييس
-V14_METRICS = V14Metrics()
-
-
-class V14SessionJournal:
-    """سجل جلسة JSONL بحلقة (ring) — يوثّق أحداث دورة الحياة:
-    اتصال، كسر، إعادة اتصال، سد ثغرات، إعادة تشغيل حلقة، ضغط، تفريغ حمل.
-
-    سياسة القرص الصارمة (نفس فلسفة التيكات في v13):
-      - حد أقصى للملف V14_JOURNAL_MAX_BYTES (افتراضي 2MB).
-      - عند التجاوز: دوران لملف .old واحد فقط (لا ينمو بلا حدود أبداً).
-      - لا يُكتب أي شيء عند فشل الكتابة بصمت تام — السجل لا يُسقط الخادم.
-    """
-
-    def __init__(self, path: str = "qx_server_v14_journal.jsonl",
-                 max_bytes: int = 2 * 1024 * 1024) -> None:
-        self.path = path
-        self.max_bytes = int(max_bytes)
-        self._lock = _v14_threading.Lock()
-        self._seq = 0
-        self._dropped = 0
-        try:
-            self.path = _v14_os.path.join(_v14_base_dir(),
-                                          _v14_os.path.basename(path))
-        except Exception:
-            pass
-
-    def record(self, event: str, **fields) -> None:
-        """يكتب سطر JSONL واحداً — آمن من أي خيط، لا يرفع أبداً."""
-        try:
-            now = time.time()
-            with self._lock:
-                self._seq += 1
-                rec = {
-                    "t": round(now, 3),
-                    "iso": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
-                    "seq": self._seq,
-                    "event": event,
-                }
-                if fields:
-                    rec.update(fields)
-                line = _v14_json.dumps(rec, ensure_ascii=False,
-                                       separators=(",", ":")) + "\n"
-                try:
-                    if _v14_os.path.exists(self.path) and \
-                            _v14_os.path.getsize(self.path) > self.max_bytes:
-                        old = self.path + ".old"
-                        try:
-                            if _v14_os.path.exists(old):
-                                _v14_os.remove(old)
-                        except Exception:
-                            pass
-                        try:
-                            _v14_os.replace(self.path, old)
-                        except Exception:
-                            pass
-                    with open(self.path, "a", encoding="utf-8") as f:
-                        f.write(line)
-                except Exception:
-                    self._dropped += 1
-        except Exception:
-            pass
-
-    def tail(self, n: int = 30) -> _v14_List[dict]:
-        """آخر n سجل — للتقارير والفحص اليدوي."""
-        out: _v14_List[dict] = []
-        try:
-            with self._lock:
-                if not _v14_os.path.exists(self.path):
-                    return out
-                with open(self.path, "r", encoding="utf-8") as f:
-                    lines = f.readlines()[-int(n):]
-                for ln in lines:
-                    try:
-                        out.append(_v14_json.loads(ln))
-                    except Exception:
-                        continue
-        except Exception:
-            pass
-        return out
-
-    def info(self) -> dict:
-        size = 0
-        try:
-            size = _v14_os.path.getsize(self.path) \
-                if _v14_os.path.exists(self.path) else 0
-        except Exception:
-            pass
-        return {"path": self.path, "bytes": size,
-                "seq": self._seq, "dropped": self._dropped}
-
-
-# سجل الجلسة العام
-V14_JOURNAL = V14SessionJournal()
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# الوحدة 3 — V14 REQUEST GATE (بوابة الطلبات ذات الأولوية — «تفرز الطلبات»)
-# ════════════════════════════════════════════════════════════════════════════
-# هذا هو الحل الجذري لمشكلة المستخدم:
-#   «اضنها بسبب تعليق والاختلاط بين عمليات الجلب يختلط بين اكمال كل تلك
-#    العملات وجلب جلب عملة نريد رجوع للخلف يجب ان تجد حلا لمشكل السرفر»
-#
-# البوابة الأصلية في v13 (qx_fetch_window_raw) تضمن «طلب واحد في كل لحظة»
-# لكن لا تفرز الأولويات ولا تمنع اختلاط سلاسل العمل الواحدة. v14 يبني فوقها:
-#
-#   1) طابور أولوية كومة (heapq): صنف قبل أخر — فتح شارت عملة (OPENING)
-#      يسبق سد الثغرات (GAP_FILL) يسبق التمرير للخلف (SCROLL_BACK) يسبق
-#      الخلفية (PRELOAD) يسبق الفحوصات (HEALTH/MAINTENANCE).
-#   2) سلسلة لكل عملة (per-asset chain): طلبات العملة الواحدة تُنفَّذ
-#      بترتيب وصولها واحد تلو الآخر — لا يختلط أبداً «إكمال العملات» مع
-#      «جلب دفعة أقدم لنفس العملة».
-#   3) أعمار ضد الجوع (aging): كل 10 ثوانٍ انتظار ترتفع أولوية الطلب مستوى
-#      واحد (بلا تجاوز OPENING) — طلب الخلفية لا يموت جوعاً لو تأخر.
-#   4) مهل وفاة (deadline): الطلب الذي تجاوز مهلته يفشل سريعاً بدل أن
-#      يعلّق السلسلة كلها — لا «تعليق» بين عمليات الجلب.
-#   5) dedupe: نفس النافذة (عملة/فريم/نهاية) أثناء تعليقها يعيد نفس
-#      النتيجة بلا طلب مكرر يختلط مع السابق.
-#   6) طلب واحد فعلي في كل لحظة على مستوى الخادم كله (عامل واحد).
-#
-# وطريقة الجلب نفسها كما هي حرفياً: العامل يستدعي qx_fetch_window_raw()
-# (البوابة الرسمية التي تدعو CLIENT.get_candles → history/load) — صفر
-# تغيير على طريقة الجلب الأصلية.
-# ════════════════════════════════════════════════════════════════════════════
-
-class RequestPriority(_v14_IntEnum):
-    """أصناف الطلبات بترتيب الخدمة (الأقل رقم = يخدم أولاً)."""
-    OPENING = 0        # عملة فُتح شارتها للتو — المستخدم ينتظر الشارت الآن
-    GAP_FILL = 1       # سد ثغرات عملة مفتوحة (طريقة أصلية بلا تغيير)
-    SCROLL_BACK = 2    # دفعة تمرير للخلف (300 شمعة أقدم)
-    PRELOAD = 3        # جلب خلفي عادي
-    HEALTH = 4         # فحوصات صحة/مسابر
-    MAINTENANCE = 5    # صيانة دورية
-
-    @classmethod
-    def name_of(cls, value: int) -> str:
-        try:
-            return cls(int(value)).name
-        except Exception:
-            return "UNKNOWN"
-
-
-# معدلات دلو الرموز لكل صنف (طلبات/ثانية) — تمنع إرهاق خوادم كوتكس العليا
-V14_BUCKET_RATES: _v14_Dict[int, Tuple[float, float]] = {
-    # priority: (rate/s, capacity)
-    RequestPriority.OPENING: (3.0, 4.0),
-    RequestPriority.GAP_FILL: (1.0, 2.0),
-    RequestPriority.SCROLL_BACK: (1.2, 2.0),
-    RequestPriority.PRELOAD: (0.8, 1.5),
-    RequestPriority.HEALTH: (0.5, 1.0),
-    RequestPriority.MAINTENANCE: (0.5, 1.0),
-}
-
-# أقل فاصل زمني بين طلبين متتاليين للخادم العليا (إيقاع مهزوز)
-V14_PACER_MIN_INTERVAL = 0.05
-V14_PACER_JITTER = 0.03
-
-# عمر الانتظار الذي يرفع الأولوية مستوى (أعمار ضد الجوع)
-V14_AGING_STEP_SECONDS = 10.0
-
-
-class V14TokenBucket:
-    """دلو رموز كلاسيكي — يحدّ معدل الطلبات لكل صنف.
-
-    rate:    الرموز المضافة في الثانية.
-    capacity: حجم الدلو (سماحية انفجار قصيرة).
-    acquire(): ينتظر حتى يتوفر رمز — لا يكسر أبداً، فقط يُبطئ بلطف.
-    """
-
-    def __init__(self, rate: float, capacity: float) -> None:
-        self.rate = float(rate)
-        self.capacity = float(capacity)
-        self._tokens = float(capacity)
-        self._last = time.monotonic()
-        self._lock = _v14_threading.Lock()
-
-    def _refill(self) -> None:
-        now = time.monotonic()
-        elapsed = max(0.0, now - self._last)
-        self._tokens = min(self.capacity,
-                           self._tokens + elapsed * self.rate)
-        self._last = now
-
-    def try_acquire(self) -> bool:
-        with self._lock:
-            self._refill()
-            if self._tokens >= 1.0:
-                self._tokens -= 1.0
-                return True
-            return False
-
-    async def acquire(self, timeout: float = 30.0) -> None:
-        """ينتظر رمزاً مع مهلة أمان — بعد المهلة يمرر إجبارياً (خادم لا يعلق)."""
-        t0 = time.monotonic()
-        while True:
-            if self.try_acquire():
-                return
-            if (time.monotonic() - t0) >= timeout:
-                # مهلة الدلو: نمرر (خادم لا يعلق بسبب دلو) — عدّاد فقط
-                V14_METRICS.inc("v14.bucket.timeout_pass")
-                return
-            await _v14_asyncio.sleep(0.02)
-
-    def state(self) -> dict:
-        with self._lock:
-            self._refill()
-            return {"rate": self.rate, "capacity": self.capacity,
-                    "tokens": round(self._tokens, 2)}
-
-
-class V14UpstreamPacer:
-    """إيقاع مهزوز بين الطلبات المتتالية للخادم العليا.
-
-    v8.3 في الكود المرجعي علّمنا: «the server was throttling us after a few
-    assets because we hammered it at 30 req/s». الطلبات بدون إيقاع تُتعب
-    الخوادم العليا → throttling → فجوات وشومع مفقودة. الـ pacer يفرض فاصلاً
-    أدنى مهزوزاً (0.05s ± 0.03) بين أي طلبين — الخوادم لا تُتعب.
-    """
-
-    def __init__(self, min_interval: float = V14_PACER_MIN_INTERVAL,
-                 jitter: float = V14_PACER_JITTER) -> None:
-        self.min_interval = float(min_interval)
-        self.jitter = float(jitter)
-        self._last = 0.0
-        self._lock = _v14_threading.Lock()
-
-    async def wait(self) -> None:
-        with self._lock:
-            now = time.monotonic()
-            wait_for = self.min_interval - (now - self._last)
-        if wait_for > 0:
-            jittered = wait_for + _v14_random.uniform(0.0, max(0.0, self.jitter))
-            if jittered > 0:
-                await _v14_asyncio.sleep(jittered)
-        with self._lock:
-            self._last = time.monotonic()
-
-
-@_v14_dataclass(order=True)
-class V14FetchRequest:
-    """طلب جلب واحد داخل بوابة v14.
-
-    الترتيب الطبيعي للفئة (order=True) يستخدم فقط داخل الكومة بعد أن
-    يحسب العامل effective_priority — لذلك sort_index يحمل الأولوية المؤقتة.
-    """
-    sort_index: int = 0                      # الأولوية الفعلية لحظة الخدمة
-    seq: int = 0                             # تسلسل الوصول (كسر تعادل FIFO)
-    api_symbol: str = ""
-    end_time: int = 0
-    seconds: int = 0
-    period: int = 0
-    priority: int = int(RequestPriority.PRELOAD)
-    label: str = ""
-    foreground: bool = False
-    timeout: float = 25.0
-    enqueued_at: float = _v14_field(default_factory=time.monotonic)
-    deadline: float = 0.0                    # monotonic — 0 = بلا مهلة وفاة
-    attempts: int = 0
-    future: _v14_Any = None                  # asyncio.Future (حلقة واحدة)
-    dedupe_key: tuple = ()
-
-    def describe(self) -> str:
-        return (f"#{self.seq} [{RequestPriority.name_of(self.priority)}] "
-                f"{self.api_symbol} win={self.seconds}s "
-                f"per={self.period}s label={self.label or '-'}")
-
-
-class V14RequestGate:
-    """بوابة الطلبات ذات الأولوية — قلب «تفرز الطلبات» في v14.
-
-    خصائص الضمان:
-      - عامل واحد (worker واحد): طلب واحد فعلي في كل لحظة.
-      - سلسلة لكل عملة: طلبات نفس العملة متسلسلة بلا اختلاط.
-      - أعمار ضد الجوع + مهل وفاة + dedupe + دلو رموز + إيقاع مهزوز.
-      - لا ترفع أبداً خارج future الطلب — الخادم لا ينهار من طلب سيئ.
-
-    العامل يستدعي qx_fetch_window_raw الرسمية — طريقة الجلب الأصلية
-    لم تُمَس (نفس CLIENT.get_candles ونفس رسالة history/load).
-    """
-
-    def __init__(self) -> None:
-        self._heap: _v14_List[_v14_List] = []       # [eff_priority, seq, req]
-        self._counter = _v14_itertools.count(1)
-        self._wake = _v14_asyncio.Event()
-        self._bound_loop: _v14_Any = None          # v14.2: الحلقة المرتبة بالبوابة
-        self._worker_task: _v14_Any = None
-        self._pending: _v14_Dict[tuple, _v14_Any] = {}   # dedupe key -> future
-        self._asset_chains: _v14_Dict[str, _v14_asyncio.Lock] = {}
-        self._buckets: _v14_Dict[int, V14TokenBucket] = {}
-        for prio, (rate, cap) in V14_BUCKET_RATES.items():
-            self._buckets[int(prio)] = V14TokenBucket(rate, cap)
-        self._pacer = V14UpstreamPacer()
-        self._running = False
-        self._stats_lock = _v14_threading.Lock()
-        self._submitted = 0
-        self._deduped = 0
-        self._expired = 0
-        self._executed = 0
-        self._failed = 0
-        self._cancelled = 0
-        # عائلات الانتظار المشتركة (نمط pyquotex SlotRegistry)
-        self._done_slots = SlotRegistry()
-
-    # ---------- سلاسل العملات ----------
-    def _ensure_loop(self) -> None:
-        """v14.2: أعد ربط البوابة بالحلقة الجارية عند تغيّرها.
-
-        start_async_engine يعيد إنشاء حلقة asyncio عند إعادة الاتصال
-        (gen 2+). كل عناصر asyncio هنا (Event/Lock/Future) ترتبط بأول
-        حلقة تستعملها وترفع RuntimeError لاحقاً («bound to a different
-        event loop») — فتموت البوابة بصمت. عند تغيّر الحلقة: نُعيد
-        إنشاء الحدث والأقفال، ونُفشل أي طلبات معلّقة من الحلقة الميتة
-        فوراً بدل تعليقها حتى مهلة الوفاة."""
-        try:
-            loop = _v14_asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        if getattr(self, "_bound_loop", None) is loop:
-            return
-        if self._bound_loop is not None:
-            # تغيّر فعلي من حلقة سابقة (إعادة اتصال) — لا شيء على أول ربط:
-            # العامل الجديد قد يبدأ بعد تسليم طلبات على نفس الحلقة الجارية
-            # (نمط الاختبارات الذاتية) فلا يُلغى شيء في أول ربط.
-            self._wake = _v14_asyncio.Event()
-            self._asset_chains = {}
-            # أُلغِ الطلبات المعلّقة من الحلقة القديمة فوراً (بلا تعليق وبلا
-            # تحذير «exception was never retrieved»)
-            for fut in list(self._pending.values()):
-                try:
-                    if fut is not None and not fut.done():
-                        fut.cancel()
-                except Exception:
-                    pass
-            self._pending = {}
-            self._worker_task = None
-        self._bound_loop = loop
-
-    def _chain(self, api_symbol: str) -> _v14_asyncio.Lock:
-        """قفل تسلسل لكل عملة — طلبات العملة الواحدة لا تتداخل أبداً."""
-        lock = self._asset_chains.get(api_symbol)
-        if lock is None:
-            lock = _v14_asyncio.Lock()
-            self._asset_chains[api_symbol] = lock
-        return lock
-
-    def _prune_chains(self) -> None:
-        """تنظيف أقفال العملات غير المستعملة (منع نمو بلا حدود)."""
-        if len(self._asset_chains) <= 512:
-            return
-        with self._stats_lock:
-            locked = {s for s, lk in self._asset_chains.items() if lk.locked()}
-        for sym in list(self._asset_chains.keys()):
-            if sym not in locked:
-                self._asset_chains.pop(sym, None)
-
-    # ---------- الإرسال ----------
-    def submit_nowait(self, api_symbol: str, end_time: int, seconds: int,
-                      period: int, *,
-                      priority: int = int(RequestPriority.PRELOAD),
-                      label: str = "", foreground: bool = False,
-                      timeout: float = 25.0,
-                      wait_deadline: float = 90.0) -> _v14_Any:
-        """يسجل الطلب في الطابور ويعيد Future فوراً (بلا انتظار).
-
-        wait_deadline: مهلة انتظار داخل الطابور (ثوانٍ monotonic) — بعد
-        رفضها يفشل الطلب سريعاً بدل تعليق السلسلة (مضاد «التعليق»).
-        """
-        loop = _v14_asyncio.get_running_loop()
-        fut = loop.create_future()
-        api_symbol = str(api_symbol or "").strip()
-        key = (api_symbol, int(period), int(end_time), int(seconds))
-        # dedupe: نفس الطلب معلّق بالفعل → نفس النتيجة (لا خلط)
-        existing = self._pending.get(key)
-        if existing is not None and not existing.done():
-            self._deduped += 1
-            V14_METRICS.inc("v14.gate.deduped")
-            return existing
-        req = V14FetchRequest(
-            seq=next(self._counter),
-            api_symbol=api_symbol,
-            end_time=int(end_time),
-            seconds=int(seconds),
-            period=int(period),
-            priority=int(priority),
-            label=str(label or ""),
-            foreground=bool(foreground),
-            timeout=float(timeout),
-            future=fut,
-            dedupe_key=key,
-            deadline=(time.monotonic() + wait_deadline) if wait_deadline else 0.0,
-        )
-        self._pending[key] = fut
-        self._push(req)
-        with self._stats_lock:
-            self._submitted += 1
-        V14_METRICS.inc("v14.gate.submitted")
-        V14_METRICS.inc(f"v14.gate.submitted.{RequestPriority.name_of(req.priority)}")
-        V14_JOURNAL.record("gate_submit", asset=api_symbol,
-                           prio=req.priority, label=req.label,
-                           seconds=req.seconds, seq=req.seq)
-        self._wake.set()
-        return fut
-
-    async def submit(self, api_symbol: str, end_time: int, seconds: int,
-                     period: int, *,
-                     priority: int = int(RequestPriority.PRELOAD),
-                     label: str = "", foreground: bool = False,
-                     timeout: float = 25.0,
-                     wait_deadline: float = 90.0):
-        """يسجل ثم ينتظر النتيجة — يعيد الرد الخام كما تعيده البوابة الرسمية
-        أو يرفع استثناء الطلب (المستدعي يعالجه كما يعالج رد البوابة الأصلية)."""
-        fut = self.submit_nowait(api_symbol, end_time, seconds, period,
-                                 priority=priority, label=label,
-                                 foreground=foreground, timeout=timeout,
-                                 wait_deadline=wait_deadline)
-        return await fut
-
-    def _push(self, req: V14FetchRequest) -> None:
-        _v14_heapq.heappush(self._heap, [int(req.priority), req.seq, req])
-        self._wake.set()
-
-    def _next_request(self) -> _v14_Optional[V14FetchRequest]:
-        """يسحب الطلب الأعلى أولوية مع تطبيق الأعمار وفحص المهل.
-
-        الأعمار (aging): أولوية الطلب تتحسن مستوى كل AGING_STEP ثانية انتظار
-        (بلا تجاوز OPENING) — ضد تجوع الطلبات الخلفية عند ضغط أمامي طويل.
-        """
-        now = time.monotonic()
-        aged: _v14_List[_v14_List] = []
-        chosen = None
-        while self._heap:
-            eff, seq, req = _v14_heapq.heappop(self._heap)
-            if req.future is None or req.future.done():
-                continue  # أُلغي أثناء الانتظار — تجاهل
-            if req.deadline and now > req.deadline:
-                # مهلة وفاة انقضت → فشل سريع (لا تعليق)
-                self._expired += 1
-                V14_METRICS.inc("v14.gate.expired")
-                V14_JOURNAL.record("gate_expired", asset=req.api_symbol,
-                                   label=req.label, waited_s=round(now - req.enqueued_at, 1))
-                self._pop_pending(req)
-                if not req.future.done():
-                    req.future.set_exception(
-                        TimeoutError(f"v14 gate: request expired after "
-                                     f"{now - req.enqueued_at:.1f}s in queue "
-                                     f"({req.describe()})"))
-                continue
-            # حساب الأولوية المؤقتة بالأعمار
-            waited = now - req.enqueued_at
-            aged_level = int(waited // V14_AGING_STEP_SECONDS)
-            new_eff = max(int(RequestPriority.OPENING),
-                          req.priority - aged_level)
-            entry = [new_eff, seq, req]
-            if chosen is None:
-                chosen = entry
-            else:
-                aged.append(entry)
-        if chosen is not None:
-            aged.append(chosen)
-        if aged:
-            # أعِد الباقي للكومة بأولوياتهم المحدثة (الأعمار مكتوبة فعلياً)
-            for entry in aged:
-                if entry is not chosen:
-                    _v14_heapq.heappush(self._heap, entry)
-            if chosen is not None:
-                return chosen[2]
-        return None
-
-    def _pop_pending(self, req: V14FetchRequest) -> None:
-        try:
-            if self._pending.get(req.dedupe_key) is req.future:
-                self._pending.pop(req.dedupe_key, None)
-        except Exception:
-            pass
-
-    # ---------- العامل ----------
-    async def worker(self) -> None:
-        """عامل البوابة — يعمل للأبد، طلب واحد فعلي في كل لحظة.
-
-        كل خطأ يُسجل ويُحصَّد — العامل لا يموت أبداً (دون انهيار الخوادم).
-        """
-        self._ensure_loop()   # v14.2: أعد الربط إذا تغيّرت الحلقة (إعادة اتصال)
-        self._running = True
-        V14_JOURNAL.record("gate_worker_start")
-        while True:
-            try:
-                req = self._next_request()
-                if req is None:
-                    self._wake.clear()
-                    # انتظار موجّه بالأحداث — لا نوم دوري (نمط pyquotex)
-                    await self._wake.wait()
-                    continue
-                await self._execute(req)
-            except _v14_asyncio.CancelledError:
-                self._running = False
-                raise
-            except Exception as e:
-                # آخر خط دفاع: العامل لا يموت — سجّل واستمر
-                V14_METRICS.inc("v14.gate.worker_errors")
-                V14_JOURNAL.record("gate_worker_error", error=str(e)[:200])
-                try:
-                    logmsg(f"[v14-gate] worker caught: {e}")
-                except Exception:
-                    pass
-                await v14_backoff_sleep(1, base=0.3, cap=2.0, jitter=0.2)
-
-    async def _execute(self, req: V14FetchRequest) -> None:
-        """ينفذ طلباً واحداً داخل سلسلة عملته — هنا يجتمع كل الضمانات."""
-        t_wait = time.monotonic() - req.enqueued_at
-        V14_METRICS.observe("v14.gate.wait_s", t_wait)
-        try:
-            bucket = self._buckets.get(req.priority) or \
-                self._buckets[int(RequestPriority.PRELOAD)]
-            await bucket.acquire()
-            await self._pacer.wait()
-        except _v14_asyncio.CancelledError:
-            raise
-        except Exception:
-            pass  # الدلو/الإيقاع لا يمنعان التنفيذ أبداً — عدّادات فقط
-        # سلسلة العملة: طلبات العملة الواحدة متسلسلة بلا اختلاط
-        chain = self._chain(req.api_symbol)
-        async with chain:
-            if req.future.done():
-                self._pop_pending(req)
-                return
-            t0 = time.monotonic()
-            try:
-                raw = await qx_fetch_window_raw(
-                    req.api_symbol, req.end_time, req.seconds, req.period,
-                    foreground=req.foreground, timeout=req.timeout)
-                dt = time.monotonic() - t0
-                V14_METRICS.observe("v14.gate.exec_s", dt)
-                with self._stats_lock:
-                    self._executed += 1
-                V14_METRICS.inc("v14.gate.executed")
-                V14_METRICS.inc(f"v14.gate.executed."
-                                f"{RequestPriority.name_of(req.priority)}")
-                V14_JOURNAL.record("gate_done", asset=req.api_symbol,
-                                   label=req.label, exec_s=round(dt, 3),
-                                   wait_s=round(t_wait, 3), seq=req.seq)
-                if not req.future.done():
-                    req.future.set_result(raw)
-            except _v14_asyncio.CancelledError:
-                with self._stats_lock:
-                    self._cancelled += 1
-                if not req.future.done():
-                    req.future.cancel()
-                raise
-            except Exception as e:
-                dt = time.monotonic() - t0
-                with self._stats_lock:
-                    self._failed += 1
-                V14_METRICS.inc("v14.gate.failed")
-                V14_METRICS.observe("v14.gate.fail_exec_s", dt)
-                V14_JOURNAL.record("gate_fail", asset=req.api_symbol,
-                                   label=req.label, error=str(e)[:200],
-                                   exec_s=round(dt, 3))
-                try:
-                    logmsg(f"[v14-gate] request failed ({req.describe()}): {e}")
-                except Exception:
-                    pass
-                if not req.future.done():
-                    req.future.set_exception(e)
-            finally:
-                self._pop_pending(req)
-                self._prune_chains()
-
-    # ---------- إحصاءات ----------
-    def depth(self) -> int:
-        return len(self._heap)
-
-    def depth_by_priority(self) -> dict:
-        out: _v14_Dict[str, int] = {}
-        for eff, seq, req in list(self._heap):
-            name = RequestPriority.name_of(req.priority)
-            out[name] = out.get(name, 0) + 1
-        return out
-
-    def stats(self) -> dict:
-        with self._stats_lock:
-            return {
-                "submitted": self._submitted,
-                "deduped": self._deduped,
-                "executed": self._executed,
-                "failed": self._failed,
-                "expired": self._expired,
-                "cancelled": self._cancelled,
-                "depth": self.depth(),
-                "depth_by_priority": self.depth_by_priority(),
-                "buckets": {RequestPriority.name_of(p): b.state()
-                            for p, b in self._buckets.items()},
-            }
-
-    @property
-    def running(self) -> bool:
-        return self._running
-
-
-# البوابة العامة — تستعملها كل مكونات v14 (سد الثغرات، المدقق، المسابر)
-V14_GATE = V14RequestGate()
-
-
-async def v14_fetch(api_symbol: str, end_time: int, seconds: int, period: int, *,
-                    priority: int = int(RequestPriority.PRELOAD),
-                    label: str = "", timeout: float = 25.0,
-                    wait_deadline: float = 90.0):
-    """واجهة مريحة: جلب عبر بوابة الأولوية (نفس الرد الخام الرسمي)."""
-    return await V14_GATE.submit(api_symbol, end_time, seconds, period,
-                                 priority=priority, label=label,
-                                 timeout=timeout,
-                                 wait_deadline=wait_deadline)
-
-
-def v14_fetch_foreground_pending() -> int:
-    """عدد الطلبات الأمامية المعلقة في بوابة v14 (للتطبيق)."""
-    return sum(1 for fut in V14_GATE._pending.values() if not fut.done())
-
-
-def v14_gate_snapshot() -> dict:
-    """لقطة حالة البوابة للـ heartbeat والتقارير."""
-    st = V14_GATE.stats()
-    st["worker_running"] = V14_GATE.running
-    return st
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# v14 الجزء B — الوحدات 4 و 5 و 6:
-#   4) V14 ENDPOINTS  — تقوي نقاط الخوادم (مسبح نقاط + قاطع دائرة + مسابر)
-#   5) V14 TICK ENGINE — التكس لا ينام (مضخة مُيقَظة بالأحداث + كاشف فقدان)
-#   6) V14 GAP GUARD  — سد الثغرات الأصلي على كل عملة مفتوحة + مراجع فقدان
-# ════════════════════════════════════════════════════════════════════════════
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# الوحدة 4 — V14 ENDPOINTS (تقوي نقاط الخوادم)
-# ════════════════════════════════════════════════════════════════════════════
-# طلب المستخدم: «ابحث في المكتبة لي ارسلت لك سابقا في غيت هاب كيف تقوي نقاط
-# الخوادم وتفرز الطلبات».
-#
-# ما وجدناه في مكتبة pyquotex المرسلة (الأنماط المعتمدة هنا):
-#   • pyquotex/ws/client.py: مست回 watchdog يقيس صمت الاتصال (last_message_at)
-#     ويعيد تدوير الاتصال القديم قسراً.
-#   • pyquotex/ws/client.py: إعادة تشغيل الاشتراكات بعد كل إعادة اتصال ناجحة
-#     (_replay_subscriptions — انتظار CONNECTED حتى 40×0.05s ثم إعادة كل اشتراك).
-#   • pyquotex/_api/_waits.py: backoff أُسّي مهزوز بدل الإيقاع الميكانيكي.
-#
-# أسماء النطاقات الحقيقية فقط (من الكود الأساسي نفسه — لا نطاقات مُخترعة):
-#   DEFAULT_DOMAIN_BANGLADESH = "market-qx.info"
-#   DEFAULT_DOMAIN_GLOBAL     = "quotex.com"
-# المسبح يراقب صحة النقطتين (TCP RTT + قاطع دائرة على أخطاء الجلب) ويكتب
-# تقرير نطاقات + توصية. تبديل الاتصال الفعلي يبقى في مسار auto_reconnect
-# الأصلي (لم يُمَس) — التقوية هنا: قياس، قاطع، تقرير، وتوصية موثقة.
-# ════════════════════════════════════════════════════════════════════════════
-
-class BreakerState:
-    """حالات قاطع الدائرة (نمط صناعي قياسي)."""
-    CLOSED = "CLOSED"        # سليم — يمر كل شيء
-    OPEN = "OPEN"            # مفصول — يمنع ويبدأ عدّاد الاستشفاء
-    HALF_OPEN = "HALF_OPEN"  # استشفاء — يمرر بروبات محدودة
-
-
-class V14CircuitBreaker:
-    """قاطع دائرة لكل نقطة خدمة.
-
-    الفكرة (نمط صناعي — وهو نفس جوهر watchdog pyquotex): لا تضرب نقطة
-    خدمة منهارة بطلبات متواصلة؛ افصلها (OPEN)، استشفها بروبة واحدة كل
-    recovery_interval، وأعد فتحها بعد نجاحين متتاليين.
-
-    آمن خيوطياً — يُستخدم من حلقة العامل ومن المسابر معاً.
-    """
-
-    def __init__(self, name: str, *,
-                 failure_threshold: int = 5,
-                 recovery_interval: float = 30.0,
-                 half_open_successes: int = 2) -> None:
-        self.name = name
-        self.failure_threshold = int(failure_threshold)
-        self.recovery_interval = float(recovery_interval)
-        self.half_open_successes = int(half_open_successes)
-        self._lock = _v14_threading.Lock()
-        self._state = BreakerState.CLOSED
-        self._consecutive_failures = 0
-        self._consecutive_successes = 0
-        self._opened_at = 0.0
-        self._opened_count = 0
-        self._last_error = ""
-        self._last_transition_at = time.time()
-
-    def _transition(self, state: str) -> None:
-        self._state = state
-        self._last_transition_at = time.time()
-        self._opened_at = time.monotonic() if state == BreakerState.OPEN else 0.0
-        V14_JOURNAL.record("breaker", name=self.name, state=state)
-        try:
-            logmsg(f"[v14-endpoint] circuit {self.name} -> {state}")
-        except Exception:
-            pass
-
-    def allow_probe(self) -> bool:
-        """هل تمرر هذه اللحظة طلباً؟ (OPEN يمرر فقط بروبة استشفاء بعد فترة)"""
-        with self._lock:
-            if self._state == BreakerState.CLOSED:
-                return True
-            if self._state == BreakerState.OPEN:
-                elapsed = time.monotonic() - self._opened_at
-                if elapsed >= self.recovery_interval:
-                    self._transition(BreakerState.HALF_OPEN)
-                    self._consecutive_successes = 0
-                    return True
-                return False
-            # HALF_OPEN: يمرر دائماً بروبة (العامل يحد من التزامن أصلاً)
-            return True
-
-    def record_success(self) -> None:
-        with self._lock:
-            self._consecutive_failures = 0
-            if self._state == BreakerState.HALF_OPEN:
-                self._consecutive_successes += 1
-                if self._consecutive_successes >= self.half_open_successes:
-                    self._transition(BreakerState.CLOSED)
-            elif self._state == BreakerState.CLOSED:
-                self._consecutive_successes += 1
-
-    def record_failure(self, error: str = "") -> None:
-        with self._lock:
-            self._consecutive_successes = 0
-            self._consecutive_failures += 1
-            self._last_error = str(error)[:160]
-            if self._state == BreakerState.HALF_OPEN:
-                # البروبة فشلت — أعد الفصل فوراً
-                self._opened_count += 1
-                self._transition(BreakerState.OPEN)
-            elif self._state == BreakerState.CLOSED and \
-                    self._consecutive_failures >= self.failure_threshold:
-                self._opened_count += 1
-                self._transition(BreakerState.OPEN)
-
-    def state(self) -> str:
-        with self._lock:
-            return self._state
-
-    def info(self) -> dict:
-        with self._lock:
-            return {
-                "state": self._state,
-                "consecutive_failures": self._consecutive_failures,
-                "opened_count": self._opened_count,
-                "last_error": self._last_error,
-                "last_transition": round(self._last_transition_at, 1),
-            }
-
-
-class V14EndpointState:
-    """حالة نقطة خدمة واحدة (نطاق حقيقي من الكود الأساسي)."""
-
-    def __init__(self, host: str, primary: bool = False) -> None:
-        self.host = host
-        self.primary = bool(primary)
-        self.rtt_ms: _v14_Optional[float] = None     # EMA للمسابر الناجحة
-        self.rtt_samples = 0
-        self.probe_failures = 0
-        self.last_probe_at = 0.0
-        self.last_ok_at = 0.0
-        self.breaker = V14CircuitBreaker(f"endpoint:{host}")
-        self.fetch_ok = 0
-        self.fetch_fail = 0
-
-    def observe_rtt(self, ms: float) -> None:
-        """EMA كلاسيكي — أحدث العينات أثقل (alpha يعتمد على عدد العينات)."""
-        if ms is None or ms <= 0:
-            return
-        alpha = 0.4 if self.rtt_samples < 3 else 0.2
-        if self.rtt_ms is None:
-            self.rtt_ms = float(ms)
-        else:
-            self.rtt_ms = self.rtt_ms * (1 - alpha) + float(ms) * alpha
-        self.rtt_samples += 1
-        self.last_ok_at = time.time()
-        self.probe_failures = 0
-
-    def observe_probe_fail(self) -> None:
-        self.probe_failures += 1
-
-    def score(self) -> float:
-        """درجة النقطة (أقل = أفضل) — تجمع RTT وحالة القاطع وأخطاء المسابر."""
-        s = 0.0
-        if self.breaker.state() == BreakerState.OPEN:
-            s += 1000.0
-        elif self.breaker.state() == BreakerState.HALF_OPEN:
-            s += 300.0
-        s += min(200.0, self.probe_failures * 25.0)
-        if self.rtt_ms is not None:
-            s += min(300.0, self.rtt_ms)
-        else:
-            s += 150.0  # مجهول RTT أسوأ من نتيجة معروفة
-        if not self.primary:
-            s += 10.0   # تفضيل طفيف للنقطة الأساسية عند تساوي كل شيء
-        return round(s, 2)
-
-    def info(self) -> dict:
-        return {
-            "host": self.host,
-            "primary": self.primary,
-            "rtt_ms": round(self.rtt_ms, 1) if self.rtt_ms else None,
-            "rtt_samples": self.rtt_samples,
-            "probe_failures": self.probe_failures,
-            "last_probe_at": round(self.last_probe_at, 1),
-            "breaker": self.breaker.info(),
-            "fetch_ok": self.fetch_ok,
-            "fetch_fail": self.fetch_fail,
-            "score": self.score(),
-        }
-
-
-class V14EndpointPool:
-    """مسبح نقاط الخدمة — «تقوي نقاط الخوادم».
-
-    الوظائف:
-      1) مسابر TCP RTT دورية خفيفة (كل V14_ENDPOINT_PROBE_INTERVAL ثانية)
-         على النطاقات الحقيقية فقط (443) — قياس لا يزعج خوادم كوتكس.
-      2) قاطع دائرة لكل نطاق يُغذى من نتائج الجلب الفعلية (report_ok/fail).
-      3) تقرير نطاقات JSON (qx_endpoint_report.json) يُحدَّث كل دورة —
-         التطبيق والمشغل يقرآن حالة النقاط لحظياً.
-      4) توصية موثقة في السجل عند تدهور الأساسي: إن فُتح قاطع الأساسي
-         بينما البديل سليم لمدة طويلة → توصية صريحة بإعادة الاتصال عبر
-         المسار الرسمي (auto_reconnect الأصلي يبقى صاحب القرار الفعلي —
-         نضع العلم V14_RECONNECT_HINT الذي تقرأه حلقات المراقبة).
-    """
-
-    def __init__(self) -> None:
-        # النطاقات الحقيقية فقط من الكود الأساسي — الأساسي هو المُحلول جغرافياً
-        primary_host = ""
-        try:
-            primary_host = (globals().get("QX_HOST") or
-                            globals().get("DEFAULT_DOMAIN_GLOBAL") or "quotex.com")
-        except Exception:
-            primary_host = "quotex.com"
-        alt_host = globals().get("DEFAULT_DOMAIN_BANGLADESH") or "market-qx.info"
-        glob_host = globals().get("DEFAULT_DOMAIN_GLOBAL") or "quotex.com"
-        self.endpoints: _v14_Dict[str, V14EndpointState] = {}
-        self.endpoints[primary_host] = V14EndpointState(primary_host, primary=True)
-        other = alt_host if primary_host != alt_host else glob_host
-        if other != primary_host:
-            self.endpoints[other] = V14EndpointState(other, primary=False)
-        self.probe_interval = float(globals().get("_V14_ENDPOINT_PROBE_INTERVAL",
-                                                  45.0))
-        self.report_path = ""
-        try:
-            self.report_path = _v14_os.path.join(
-                _v14_base_dir(), "qx_endpoint_report.json")
-        except Exception:
-            self.report_path = "qx_endpoint_report.json"
-        self._last_report_write = 0.0
-        self._lock = _v14_threading.Lock()
-
-    # ---------- تغذية من نتائج الجلب الفعلية ----------
-    def report_fetch(self, host: _v14_Optional[str], ok: bool,
-                     error: str = "") -> None:
-        """يسجل نتيجة جلب فعلي على النقطة (يُستدعى من حلقات v14 التي تعرف
-        المضيف عبر QX_HOST). يحرك قاطع الدائرة."""
-        with self._lock:
-            ep = self.endpoints.get(host or "")
-            if ep is None:
-                return
-            if ok:
-                ep.fetch_ok += 1
-                ep.breaker.record_success()
-            else:
-                ep.fetch_fail += 1
-                ep.breaker.record_failure(error)
-
-    # ---------- المسابر ----------
-    async def probe_once(self, host: str, timeout: float = 3.0) -> _v14_Optional[float]:
-        """مسحة TCP واحدة: قياس زمن فتح مقبس 443 — بلا أي ضغط على API."""
-        loop = _v14_asyncio.get_running_loop()
-
-        def _probe() -> _v14_Optional[float]:
-            t0 = time.monotonic()
-            sock = None
-            try:
-                sock = _v14_socket.create_connection((host, 443),
-                                                     timeout=float(timeout))
-                return (time.monotonic() - t0) * 1000.0
-            except Exception:
-                return None
-            finally:
-                try:
-                    if sock is not None:
-                        sock.close()
-                except Exception:
-                    pass
-
-        try:
-            return await _v14_asyncio.wait_for(loop.run_in_executor(None, _probe),
-                                               timeout=timeout + 2.0)
-        except Exception:
-            return None
-
-    async def probe_all(self) -> None:
-        for host, ep in list(self.endpoints.items()):
-            ms = await self.probe_once(host)
-            ep.last_probe_at = time.time()
-            if ms is not None:
-                ep.observe_rtt(ms)
-                V14_METRICS.gauge(f"v14.endpoint.{host}.rtt_ms", ms)
-            else:
-                ep.observe_probe_fail()
-                V14_METRICS.inc("v14.endpoint.probe_failures")
-            await _v14_asyncio.sleep(0.1)
-
-    # ---------- الحلقة الدورية ----------
-    async def monitor_loop(self) -> None:
-        """حلقة المراقبة: مسحة + تقرير + توصيات. لا تمس الاتصال الفعلي."""
-        await _v14_asyncio.sleep(5.0)   # اترك الاتصال يبدأ أولاً
-        while True:
-            try:
-                await self.probe_all()
-                await self._write_report()
-                self._maybe_recommend()
-                await _v14_asyncio.sleep(self.probe_interval)
-            except _v14_asyncio.CancelledError:
-                raise
-            except Exception as e:
-                V14_METRICS.inc("v14.endpoint.monitor_errors")
-                V14_JOURNAL.record("endpoint_monitor_error", error=str(e)[:200])
-                await v14_backoff_sleep(2, base=2.0, cap=30.0, jitter=0.2)
-
-    def _maybe_recommend(self) -> None:
-        """توصية موثقة عند تدهور الأساسي مع بديل سليم — دون لمس الاتصال."""
-        try:
-            primary = next((e for e in self.endpoints.values() if e.primary), None)
-            if primary is None:
-                return
-            others = [e for e in self.endpoints.values() if not e.primary]
-            if not others:
-                return
-            pb = primary.breaker
-            if pb.state() == BreakerState.OPEN and pb._opened_at and \
-                    (time.monotonic() - pb._opened_at) > 120.0:
-                healthy_alt = any(o.breaker.state() == BreakerState.CLOSED
-                                  for o in others)
-                if healthy_alt and not V14_RECONNECT_HINT.get():
-                    V14_RECONNECT_HINT.set(True)
-                    logmsg(f"[v14-endpoint] primary {primary.host} circuit OPEN "
-                           f"for >120s while fallback healthy — reconnect hint "
-                           f"SET (auto_reconnect owns the actual switch)")
-                    V14_JOURNAL.record("endpoint_recommend",
-                                       primary=primary.host,
-                                       reason="primary_circuit_open")
-        except Exception:
-            pass
-
-    async def _write_report(self) -> None:
-        """يكتب تقرير النقاط ذرياً (tmp + rename) — القراءة آمنة دائماً."""
-        try:
-            report = {
-                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "active_host": globals().get("QX_HOST", ""),
-                "reconnect_hint": V14_RECONNECT_HINT.get(),
-                "endpoints": [e.info() for e in self.endpoints.values()],
-            }
-            tmp = self.report_path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                _v14_json.dump(report, f, ensure_ascii=False, indent=2)
-            _v14_os.replace(tmp, self.report_path)
-            self._last_report_write = time.time()
-        except Exception:
-            pass
-
-    def info(self) -> dict:
-        with self._lock:
-            return {
-                "active_host": globals().get("QX_HOST", ""),
-                "endpoints": [e.info() for e in self.endpoints.values()],
-                "report_path": self.report_path,
-                "probe_interval_s": self.probe_interval,
-            }
-
-
-# مسبح النقاط العام
-V14_ENDPOINTS = V14EndpointPool()
-
-
-async def v14_endpoint_probe_loop() -> None:
-    """حلقة مسابر النقاط — supervised."""
-    await V14_ENDPOINTS.monitor_loop()
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# الوحدة 5 — V14 TICK ENGINE (التكس لا ينام)
-# ════════════════════════════════════════════════════════════════════════════
-# طلب المستخدم الحرفي: «ولا تيكس النوم ايضا لا يجب ان ينام مثل الكود لي اريتك».
-#
-# الفرق عن v13:
-#   v13 كان يجمع التيكات بحلقة نائمة: tick_cache_collector → sleep(0.25)
-#   كل دورة. أي أن التكس قد ينام حتى 250ms قبل أن يُخزّن، وينام مرة أخرى
-#   قبل أن يصل للمشتركين — هذا هو «التكس النائم».
-#
-# v14 — نفس فلسفة الكود المرجعي (quotex_mt4_server_v10.realtime_stream:
-# معالجة فورية لكل تيك داخل حلقة البث بلا نوم في مسار المعالجة):
-#   1) مضخة مُيقَظة بالأحداث: تنتظر asyncio.Event يرفعه الالتقاط فور رؤية
-#      تيك جديد — مسار المعالجة نفسه بلا أي sleep.
-#   2) ملتقط مراقب 10ms كحماية عمق إضافية (لو فُقد رفع الحدث) — والملتقط
-#      نفسه يستيقظ المضخة، فلا تيك يبقى راقداً أكثر من 10ms في أسوأ حال.
-#   3) ترقيم متسلسل + كاشف فقدان: كل تيك يحمل seq، وأي قفزة زمنية شاذة
-#      تُحسب «فقدان محتمل» — «ولا يتم فقدان».
-#   4) توزيع فوري على المشتركين (بلا نوم بين التوزيعات — sleep(0) فقط
-#      لتسليم الحلقة)، والمشترك البطيء يُساق بسياسة إسقاط الأقدم
-#      مع عدّاد — البطيء لا يعيق السريع.
-#   5) التخزين نفسه كما في v13 (ذاكرة فقط + TTL 5 دقائق + لا قرص).
-# ════════════════════════════════════════════════════════════════════════════
-
-class TickClassification:
-    NEW = "NEW"          # تيك جديد فعلٍ
-    DUPLICATE = "DUP"    # نفس الطابع الزمني — مكرر
-    STALE = "STALE"      # أقدم من آخر تيك — تجاهل (نفس منطق الكود المرجعي)
-    GAP = "GAP"          # قفزة زمنية شاذة — فقدان محتمل
-
-
-class V14TickTracker:
-    """متتبع تسلسل التيكات لعملة واحدة — يصنف كل تيك ويكشف الفقدان.
-
-    منطق التصنيف مطابق لروح الكود المرجعي:
-      - تيك أقدم من الأخير → STALE (تجاهل — «stale tick — ignore»).
-      - نفس الطابع → DUPLICATE.
-      - قفزة أكبر من V14_TICK_GAP_MULTIPLIER × الفاصل المتوسط → GAP
-        (يُحسب فقدان محتمل — عدّاد + سجل، بلا أي تصرف هجومي).
-    """
-
-    def __init__(self, api_symbol: str, maxlen: int = 600) -> None:
-        self.api_symbol = api_symbol
-        self.ring = _v14_deque(maxlen=int(maxlen))   # [(seq, ts, price)]
-        self.seq = 0
-        self.last_ts = 0
-        self.gap_intervals = _v14_deque(maxlen=30)   # متوسط الفواصل الطبيعية
-        self.gap_events = 0
-        self.last_price = 0.0
-        self._lock = _v14_threading.Lock()
-
-    def ingest(self, ts: int, price: float, *, gap_multiplier: float = 8.0,
-               min_gap_s: float = 30.0) -> str:
-        """يبتلع تيكاً ويعيد تصنيفه — آمن من الخيوط."""
-        with self._lock:
-            if ts <= 0 or price <= 0:
-                return TickClassification.STALE
-            if self.last_ts and ts < self.last_ts:
-                return TickClassification.STALE
-            if self.last_ts and ts == self.last_ts:
-                # تحديث آخر سعر إن تغير (نفس الثانية قد تحمل سعراً أحدث)
-                if price != self.last_price and self.ring:
-                    seq, _, _ = self.ring[-1]
-                    self.ring[-1] = (seq, ts, price)
-                    self.last_price = price
-                return TickClassification.DUPLICATE
-            # تيك جديد — فحص القفزة (فقدان محتمل)
-            if self.last_ts:
-                interval = ts - self.last_ts
-                # متوسط الفواصل الطبيعية السابقة فقط (قبل هذه الفجوة —
-                # الفجوة نفسها لا تلوث خط الأساس وإلا أخفت كل ما بعدها)
-                prev = list(self.gap_intervals)
-                avg = (sum(prev) / len(prev)) if prev else interval
-                if interval > max(min_gap_s, avg * gap_multiplier):
-                    self.gap_events += 1
-                    V14_METRICS.inc("v14.ticks.gap_events")
-                    classification = TickClassification.GAP
-                    # الفجوة لا تُضاف لنافذة الفواصل الطبيعية
-                else:
-                    classification = TickClassification.NEW
-                    self.gap_intervals.append(interval)
-            else:
-                classification = TickClassification.NEW
-            self.seq += 1
-            self.ring.append((self.seq, ts, price))
-            self.last_ts = ts
-            self.last_price = price
-            return classification
-
-    def since(self, seconds: int) -> _v14_List[Tuple[int, int, float]]:
-        cutoff = time.time() - max(1, int(seconds))
-        with self._lock:
-            return [(s, t, p) for (s, t, p) in self.ring if t >= cutoff]
-
-    def silence_seconds(self) -> float:
-        if not self.last_ts:
-            return 0.0
-        return max(0.0, time.time() - self.last_ts)
-
-    def info(self) -> dict:
-        with self._lock:
-            return {
-                "api_symbol": self.api_symbol,
-                "count": len(self.ring),
-                "seq": self.seq,
-                "last_ts": self.last_ts,
-                "last_price": self.last_price,
-                "gap_events": self.gap_events,
-                "silence_s": round(self.silence_seconds(), 1),
-            }
-
-
-class V14TickSubscriber:
-    """مشترك تيكات — طابور محدود + سياسة إسقاط الأقدم للبطيء.
-
-    البطيء لا يعيق السريع ولا يوقف المضخة أبداً (خادم لا ينهار بسبب مشترك).
-    """
-
-    def __init__(self, handle: int, symbols: _v14_Optional[_v14_Set[str]] = None,
-                 maxsize: int = 2000) -> None:
-        self.handle = handle
-        self.symbols = set(symbols) if symbols else None
-        # طابور خيوطي حقيقي مع إسقاط يدوي للأقدم عند الامتلاء
-        from queue import Queue as _Queue
-        self.q: _Queue = _Queue(maxsize=maxsize)
-        self.dropped = 0
-        self.delivered = 0
-        self.created_at = time.time()
-
-    def wants(self, api_symbol: str) -> bool:
-        return self.symbols is None or api_symbol in self.symbols
-
-    def offer(self, tick: tuple) -> None:
-        """يضع التيك؛ لو امتلأ الطابور يُسقط الأقدم (drop-oldest)."""
-        try:
-            self.q.put_nowait(tick)
-            self.delivered += 1
-        except Exception:
-            try:
-                self.q.get_nowait()
-                self.dropped += 1
-                V14_METRICS.inc("v14.ticks.subscriber_dropped")
-                self.q.put_nowait(tick)
-                self.delivered += 1
-            except Exception:
-                self.dropped += 1
-                V14_METRICS.inc("v14.ticks.subscriber_dropped")
-
-    def drain(self, max_items: int = 500) -> _v14_List[tuple]:
-        out = []
-        for _ in range(max_items):
-            try:
-                out.append(self.q.get_nowait())
-            except Exception:
-                break
-        return out
-
-
-class V14TickEngine:
-    """مضخة التيكات — «التكس لا ينام».
-
-    البنية:
-      - trackers: متتبع لكل عملة (ترقيم + فقدان + صمت).
-      - notify(): يرفع حدث الاستيقاظ فور رؤية تيك جديد (من الالتقاط).
-      - pump_loop(): ينتظر الحدث، يصرف كل جديد فوراً (بلا نوم في المسار)،
-        يوزع على المشتركين، ثم يعود للانتظار الموجّه بالأحداث.
-      - sampler_loop(): ملتقط 10ms حماية — يقرأ realtime_candles مباشرة
-        ويستيقظ المضخة؛ لو لم يوجد رفع الحدث لأي سبب لن يُفقد تيك.
-      - silence_watchdog(): يراقب صمت العملات المفتوحة — إعادة تشغيل بث
-        عبر نفس نمط auto_reconnect الأصلي (إلغاء المهمة + إعادة التشغيل).
-
-    التخزين: نفس _cache_tick الرسمي (ذاكرة فقط + TTL 5 دقائق كما في v13).
-    """
-
-    def __init__(self) -> None:
-        self.trackers: _v14_Dict[str, V14TickTracker] = {}
-        self.subscribers: _v14_List[V14TickSubscriber] = []
-        self._lock = _v14_threading.RLock()
-        self._wake: _v14_Optional[_v14_asyncio.Event] = None
-        self._wake_loop: _v14_Optional[_v14_asyncio.AbstractEventLoop] = None
-        # تيكات ملتهمة بانتظار التوزيع: {symbol: (ts, price, classification)}
-        self._pending_map: _v14_Dict[str, tuple] = {}
-        self._pump_running = False
-        self._notify_from_thread = False
-        self._loop_ref: _v14_Optional[Any] = None
-
-    # ---------- الاستيقاظ ----------
-    def _ensure_wake(self, loop) -> None:
-        if self._wake is None or self._wake_loop is not loop:
-            self._wake = _v14_asyncio.Event()
-            self._wake_loop = loop
-
-    def notify(self, api_symbol: str, loop=None) -> None:
-        """يوقظ المضخة — آمن من أي خيط (call_soon_threadsafe عند الحاجة)."""
-        try:
-            if self._wake is None:
-                if loop is not None:
-                    self._ensure_wake(loop)
-                else:
-                    return  # المضخة لم تبدأ بعد — الملتقط سيشغلها
-            ev = self._wake
-            lp = self._wake_loop
-            if ev is None or lp is None:
-                return
-            try:
-                running = _v14_asyncio.get_running_loop()
-            except Exception:
-                running = None
-            if running is lp:
-                ev.set()
-            else:
-                try:
-                    lp.call_soon_threadsafe(ev.set)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-    # ---------- المتتبعات ----------
-    def tracker(self, api_symbol: str) -> V14TickTracker:
-        with self._lock:
-            t = self.trackers.get(api_symbol)
-            if t is None:
-                t = V14TickTracker(api_symbol)
-                self.trackers[api_symbol] = t
-            return t
-
-    def forget(self, api_symbol: str) -> None:
-        with self._lock:
-            self.trackers.pop(api_symbol, None)
-
-    # ---------- الالتقاط (يستدعيه غلاف _cache_tick) ----------
-    def ingest_tick(self, api_symbol: str, ts: int, price: float) -> None:
-        """يبتلع تيكاً في المتتبع + يستيقظ المضخة. بلا أي نوم."""
-        try:
-            tr = self.tracker(api_symbol)
-            cls = tr.ingest(int(ts), float(price))
-            if cls in (TickClassification.NEW, TickClassification.GAP):
-                V14_TICKS_RATE.mark()
-                V14_METRICS.inc("v14.ticks.ingested")
-                if cls == TickClassification.GAP:
-                    V14_JOURNAL.record("tick_gap", asset=api_symbol,
-                                       ts=ts, price=price)
-                with self._lock:
-                    self._pending_map[api_symbol] = (int(ts), float(price), cls)
-                self.notify(api_symbol)
-        except Exception:
-            pass
-
-    # ---------- المشتركون ----------
-    def subscribe(self, symbols: _v14_Optional[_v14_Set[str]] = None,
-                  maxsize: int = 2000) -> V14TickSubscriber:
-        sub = V14TickSubscriber(len(self.subscribers) + 1, symbols, maxsize)
-        with self._lock:
-            self.subscribers.append(sub)
-        V14_JOURNAL.record("ticks_subscribe", handle=sub.handle,
-                           symbols=sorted(symbols) if symbols else "ALL")
-        return sub
-
-    def unsubscribe(self, sub: V14TickSubscriber) -> None:
-        with self._lock:
-            try:
-                self.subscribers.remove(sub)
-            except Exception:
-                pass
-
-    def _dispatch(self, api_symbol: str, ts: int, price: float,
-                  classification: str) -> None:
-        """توزيع فوري على المشتركين — بلا نوم، إسقاط أقدم للبطيء."""
-        with self._lock:
-            subs = list(self.subscribers)
-        if not subs:
-            return
-        payload = (api_symbol, int(ts), float(price), classification,
-                   time.time())
-        for sub in subs:
-            if sub.wants(api_symbol):
-                sub.offer(payload)
-
-    # ---------- قراءة المصدر الحي ----------
-    def _read_live(self, api_symbol: str) -> _v14_Optional[Tuple[int, float]]:
-        """قراءة آخر سعر حي من realtime_candles — نفس المصدر الرسمي الذي
-        يقرأه الكود الأساسي في realtime_stream حرفياً."""
-        try:
-            client = globals().get("CLIENT")
-            if client is None or getattr(client, "api", None) is None:
-                return None
-            c = client.api.realtime_candles.get(api_symbol)
-            if isinstance(c, list) and len(c) >= 3:
-                return int(c[1]), float(c[2])
-            if isinstance(c, dict):
-                ts = int(c.get("time", c.get("timestamp", 0)))
-                price = float(c.get("price", c.get("close", 0)))
-                if ts > 0 and price > 0:
-                    return ts, price
-        except Exception:
-            pass
-        return None
-
-    # ---------- المضخة ----------
-    async def pump_loop(self) -> None:
-        """مضخة التيكات — تنتظر الحدث، تصرف كل جديد، تعود للانتظار.
-
-        مسار المعالجة نفسه بلا sleep (فقط sleep(0) لتسليم الحلقة بين
-        المشتركين) — «التكس لا ينام».
-        """
-        loop = _v14_asyncio.get_running_loop()
-        self._ensure_wake(loop)
-        self._pump_running = True
-        V14_JOURNAL.record("tick_pump_start")
-        while True:
-            try:
-                ev = self._wake
-                if ev is None:
-                    self._ensure_wake(loop)
-                    continue
-                # انتظار موجّه بالأحداث مع مهلة أمان قصيرة: أي تيك جديد يوقظ
-                # فوراً عبر notify() — والمهلة تنظف ما تبقى لو فات رفع حدث.
-                try:
-                    await _v14_asyncio.wait_for(ev.wait(), timeout=1.0)
-                except _v14_asyncio.TimeoutError:
-                    pass
-                ev.clear()
-                # صرف كل ما هو معلق الآن — فوري، بلا نوم:
-                # أولاً التيكات الملتهمة فعلاً عبر ingest_tick (غلاف
-                # _cache_tick أو الملتقط) — لها طابع وسعر وتصنيف جاهز
-                with self._lock:
-                    pending = dict(self._pending_map)
-                    self._pending_map.clear()
-                for sym, (ts, price, cls) in pending.items():
-                    self._dispatch(sym, ts, price, cls)
-                    await _v14_asyncio.sleep(0)   # تسليم الحلقة — بلا نوم
-                # ثانياً: مسح أمان للمصدر الحي (realtime_candles) لكل أصل
-                # متدفق — يغطي أي تيك لم يمر عبر ingest_tick لأي سبب
-                # مراقب إضافي: اسحب كل الأصول المتدفقة حتى لو فات رفع العلم
-                assets = list(globals().get("ALL_STREAMING_ASSETS") or [])
-                seen = set(pending)
-                for a in assets:
-                    try:
-                        seen.add(a.api_symbol)
-                    except Exception:
-                        pass
-                for sym in seen:
-                    live = self._read_live(sym)
-                    if live is not None:
-                        ts, price = live
-                        tr = self.tracker(sym)
-                        cls = tr.ingest(ts, price)
-                        if cls in (TickClassification.NEW,
-                                   TickClassification.GAP,
-                                   TickClassification.DUPLICATE):
-                            # NEW/GAP: تيك جديد فعلٍ — DUPLICATE: سعر أحدث
-                            # بنفس الثانية — كلاهما يوزع فوراً على المشتركين
-                            self._dispatch(sym, ts, price, cls)
-                    await _v14_asyncio.sleep(0)   # تسليم الحلقة — بلا نوم
-                V14_METRICS.gauge("v14.ticks.trackers", len(self.trackers))
-                # العودة للانتظار الموجّه بالأحداث في رأس الحلقة (مهلة أمان
-                # 1s هناك تُنظف المتبقي لو فات رفع الحدث).
-            except _v14_asyncio.CancelledError:
-                self._pump_running = False
-                raise
-            except Exception as e:
-                V14_METRICS.inc("v14.ticks.pump_errors")
-                V14_JOURNAL.record("tick_pump_error", error=str(e)[:200])
-                await v14_backoff_sleep(1, base=0.2, cap=2.0, jitter=0.2)
-
-    def subs_len(self) -> int:
-        with self._lock:
-            return len(self.subscribers)
-
-    # ---------- الملتقط المراقب ----------
-    async def sampler_loop(self) -> None:
-        """ملتقط 10ms — حماية عمق فوق notify(): يقرأ realtime_candles لكل
-        عملة متدفقة ويستيقظ المضخة عند أي جديد. لو فات أي تيك لأي سبب،
-        الملتقط يضبطه خلال 10ms كحد أقصى — لا تيك نائم ولا تيك مفقود.
-
-        هذا ملتقط لا معالج: المعالجة الفعلية كلها في المضخة المُيقَظة.
-        """
-        V14_JOURNAL.record("tick_sampler_start")
-        while True:
-            try:
-                woke = False
-                for asset in list(globals().get("ALL_STREAMING_ASSETS") or []):
-                    try:
-                        sym = asset.api_symbol
-                    except Exception:
-                        continue
-                    live = self._read_live(sym)
-                    if live is None:
-                        continue
-                    ts, price = live
-                    tr = self.tracker(sym)
-                    if tr.last_ts and ts <= tr.last_ts:
-                        continue   # لا جديد — بلا تخزين بلا إيقاظ
-                    # جديد: خزّنه في الكاش الرسمي نفسه (ذاكرة فقط)
-                    try:
-                        _cache_tick(sym, ts, price)
-                    except Exception:
-                        pass
-                    self.ingest_tick(sym, ts, price)
-                    woke = True
-                if woke:
-                    self.notify()
-                    V14_METRICS.inc("v14.ticks.sampler_wakes")
-                await _v14_asyncio.sleep(0.01)   # 10ms — حماية لا نوم معالجة
-            except _v14_asyncio.CancelledError:
-                raise
-            except Exception as e:
-                V14_METRICS.inc("v14.ticks.sampler_errors")
-                V14_JOURNAL.record("tick_sampler_error", error=str(e)[:200])
-                await _v14_asyncio.sleep(0.05)
-
-    # ---------- ساعة صمت العملات المفتوحة ----------
-    async def silence_watchdog(self) -> None:
-        """مراقب صمت: عملة مفتوحة بلا تيك > عتبة → إعادة تشغيل بثها عبر
-        نفس نمط auto_reconnect الأصلي (إلغاء + realtime_stream من جديد) —
-        لا يخترع مسار اتصال جديداً."""
-        restart_silence = float(globals().get("_V14_TICK_SILENCE_RESTART", 90.0))
-        while True:
-            try:
-                await _v14_asyncio.sleep(10.0)
-                client = globals().get("CLIENT")
-                alive = bool(globals().get("CONNECTION_ALIVE"))
-                if client is None or not alive:
-                    continue
-                loop = _v14_asyncio.get_running_loop()
-                for asset in list(globals().get("ALL_STREAMING_ASSETS") or []):
-                    try:
-                        sym = asset.api_symbol
-                        tr = self.trackers.get(sym)
-                        if tr is None:
-                            continue
-                        silence = tr.silence_seconds()
-                        V14_METRICS.gauge(f"v14.ticks.{sym}.silence_s", silence)
-                        if silence >= restart_silence:
-                            running = False
-                            try:
-                                task = getattr(asset, "stream_task", None)
-                                running = task is not None and not task.done() \
-                                    and bool(getattr(asset, "streaming", False))
-                            except Exception:
-                                running = False
-                            if not running:
-                                continue   # بثها متوقف أصلاً — ليس صمتاً شاذاً
-                            tr.ring.clear()
-                            tr.last_ts = 0
-                            logmsg(f"[v14-ticks] {sym} silent {silence:.0f}s "
-                                   f"> {restart_silence:.0f}s — restarting "
-                                   f"stream (same pattern as auto_reconnect)")
-                            V14_JOURNAL.record("tick_silence_restart",
-                                               asset=sym, silence_s=round(silence, 1))
-                            V14_METRICS.inc("v14.ticks.silence_restarts")
-                            try:
-                                old = getattr(asset, "stream_task", None)
-                                if old is not None and not old.done():
-                                    old.cancel()
-                            except Exception:
-                                pass
-                            asset.streaming = False
-                            try:
-                                asset.stream_task = \
-                                    asyncio.run_coroutine_threadsafe(
-                                        subsecond_stream(asset)
-                                        if globals().get("IS_SUBSECOND")
-                                        else realtime_stream(asset), loop)
-                            except Exception as e:
-                                V14_JOURNAL.record("tick_restart_fail",
-                                                   asset=sym, error=str(e)[:160])
-                            await _v14_asyncio.sleep(0.05)  # نفس إيقاع الكود المرجعي
-                    except _v14_asyncio.CancelledError:
-                        raise
-                    except Exception as e:
-                        # خطأ في أصل واحد لا يوقف فحص بقية الأصول أبداً
-                        V14_JOURNAL.record("tick_silence_asset_error",
-                                           asset=getattr(asset, "api_symbol", "?"),
-                                           error=str(e)[:160])
-                        continue
-            except _v14_asyncio.CancelledError:
-                raise
-            except Exception as e:
-                V14_JOURNAL.record("tick_silence_error", error=str(e)[:200])
-                await v14_backoff_sleep(1, base=1.0, cap=10.0, jitter=0.2)
-
-    # ---------- تقارير ----------
-    def snapshot(self, seconds: int = 300) -> dict:
-        with self._lock:
-            trackers = {k: t.info() for k, t in self.trackers.items()}
-            subs = [{"handle": s.handle, "delivered": s.delivered,
-                     "dropped": s.dropped,
-                     "queued": s.q.qsize() if s.q else 0}
-                    for s in self.subscribers]
-        return {"trackers": trackers, "subscribers": subs,
-                "rate_30s": round(V14_TICKS_RATE.rate(30.0), 2)}
-
-    def recent_ticks(self, api_symbol: str, seconds: int = 300) -> _v14_List[list]:
-        tr = self.trackers.get(api_symbol)
-        if not tr:
-            return []
-        return [[t, p] for (_s, t, p) in tr.since(seconds)]
-
-    def gap_summary(self) -> dict:
-        with self._lock:
-            return {k: t.gap_events for k, t in self.trackers.items()
-                    if t.gap_events}
-
-
-# محرك التيكات العام + معدل التيكات المتدحرج
-V14_TICKS = V14TickEngine()
-V14_TICKS_RATE = V14RollingRate(window_seconds=30.0)
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# الوحدة 6 — V14 GAP GUARD (سد الثغرات الأصلي على كل عملة مفتوحة)
-# ════════════════════════════════════════════════════════════════════════════
-# طلب المستخدم الحرفي:
-#   «طريقة سد الثغرات لا تغيرها عن الكود لي اريتك يجب ان تنفذ على كل عملة
-#    تم فتحها ولا يتم فقدان»
-#
-# الضمانات هنا:
-#   1) الطريقة نفسها حرفياً: MT4_WRITER.fill_gap_once(CLIENT, asset, PERIOD)
-#      + _fill_missing_slots + علامة التجمد gap_state.filled — صفر تغيير.
-#      الحلقة الشاملة mt4_gap_filler الأصلية تعمل كما هي أيضاً.
-#   2) «على كل عملة تم فتحها»: سجل مفتوحات (OpenedAssetRegistry) يلاحظ كل
-#      عملة فُتح شارتها (opener / ensure_asset_loaded / fetch_older_batch /
-#      preload_one_asset) ويجدول لها سد ثغرات فوراً — لا انتظار دورة
-#      الحلقة الشاملة، ولا عملة مفتوحة تفوتها الآلية.
-#   3) «ولا يتم فقدان»: مدقق فقدان دوري (V14GapLossAuditor) يمسح خط زمن
-#      كل عملة مفتوحة؛ أي فجوة مشبوهة تُعيد استدعاء نفس fill_gap_once
-#      الأصلية لتلك العملة حتى تُسد — الطريقة نفسها، التغطية كاملة.
-#   4) المدقق لا يكتب شموعاً بنفسه أبداً — الكتابة تبقى للطريقة الأصلية.
-# ════════════════════════════════════════════════════════════════════════════
-
-class OpenedAssetRegistry:
-    """سجل كل عملة تم فتحها — مصدر الحقيقة لـ«سد الثغرات على كل مفتوح».
-
-    لكل عملة: وقت الفتح الأول، آخر نشاط، عدد مرات الفتح، مصدر الفتح،
-    حالة آخر سد ثغرات، وآخر نتيجة مدقق فقدان.
-    """
-
-    def __init__(self) -> None:
-        self._lock = _v14_threading.RLock()
-        self._opened: _v14_Dict[str, dict] = {}
-
-    def note_open(self, api_symbol: str, source: str) -> None:
-        api_symbol = str(api_symbol or "").strip()
-        if not api_symbol:
-            return
-        now = time.time()
-        with self._lock:
-            rec = self._opened.get(api_symbol)
-            if rec is None:
-                rec = {
-                    "first_open_at": now,
-                    "first_source": source,
-                    "opens": 0,
-                    "last_open_at": now,
-                    "last_source": source,
-                    "last_gap_fill_at": 0.0,
-                    "gap_fill_runs": 0,
-                    "gap_fill_errors": 0,
-                    "last_audit_at": 0.0,
-                    "last_audit_holes": 0,
-                }
-                self._opened[api_symbol] = rec
-                V14_JOURNAL.record("asset_opened", asset=api_symbol,
-                                   source=source)
-            rec["opens"] += 1
-            rec["last_open_at"] = now
-            rec["last_source"] = source
-
-    def note_gap_fill(self, api_symbol: str, ok: bool) -> None:
-        with self._lock:
-            rec = self._opened.get(api_symbol)
-            if rec is None:
-                return
-            rec["last_gap_fill_at"] = time.time()
-            if ok:
-                rec["gap_fill_runs"] += 1
-            else:
-                rec["gap_fill_errors"] += 1
-
-    def note_audit(self, api_symbol: str, holes: int) -> None:
-        with self._lock:
-            rec = self._opened.get(api_symbol)
-            if rec is not None:
-                rec["last_audit_at"] = time.time()
-                rec["last_audit_holes"] = int(holes)
-
-    def opened(self) -> _v14_List[str]:
-        with self._lock:
-            return list(self._opened.keys())
-
-    def is_opened(self, api_symbol: str) -> bool:
-        with self._lock:
-            return api_symbol in self._opened
-
-    def snapshot(self) -> dict:
-        with self._lock:
-            return {k: dict(v) for k, v in self._opened.items()}
-
-    def __len__(self) -> int:
-        with self._lock:
-            return len(self._opened)
-
-
-# سجل المفتوحات العام
-V14_OPENED = OpenedAssetRegistry()
-
-
-def _v14_find_asset(api_symbol: str):
-    """يجد كائن Asset الرسمي للعملة من قائمة الأصول المتدفقة (بلا إنشاء
-    جديد هنا — الإنشاء مسؤولية المسار الرسمي _get_or_create_asset)."""
-    for asset in list(globals().get("ALL_STREAMING_ASSETS") or []):
-        try:
-            if asset.api_symbol == api_symbol:
-                return asset
-        except Exception:
-            continue
-    return None
-
-
-async def v14_gap_fill_for_asset(api_symbol: str, *,
-                                 reason: str = "opened") -> bool:
-    """سد ثغرات عملة واحدة — بالطريقة الأصلية حرفياً.
-
-    يستدعي MT4_WRITER.fill_gap_once(CLIENT, asset, PERIOD) — نفس الآلية
-    التي تشغلها الحلقة الشاملة mt4_gap_filler، لكن مركزة على هذه العملة
-    فور فتحها. لا شيء جديد في الطريقة — فقط تنفيذ فوري لكل مفتوح.
-    """
-    api_symbol = str(api_symbol or "").strip()
-    if not api_symbol:
-        return False
-    client = globals().get("CLIENT")
-    alive = bool(globals().get("CONNECTION_ALIVE"))
-    if client is None or getattr(client, "api", None) is None or not alive:
-        V14_METRICS.inc("v14.gap.skipped_not_connected")
-        return False
-    # انتظار قصير موجّه حتى تجهز الأصول (نمط pyquotex wait_until)
-    asset = _v14_find_asset(api_symbol)
-    if asset is None:
-        try:
-            await v14_wait_until(
-                lambda: _v14_find_asset(api_symbol) is not None,
-                timeout=8.0, poll_interval=0.25)
-            asset = _v14_find_asset(api_symbol)
-        except _v14_asyncio.TimeoutError:
-            asset = None
-    if asset is None:
-        # العملة ليست في قائمة البث بعد — حاول بالمسار الرسمي للإنشاء
-        try:
-            getter = globals().get("_get_or_create_asset")
-            if getter is not None:
-                asset = getter(api_symbol)
-        except Exception:
-            asset = None
-    if asset is None:
-        V14_JOURNAL.record("gap_fill_no_asset", asset=api_symbol, reason=reason)
-        V14_OPENED.note_gap_fill(api_symbol, False)
-        return False
-    # الوضع تحت الثاني: الآلية الأصلية نفسها معطلة في وضع subsecond
-    if globals().get("IS_SUBSECOND"):
-        V14_METRICS.inc("v14.gap.skipped_subsecond")
-        return False
-    ok = False
-    t0 = time.monotonic()
-    # v14.7 (جذر «لماذا تختفي شموعها ولا نعلم لماذا يحدث هكذا»):
-    # الآلة الأصلية fill_gap_once (حرفياً من الكود المرجعي) تعيد الخط مقصوصاً
-    # إلى آخر INITIAL_CANDLES شمعة — وفي v14 يحتفظ المحرك بدفعات التاريخ كاملة
-    # (حتى 45000 شمعة)، فكان كل سد يقلّص ذاكرة العملة إلى آخر 1000 شمعة،
-    # ويحفظ اللقطة المقصوصة في القاعدة، ثم يجدها مدقق الفجوات فيكون ثغرات
-    # أعمق فيرفع التجمّد ويسد من جديد — حلقة تقليص لا تنتهي تُفقد الشموع من
-    # الشارت. الحل هنا (طبقة التقوية فقط — الخوارزمية الأصلية نفسها بلا أي
-    # لمس): قبل الآلة تُحفظ نسخة كاملة من الخط، وبعدها تُعاد الشموع المُصلَحة
-    # إلى مكانها زمنياً فوق الخط الكامل + نفس دالة التعبئة الأصلية
-    # _fill_missing_slots (من الكود المرجعي نفسه) تُطبَّق على الخط **كاملاً**
-    # فتُسدّ كل الثغرات (حتى يوم كامل) في كل الأمداد المجلوبة لا في آخر
-    # 1000 شمعة فقط — هذا سبب «بعد سد الثغرات لماذا لم تسد ثغرتها».
-    full_before = []
-    try:
-        full_before = list(asset.candles or [])
-    except Exception:
-        full_before = []
-    try:
-        await MT4_WRITER.fill_gap_once(client, asset,
-                                       int(globals().get("PERIOD", 1)))
-        ok = True
-    except _v14_asyncio.CancelledError:
-        raise
-    except Exception as e:
-        V14_METRICS.inc("v14.gap.fill_errors")
-        V14_JOURNAL.record("gap_fill_error", asset=api_symbol,
-                           error=str(e)[:200])
-        try:
-            logmsg(f"[v14-gap] fill error for {api_symbol}: {e}")
-        except Exception:
-            pass
-    # v14.7: إعادة الخط الكامل بعد الآلة — شموع الآلة المُصلَحة تحل محل
-    # المطابق زمنياً فقط + شموع الآلة الجديدة تُضاف، ولا يُفقد أي شمعة من
-    # دفعات التاريخ (نفس نمط استعادة التطبيق في _qx_seal_gaps)، ثم التعبئة
-    # الأصلية _fill_missing_slots على الخط كاملاً تسد كل ثغرة ≤ يوم كامل.
-    try:
-        repaired = list(asset.candles or [])
-        if full_before and repaired:
-            rep_map = {c.get("time"): c for c in repaired}
-            full_t = {c.get("time") for c in full_before}
-            restored = [rep_map.get(c.get("time"), c) for c in full_before]
-            restored += [c for c in repaired if c.get("time") not in full_t]
-            seen, unique = set(), []
-            for c in sorted(restored, key=lambda x: x.get("time", 0)):
-                if c.get("time") not in seen:
-                    seen.add(c.get("time"))
-                    unique.append(c)
-            restored = unique
-        else:
-            restored = repaired or full_before
-        if restored:
-            restored = _fill_missing_slots(restored,
-                                           int(globals().get("PERIOD_SECONDS", 60) or 60),
-                                           max_gap=1440)
-            restored = restored[-int(globals().get("ASSET_MAX_CANDLES", 45000)):]
-            _apply_candles_to_asset(asset, restored)
-    except Exception as e:
-        V14_JOURNAL.record("gap_restore_error", asset=api_symbol,
-                           error=str(e)[:160])
-    dt = time.monotonic() - t0
-    V14_OPENED.note_gap_fill(api_symbol, ok)
-    V14_METRICS.inc("v14.gap.fill_runs" if ok else "v14.gap.fill_failed")
-    V14_METRICS.observe("v14.gap.fill_exec_s", dt)
-    if ok:
-        V14_JOURNAL.record("gap_fill_done", asset=api_symbol,
-                           reason=reason, exec_s=round(dt, 3))
-        try:
-            logmsg(f"[v14-gap] gap fill done for {api_symbol} "
-                   f"({reason}) in {dt:.1f}s — original method untouched")
-        except Exception:
-            pass
-    # v14.9 (لقطة «مهذه المشاكل» — الشرطات المسطحة القديمة لا تُستبدل أبداً):
-    # السد العميق بعد الآلة الأصلية — نفس نداء الجلب الرسمي لكن مرساته عند
-    # أقدم شمعة اصطناعية، فيتقدم من الأقدم للأحدث حتى يُستبدل كل شيء ببيانات
-    # حقيقية من الخادم. كل المسارات (فتح العملة/المراجعة الدورية/الحارس)
-    # تمر من هنا فلا تبقى أي عملة بشرطاتها للأبد.
-    try:
-        if not globals().get("IS_SUBSECOND"):
-            await v14_deep_gap_seal(api_symbol, reason=reason)
-    except _v14_asyncio.CancelledError:
-        raise
-    except Exception as e:
-        V14_JOURNAL.record("deep_seal_error", asset=api_symbol,
-                           error=str(e)[:160])
-    return ok
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# v14.9 — السد العميق: استبدال الشرطات الاصطناعية القديمة بشموع حقيقية
-# ══════════════════════════════════════════════════════════════════════════
-# لقطة «مهذه المشاكل» (2026-11-14): شموع حقيقية ~3 ساعات ثم شرطات مسطحة
-# (أمداد _fill_missing_slots) حتى بداية البث الحي. السبب: النداء الأصلي في
-# fill_gap_once مرساته «الآن» ونافذته آخر 200 شمعة كحد أقصى — فكل شمعة
-# اصطناعية أعمق من ذلك تبقى مسطحة للأبد.
-#
-# الحل (طبقة إضافية بلا أي تغيير في الآلة الأصلية ولا في طريقة الجلب
-# الرسمية): نفس النداء client.get_candles(...) (نفس الطلب history/load
-# ونفس التحليل عبر prepare_candles) لكن مرساته عند أقدم مشكلة — نافذة
-# 200 شمعة في كل دورة تتقدم من الأقدم للأحدث حتى يُستبدل كل شيء ببيانات
-# حقيقية من الخادم. ما لا يرد له الخادم بيانات (عطلة/إغلاق) يُتخطى بمؤشر
-# تقدم لكل عملة حتى لا تدور الجولات على نفس المرساة بلا نهاية.
-_V14_DEEP_CURSOR: Dict[str, float] = {}    # مرساة بلا تقدم → تُتخطى مؤقتاً
-V14_DEEP_REPAIRED: Dict[str, float] = {}   # إشارة للتطبيق: وقت آخر إصلاح عميق
-
-
-def _v14_is_synth_flat(c) -> bool:
-    """v14.9: كاشف الشمعة الاصطناعية الصادق.
-
-    الاصطناعية = مولّدة بلا حجم (volume=0) ومسطحة تماماً (o=h=l=c>0).
-    الشموع الحقيقية المجلوبة من الخادم تأتي بلا حجم أصلاً (volume=0) لكن
-    مداها حقيقي (high>low غالباً) — الكاشف القديم كان يحسبها اصطناعية
-    فلا يتقدم السد أبداً ولا يصل للأعمق (سبب بقاء الشرطات في اللقطة)."""
-    try:
-        if int(c.get("volume", 1) or 0) != 0:
-            return False
-        o = float(c.get("open", 0) or 0)
-        if o <= 0:
-            return False
-        h = float(c.get("high", 0) or 0)
-        l = float(c.get("low", 0) or 0)
-        cl = float(c.get("close", 0) or 0)
-        return o == h == l == cl
-    except Exception:
-        return False
-
-
-async def v14_deep_gap_seal(api_symbol: str, *, reason: str = "deep",
-                            max_passes: int = 8,
-                            window_candles: int = 200,
-                            time_budget_s: float = 45.0) -> bool:
-    """السد العميق — يستبدل الشرطات الاصطناعية القديمة والفراغات العميقة
-    بشموع حقيقية بنفس طريقة الجلب الرسمية (client.get_candles نفسها التي
-    تستخدمها الآلة الأصلية fill_gap_once — نفس الطلب ونفس التحليل، فقط
-    المرساة عند أقدم مشكلة بدل «الآن»).
-
-    - يستبدل الاصطناعي المسطح والفراغات الزمنية فقط — الشموع الحقيقية
-      والشمعة الحية لا تُلمس إطلاقاً (نفس حماية الآلة الأصلية).
-    - منطقة لا يرد لها الخادم بيانات → تُتخطى بمؤشر تقدم (لا حلقات بلا نهاية).
-    - يعيد True إذا استبدل/أضاف شموعاً حقيقية فعلاً.
-    """
-    api_symbol = str(api_symbol or "").strip()
-    if not api_symbol:
-        return False
-    client = globals().get("CLIENT")
-    if client is None or getattr(client, "api", None) is None or \
-            not globals().get("CONNECTION_ALIVE"):
-        return False
-    if globals().get("IS_SUBSECOND"):
-        return False
-    period_s = int(globals().get("PERIOD_SECONDS", 60) or 60)
-    if period_s <= 0:
-        return False
-    asset = _v14_find_asset(api_symbol)
-    if asset is None:
-        try:
-            getter = globals().get("_get_or_create_asset")
-            if getter is not None:
-                asset = getter(api_symbol)
-        except Exception:
-            asset = None
-    if asset is None:
-        return False
-    store = globals().get("MT4_WRITER")
-    sym_store = str(getattr(asset, "symbol", "") or api_symbol)
-    win_s = max(2, int(window_candles)) * period_s
-    t_deadline = time.monotonic() + max(5.0, float(time_budget_s))
-    repaired_any = False
-    for _pass in range(max(1, int(max_passes))):
-        if time.monotonic() > t_deadline:
-            break
-        try:
-            line = sorted(list(asset.candles or []),
-                          key=lambda c: int(c.get("time", 0)))
-        except Exception:
-            break
-        if len(line) < 2:
-            break
-        cur_start = _align_time(int(time.time()))
-        cursor = float(_V14_DEEP_CURSOR.get(api_symbol, 0.0) or 0.0)
-        # أقدم مشكلة بعد المؤشر: شمعة اصطناعية مسطحة أو فجوة زمنية.
-        # الشمعة الحية وما بعدها لا تُلمس (حماية الآلة الأصلية نفسها).
-        oldest_flat = 0
-        oldest_hole = 0
-        prev_t = 0
-        for c in line:
-            t = int(c.get("time", 0))
-            if t >= cur_start:
-                # v14.9-fix: فجوة الذيل بين آخر شمعة مغلقة والفترة الحية
-                # تُقاس قبل القطع — الشمعة الحية نفسها تبقى محمية دائماً
-                if prev_t and (cur_start - prev_t) > period_s and \
-                        (oldest_hole == 0 or prev_t < oldest_hole):
-                    oldest_hole = prev_t
-                break
-            if t > cursor:
-                if _v14_is_synth_flat(c) and (oldest_flat == 0 or t < oldest_flat):
-                    oldest_flat = t
-                if prev_t and (t - prev_t) > period_s and \
-                        (oldest_hole == 0 or prev_t < oldest_hole):
-                    oldest_hole = prev_t
-            prev_t = t
-        _cand = [x for x in (oldest_flat, oldest_hole) if x]
-        target_t = min(_cand) if _cand else 0
-        if not target_t:
-            # لا مشاكل بعد المؤشر — المؤشر يُمسح ليبدأ السد من جديد لاحقاً
-            _V14_DEEP_CURSOR.pop(api_symbol, None)
-            break
-        anchor_end = target_t + win_s
-        if anchor_end > int(time.time()):
-            anchor_end = int(time.time())
-        try:
-            # نفس نداء الجلب الرسمي الذي تستخدمه الآلة الأصلية fill_gap_once
-            # (+ فترة واحدة: نافذة get_candles هي (end-offset, end] — بلا
-            # الفترة الإضافية تبقى شمعة المرساة نفسها خارج النافذة أبداً
-            # فيُهدر جولة كاملة بلا تقدم وتبقى أقدم شرطة كما هي)
-            fetched = await client.get_candles(api_symbol, anchor_end,
-                                               win_s + period_s, period_s)
-        except Exception:
-            fetched = None
-        if not fetched:
-            # لا بيانات من الخادم لهذه المنطقة (عطلة/نهاية تاريخ) — تُتخطى
-            # مؤقتاً حتى لا تدور الجولات على نفس المرساة
-            _V14_DEEP_CURSOR[api_symbol] = float(anchor_end)
-            V14_JOURNAL.record("deep_seal_skip", asset=api_symbol,
-                               anchor=int(anchor_end), reason=reason)
-            continue
-        try:
-            cur_map = {int(c.get("time", 0)): c for c in line}
-        except Exception:
-            break
-        changed = 0
-        for fc in fetched:
-            try:
-                t = _align_time(int(fc.get("time", fc.get("timestamp", 0)) or 0))
-            except Exception:
-                continue
-            if t <= 0 or t >= cur_start or t < target_t:
-                continue
-            o = float(fc.get("open", fc.get("o", 0)) or 0)
-            h = float(fc.get("high", fc.get("max", fc.get("h", 0))) or 0)
-            l = float(fc.get("low", fc.get("min", fc.get("l", 0))) or 0)
-            cl = float(fc.get("close", fc.get("c", 0)) or 0)
-            if o <= 0 or h <= 0 or l <= 0 or cl <= 0:
-                continue
-            ex = cur_map.get(t)
-            if ex is None or _v14_is_synth_flat(ex):
-                cur_map[t] = {"time": t, "open": o, "high": h, "low": l,
-                              "close": cl, "volume": 0}
-                changed += 1
-        if not changed:
-            # الخادم أعاد نفس البيانات بلا تحسن — تُتخطى هذه المرساة مؤقتاً
-            _V14_DEEP_CURSOR[api_symbol] = float(anchor_end)
-            continue
-        merged = sorted(cur_map.values(), key=lambda c: int(c.get("time", 0)))
-        try:
-            merged = _fill_missing_slots(list(merged), period_s, max_gap=1440)
-        except Exception:
-            pass
-        merged = merged[-int(globals().get("ASSET_MAX_CANDLES", 45000)):]
-        try:
-            _apply_candles_to_asset(asset, merged)
-        except Exception:
-            pass
-        try:
-            if store is not None and getattr(store, "save_snapshot", None):
-                store.save_snapshot(sym_store, merged)
-        except Exception:
-            pass
-        repaired_any = True
-        _V14_DEEP_CURSOR.pop(api_symbol, None)
-        V14_DEEP_REPAIRED[api_symbol] = time.time()
-        V14_JOURNAL.record("deep_seal_pass", asset=api_symbol,
-                           replaced=changed, anchor=int(anchor_end),
-                           reason=reason, pass_n=_pass + 1)
-    return repaired_any
-
-
-def v14_note_asset_opened(api_symbol: str, source: str) -> None:
-    """تسجيل فتح عملة + جدولة سد ثغرات فوري لها (من أي خيط).
-
-    هذه هي نقطة «على كل عملة تم فتحها»: كل مسار رسمي يفتح شارتاً يمر
-    هنا، ويحصل على سد ثغرات فوري بنفس الطريقة الأصلية.
-    """
-    api_symbol = str(api_symbol or "").strip()
-    if not api_symbol:
-        return
-    first_open = not V14_OPENED.is_opened(api_symbol)
-    V14_OPENED.note_open(api_symbol, source)
-    V14_METRICS.inc("v14.gap.asset_opened")
-    # السد الفوري فقط للفتح الأول (الإعادة تعتمد علامة التجمد الأصلية
-    # داخل fill_gap_once نفسها — لن تلمس الشموع المسددة)
-    if not first_open:
-        return
-    try:
-        loop = _v14_asyncio.get_running_loop()
-    except Exception:
-        loop = globals().get("ASYNC_LOOP")
-    if loop is None or loop.is_closed():
-        return
-    try:
-        _v14_asyncio.run_coroutine_threadsafe(
-            v14_gap_fill_for_asset(api_symbol, reason=source), loop)
-        V14_JOURNAL.record("gap_fill_scheduled", asset=api_symbol,
-                           source=source)
-    except Exception as e:
-        V14_JOURNAL.record("gap_fill_schedule_fail", asset=api_symbol,
-                           error=str(e)[:160])
-
-
-class V14GapLossAuditor:
-    """مدقق فقدان الشموع — «ولا يتم فقدان».
-
-    المنهج (بلا أي كتابة شموع — الكتابة للطريقة الأصلية فقط):
-      1) لكل عملة مفتوحة: خذ خط الشموع الرسمي (asset.candles أو لقطة
-         قاعدة الشموع الرسمية).
-      2) افحص استمرارية الخانات داخل نافذة الفحص (last slots).
-      3) الفجوة المشبوهة (بين شمعتين متجاورتين فرق > فترة واحدة والفجوة
-         أقل من عتبة إغلاق السوق) → استدعِ نفس fill_gap_once الأصلية
-         لتلك العملة حتى تسد — عدّاد + سجل.
-      4) عتبة إغلاق السوق: للفريمات الدقيقة نعتبر الفجوة > ساعتين خارج
-         نطاق «فقدان» (إغلاق سوق حقيقي للعملات غير OTC — التعبئة المسطحة
-         الأصلية تحدها max_gap=1440 كما هي).
-    """
-
-    def __init__(self, audit_interval: float = 120.0,
-                 suspect_max_gap_s: float = 7200.0) -> None:
-        self.audit_interval = float(audit_interval)
-        self.suspect_max_gap_s = float(suspect_max_gap_s)
-        self._running = False
-
-    def _candle_line(self, api_symbol: str) -> _v14_List[dict]:
-        """خط الشموع الرسمي: من الأصل الحي أولاً ثم من المتجر الرسمي."""
-        asset = _v14_find_asset(api_symbol)
-        candles = []
-        try:
-            if asset is not None and getattr(asset, "candles", None):
-                candles = list(asset.candles)
-        except Exception:
-            candles = []
-        if not candles:
-            try:
-                store = globals().get("MT4_WRITER")
-                if store is not None and getattr(store, "load_snapshot", None):
-                    snap = store.load_snapshot(api_symbol)
-                    if snap:
-                        candles = list(snap)
-            except Exception:
-                pass
-        return candles
-
-    def find_holes(self, api_symbol: str,
-                   candles: _v14_List[dict]) -> _v14_List[int]:
-        """يعيد مواضع الفجوات المشبوهة (طوابع بداية الفجوة) — قراءة فقط."""
-        holes: _v14_List[int] = []
-        period_s = max(1, int(globals().get("PERIOD_SECONDS", 60)))
-        try:
-            line = sorted(candles, key=lambda c: c.get("time", 0))
-            if len(line) < 2:
-                return holes
-            for a, b in zip(line, line[1:]):
-                gap = int(b.get("time", 0)) - int(a.get("time", 0))
-                if period_s < gap <= int(self.suspect_max_gap_s) and \
-                        gap > period_s:
-                    holes.append(int(a.get("time", 0)))
-            # v14.9 (لقطة «مهذه المشاكل»): الشموع الاصطناعية المسطحة (الشرطات)
-            # ثغرات أيضاً — الكاشف القديم كان يحسبها شموعاً فلا يشتغل السد
-            # العميق لها أبداً. تُرفع وقتها ليُستبدل السد العميق كل واحدة
-            # بشمعة حقيقية بنفس طريقة الجلب الرسمية.
-            try:
-                _cur0 = _align_time(int(time.time()))
-                _n_synth = 0
-                for c in line:
-                    if int(c.get("time", 0)) >= _cur0:
-                        continue
-                    if _v14_is_synth_flat(c):
-                        holes.append(int(c.get("time", 0)))
-                        _n_synth += 1
-                        if _n_synth >= 200:
-                            break
-            except Exception:
-                pass
-        except Exception:
-            pass
-        return holes
-
-    async def audit_once(self) -> dict:
-        """مسحة واحدة لكل المفتوحات — يعيد ملخص المسحة."""
-        result = {"audited": 0, "with_holes": 0, "refills": 0}
-        period_s = max(1, int(globals().get("PERIOD_SECONDS", 60)))
-        for sym in V14_OPENED.opened():
-            try:
-                result["audited"] += 1
-                candles = self._candle_line(sym)
-                if not candles:
-                    V14_OPENED.note_audit(sym, 0)
-                    continue
-                holes = self.find_holes(sym, candles)
-                V14_OPENED.note_audit(sym, len(holes))
-                V14_METRICS.gauge(f"v14.gap.{sym}.holes", len(holes))
-                if holes:
-                    result["with_holes"] += 1
-                    V14_METRICS.inc("v14.gap.holes_found", len(holes))
-                    V14_JOURNAL.record("gap_holes", asset=sym,
-                                       holes=len(holes),
-                                       first=int(holes[0]) if holes else 0)
-                    # v14.4 («آلية سد الثغرات لا تفعل معا كل العملات» — الجذر):
-                    # علامة التجمد المحفوظة كانت تُبطل استدعاء الآلة الأصلية
-                    # لهذه العملة بالذات (تعود فوراً بلا سد) فتبقى مثقوبة بينما
-                    # البقية سليمة. عند ثغرات حقيقية فقط: ارفع تجمّد هذه العملة
-                    # ثم نفّذ الخوارزمية الأصلية نفسها كما هي — بلا أي تغيير فيها.
-                    _variants = [sym]
-                    try:
-                        _asset_obj = _v14_find_asset(sym)
-                        if _asset_obj is not None and getattr(_asset_obj, "symbol", ""):
-                            _variants.append(_asset_obj.symbol)
-                    except Exception:
-                        pass
-                    _cleared = clear_gap_flag_any(_variants)
-                    if _cleared:
-                        V14_JOURNAL.record("gap_unfrozen", asset=sym, cleared=_cleared)
-                    # إعادة السد بالطريقة الأصلية نفسها — حتى لا يُفقد شيء
-                    ok = await v14_gap_fill_for_asset(sym, reason="audit")
-                    if ok:
-                        result["refills"] += 1
-                        V14_METRICS.inc("v14.gap.audit_refills")
-                await _v14_asyncio.sleep(0.05)
-            except _v14_asyncio.CancelledError:
-                raise
-            except Exception as e:
-                V14_JOURNAL.record("gap_audit_error", asset=sym,
-                                   error=str(e)[:160])
-        return result
-
-    async def loop(self) -> None:
-        """حلقة المدقق الدورية — supervised، لا تنهار."""
-        self._running = True
-        await _v14_asyncio.sleep(30.0)   # اترك الفتح الأول يكتمل
-        while True:
-            try:
-                if globals().get("CLIENT") is None or \
-                        not globals().get("CONNECTION_ALIVE"):
-                    await _v14_asyncio.sleep(5.0)
-                    continue
-                res = await self.audit_once()
-                if res["with_holes"]:
-                    try:
-                        logmsg(f"[v14-gap] audit: {res['audited']} opened assets, "
-                               f"{res['with_holes']} had holes, "
-                               f"{res['refills']} refilled (original method)")
-                    except Exception:
-                        pass
-                await _v14_asyncio.sleep(self.audit_interval)
-            except _v14_asyncio.CancelledError:
-                self._running = False
-                raise
-            except Exception as e:
-                V14_METRICS.inc("v14.gap.audit_errors")
-                V14_JOURNAL.record("gap_audit_loop_error", error=str(e)[:200])
-                await v14_backoff_sleep(2, base=2.0, cap=30.0, jitter=0.2)
-
-
-# المدقق العام
-V14_GAP_AUDITOR = V14GapLossAuditor()
-
-
-async def v14_gap_guard_loop() -> None:
-    """حلقة حارس الثغرات: تعمل كل 60 ثانية مسحة سريعة لكل عملة مفتوحة
-    لضمان أن الآلية الأصلية مرّت عليها (بلا تعديل طريقة)."""
-    await _v14_asyncio.sleep(20.0)
-    while True:
-        try:
-            client = globals().get("CLIENT")
-            if client is None or not globals().get("CONNECTION_ALIVE") or \
-                    globals().get("IS_SUBSECOND"):
-                await _v14_asyncio.sleep(10.0)
-                continue
-            # لكل عملة مفتوحة لم تُسد ثغراتها بعد (علامة التجمد الأصلية
-            # داخل fill_gap_once تمنع اللمس المتكرر — استدعاؤها آمن)
-            for sym in V14_OPENED.opened():
-                rec = V14_OPENED.snapshot().get(sym, {})
-                if not rec.get("last_gap_fill_at"):
-                    ok = await v14_gap_fill_for_asset(sym, reason="guard")
-                    if ok:
-                        break   # واحدة في الدورة — البوابة تفرز البقية
-                await _v14_asyncio.sleep(0.1)
-            await _v14_asyncio.sleep(60.0)
-        except _v14_asyncio.CancelledError:
-            raise
-        except Exception as e:
-            V14_JOURNAL.record("gap_guard_error", error=str(e)[:200])
-            await v14_backoff_sleep(2, base=2.0, cap=30.0, jitter=0.2)
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# v14 الجزء C — الوحدات 7 و 8 و 9 + نقاط الربط:
-#   7) V14 SUPERVISOR — دون انهيار الخوادم (مشرف كل حلقة + خطافات استثناء
-#      + حصاد المهام + حارس ذاكرة/قرص + تفريغ حمل + نبضة حياة)
-#   8) V14 RESILIENCE — إعادة تشغيل البث بعد العودة (نمط pyquotex) + مراقب
-#      جلسة + خطافات التركيب على المسارات الرسمية (بلا تعديل المسارات)
-#   9) V14 API — الواجهة العامة للتطبيق + بناء حلقات الخلفية المشرفة
-# ════════════════════════════════════════════════════════════════════════════
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# الوحدة 7 — V14 SUPERVISOR (دون انهيار الخوادم)
-# ════════════════════════════════════════════════════════════════════════════
-# طلب المستخدم: «تخص في تقويت السرفر وطريقة العمل دون انهيار الخوادم».
-#
-# الفكرة الجوهرية — نفس عقد pyquotex/ws/client.py::run_forever مطبق على كل
-# حلقة خلفية في الخادم:
-#   while True:
-#       try: await connect_once(); attempt = 0      # النجاح يصفّر العداد
-#       except: backoff_sleep(attempt); attempt += 1
-#
-# أي حلقة تموت (استثناء غير متوقع) يُعاد تشغيلها بـ backoff مهزوز — الخادم
-# لا ينهار من انهيار حلقة واحدة. فوق ذلك:
-#   - خطافات استثناء عامة (sys + threading + حلقة asyncio): كل شيء يُسجل.
-#   - حصاد المهام الميتة الصامتة كل 30 ثانية.
-#   - حارس ذاكرة (gc عند العتبات) وحارس قرص (تفريغ الحمل عند امتلاء).
-#   - تفريغ حمل GRREN/AMBER/RED — RED يوقف الصيانة فقط؛ البث الحي وسد
-#     الثغرات وفتح الشموع للمستخدم لا يتوقفان أبداً.
-#   - نبضة حياة heartbeat JSON كل 10 ثوانٍ — إثبات حياة للخادم والتطبيق.
-# ════════════════════════════════════════════════════════════════════════════
-
-class V14LoopStatus:
-    """حالة حلقة واحدة تحت المشرف."""
-    __slots__ = ("name", "runs", "crashes", "last_alive_at", "last_error",
-                 "last_error_at", "ever_started")
-
-    def __init__(self, name: str) -> None:
-        self.name = name
-        self.runs = 0
-        self.crashes = 0
-        self.last_alive_at = 0.0
-        self.last_error = ""
-        self.last_error_at = 0.0
-        self.ever_started = False
-
-
-class V14Supervisor:
-    """مشرف الحلقات — كل حلقة خلفية في v14 تعيش تحت إشرافه.
-
-    الضمانات:
-      - إعادة تشغيل تلقائية بـ backoff مهزوز (نمط pyquotex run_forever).
-      - سقف معدل إعادة التشغيل: بعد 6 انهيارات/ساعة للحلقة الواحدة تُترك
-        تنام 300 ثانية (حماية من دوران انهيار يشعل المعالج).
-      - كل انهيار: عدّاد + سجل جلسة + رسالة ترمينال — لا صمت.
-      - status() يعيد حالة كل الحلقات للنبضة والتقارير.
-    """
-
-    def __init__(self) -> None:
-        self._lock = _v14_threading.RLock()
-        self._statuses: _v14_Dict[str, V14LoopStatus] = {}
-        self._restart_timestamps: _v14_Dict[str, _v14_List[float]] = {}
-        self.started_at = time.time()
-
-    def status_of(self, name: str) -> V14LoopStatus:
-        with self._lock:
-            st = self._statuses.get(name)
-            if st is None:
-                st = V14LoopStatus(name)
-                self._statuses[name] = st
-            return st
-
-    def _restart_backoff(self, name: str) -> float:
-        """سقف معدل الإعادة: 6/ساعة لكل حلقة → نوم طويل 300 ثانية."""
-        now = time.monotonic()
-        with self._lock:
-            stamps = self._restart_timestamps.setdefault(name, [])
-            while stamps and (now - stamps[0]) > 3600.0:
-                stamps.pop(0)
-            stamps.append(now)
-            rate_ok = len(stamps) <= 6
-        if rate_ok:
-            return 0.0
-        return 300.0
-
-    async def supervise(self, name: str,
-                        factory: Callable[[], _v14_Awaitable]) -> None:
-        """يشغل الحلقة للأبد — يعيد تشغيلها عند كل موت بلا استسلام."""
-        st = self.status_of(name)
-        attempt = 0
-        while True:
-            try:
-                st.ever_started = True
-                st.runs += 1
-                st.last_alive_at = time.time()
-                V14_JOURNAL.record("loop_start", loop=name, run=st.runs)
-                await factory()
-                # الحلقة اللانهائية لا تعود عادة — عودتها تعامل كتوقف لطيف
-                st.last_alive_at = time.time()
-                V14_JOURNAL.record("loop_returned", loop=name)
-                await _v14_asyncio.sleep(1.0)
-                attempt = 0
-            except _v14_asyncio.CancelledError:
-                V14_JOURNAL.record("loop_cancelled", loop=name)
-                raise
-            except Exception as e:
-                attempt += 1
-                st.crashes += 1
-                st.last_error = f"{type(e).__name__}: {e}"[:200]
-                st.last_error_at = time.time()
-                V14_METRICS.inc("v14.supervisor.loop_crashes")
-                V14_METRICS.inc(f"v14.supervisor.crash.{name}")
-                V14_JOURNAL.record("loop_crash", loop=name,
-                                   run=st.runs, attempt=attempt,
-                                   error=st.last_error)
-                try:
-                    logmsg(f"[v14-supervisor] loop '{name}' crashed "
-                           f"(run {st.runs}, attempt {attempt}): "
-                           f"{st.last_error} — restarting")
-                except Exception:
-                    pass
-                # سقف معدل الإعادة ثم backoff مهزوز (نمط pyquotex)
-                extra = self._restart_backoff(name)
-                if extra:
-                    try:
-                        logmsg(f"[v14-supervisor] loop '{name}' restart-rate "
-                               f"cap hit — cooling down {extra:.0f}s")
-                    except Exception:
-                        pass
-                    await _v14_asyncio.sleep(extra)
-                await v14_backoff_sleep(attempt, base=0.5, cap=30.0, jitter=0.15)
-
-    def status(self) -> dict:
-        with self._lock:
-            out = {}
-            for name, st in self._statuses.items():
-                out[name] = {
-                    "runs": st.runs,
-                    "crashes": st.crashes,
-                    "ever_started": st.ever_started,
-                    "age_since_alive_s": round(time.time() - st.last_alive_at, 1)
-                    if st.last_alive_at else None,
-                    "last_error": st.last_error,
-                }
-            return out
-
-    def alive_count(self) -> int:
-        with self._lock:
-            return sum(1 for st in self._statuses.values()
-                       if st.ever_started and not st.last_error)
-
-
-# المشرف العام
-V14_SUPERVISOR = V14Supervisor()
-
-
-async def v14_supervise(name: str,
-                        factory: Callable[[], _v14_Awaitable]) -> None:
-    """نقطة دخول موحدة: يشغّل أي حلقة تحت المشرف — تستخدم من __main__ ومن
-    التطبيق بنفس الطريقة."""
-    await V14_SUPERVISOR.supervise(name, factory)
-
-
-def install_v14_exception_hooks() -> None:
-    """خطافات استثناء عامة — كل خطأ غير ملتقط يُسجل ولا يُسقط الخادم.
-
-    يغطي الثلاثة:
-      - sys.excepthook: الاستثناءات في الخيط الرئيسي.
-      - threading.excepthook: الاستثناءات في خيوط النظام (العدّاء الكاتب...).
-      - loop.set_exception_handler: المهام الصامتة في حلقة asyncio.
-    """
-    def _hook(exc_type, exc_value, exc_tb) -> None:
-        try:
-            V14_METRICS.inc("v14.hooks.uncaught")
-            V14_JOURNAL.record("uncaught",
-                               kind="sys",
-                               error=f"{exc_type.__name__}: {exc_value}")
-            try:
-                logmsg(f"[v14-hook] uncaught exception: "
-                       f"{exc_type.__name__}: {exc_value}")
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-    try:
-        old_hook = getattr(sys, "excepthook", None)
-        sys.excepthook = _hook
-    except Exception:
-        pass
-
-    try:
-        import threading as _th
-        _old_th = getattr(_th, "excepthook", None)
-
-        def _thread_hook(args) -> None:
-            try:
-                V14_METRICS.inc("v14.hooks.uncaught")
-                V14_JOURNAL.record(
-                    "uncaught", kind="thread",
-                    thread=getattr(args, "thread", None) and
-                    args.thread.name or "?",
-                    error=f"{getattr(args, 'exc_type', type(None)).__name__}: "
-                          f"{getattr(args, 'exc_value', None)}")
-                try:
-                    logmsg(f"[v14-hook] uncaught in thread: {args}")
-                except Exception:
-                    pass
-            except Exception:
-                pass
-        _th.excepthook = _thread_hook
-    except Exception:
-        pass
-
-    # معالج استثناءات حلقة asyncio — يُثبَّت عند بدء الحلقات المشرفة
-    def _loop_handler(loop, context) -> None:
-        try:
-            exc = context.get("exception")
-            msg = context.get("message", "")
-            V14_METRICS.inc("v14.hooks.loop_exceptions")
-            V14_JOURNAL.record("loop_exception",
-                               message=str(msg)[:160],
-                               error=f"{type(exc).__name__}: {exc}" if exc else "")
-        except Exception:
-            pass
-
-    try:
-        loop = globals().get("ASYNC_LOOP")
-        if loop is not None:
-            loop.set_exception_handler(_loop_handler)
-    except Exception:
-        pass
-
-
-class V14TaskHarvester:
-    """حصاد المهام الميتة الصامتة — يستيقظ كل 30 ثانية ويمسح كل المهام
-    المنتهية باستثناء لم تُقرأ نتيجتها (تلك التي كانت ستُخفى بصمت)."""
-
-    def __init__(self) -> None:
-        self._seen: _v14_Set[int] = set()
-        self.harvested = 0
-
-    async def loop(self) -> None:
-        await _v14_asyncio.sleep(15.0)
-        while True:
-            try:
-                await _v14_asyncio.sleep(30.0)
-                pending_harvest = []
-                for t in list(_v14_asyncio.all_tasks()):
-                    try:
-                        if t.done() and not t.cancelled():
-                            exc = t.exception()
-                            if exc is not None and \
-                                    id(t) not in self._seen:
-                                self._seen.add(id(t))
-                                pending_harvest.append((t, exc))
-                    except Exception:
-                        continue
-                if len(self._seen) > 4096:
-                    self._seen.clear()
-                for t, exc in pending_harvest:
-                    self.harvested += 1
-                    V14_METRICS.inc("v14.supervisor.harvested_exceptions")
-                    V14_JOURNAL.record("harvested_task_exception",
-                                       task=t.get_name(),
-                                       error=f"{type(exc).__name__}: {exc}")
-                    try:
-                        logmsg(f"[v14-supervisor] harvested silent task "
-                               f"exception: {type(exc).__name__}: {exc}")
-                    except Exception:
-                        pass
-            except _v14_asyncio.CancelledError:
-                raise
-            except Exception:
-                await v14_backoff_sleep(1, base=1.0, cap=10.0)
-
-
-class V14MemoryGuard:
-    """حارس ذاكرة — يأخذ RSS كل 30 ثانية ويستجيب بالعتبات:
-
-      soft (افتراضي 512MB): gc.collect() + عدّاد.
-      hard (افتراضي 768MB): gc.collect() كامل + تنظيف كاشات v14 المملوكة
-                            فقط (لا يلمس شموع الأصول ولا أي بيانات رسمية
-                            أبداً) + سجل + نبضة.
-
-    RSS يقرأ من /proc/self/statm على لينكس ومن resource على غيره — بلا
-    مكتبات خارجية.
-    """
-
-    def __init__(self, soft_mb: float = 512.0, hard_mb: float = 768.0) -> None:
-        self.soft_mb = float(soft_mb)
-        self.hard_mb = float(hard_mb)
-        self.soft_events = 0
-        self.hard_events = 0
-        self.last_rss_mb = 0.0
-
-    def rss_mb(self) -> float:
-        try:
-            # /proc/self/statm: الحقل الثاني = صفحات مقيمة (resident)
-            with open("/proc/self/statm", "r") as f:
-                parts = f.read().split()
-            pages = int(parts[1])
-            return pages * 4096.0 / (1024.0 * 1024.0)
-        except Exception:
-            try:
-                import resource as _res
-                ru = _res.getrusage(_res.RUSAGE_SELF).ru_maxrss
-                return float(ru) / 1024.0   # KB→MB (لينكس)
-            except Exception:
-                return 0.0
-
-    def _drop_owned_caches(self) -> None:
-        """تنظيف الكاشات المملوكة لـ v14 فقط — صفر لمس للبيانات الرسمية."""
-        try:
-            try:
-                V14_GATE._FETCH_CACHE_TTL_FLUSH = True  # noqa — لا شيء فعلي
-            except Exception:
-                pass
-            # كاش debounce البوابة الأصلية يملكه v13 — لا نلمسه.
-            # فقط المتتبعات الغنية والسجلات الفارغة:
-            with V14_TICKS._lock:
-                idle = [s for s, t in V14_TICKS.trackers.items()
-                        if t.silence_seconds() > 600.0 and not t.ring]
-                for s in idle:
-                    V14_TICKS.trackers.pop(s, None)
-            V14_GATE._prune_chains()
-        except Exception:
-            pass
-
-    async def loop(self) -> None:
-        await _v14_asyncio.sleep(20.0)
-        while True:
-            try:
-                await _v14_asyncio.sleep(30.0)
-                rss = self.rss_mb()
-                self.last_rss_mb = rss
-                V14_METRICS.gauge("v14.memory.rss_mb", round(rss, 1))
-                if rss <= 0:
-                    continue
-                if rss >= self.hard_mb:
-                    self.hard_events += 1
-                    V14_METRICS.inc("v14.memory.hard_events")
-                    collected = _v14_gc.collect(2)
-                    self._drop_owned_caches()
-                    V14_JOURNAL.record("memory_hard", rss_mb=round(rss, 1),
-                                       collected=collected)
-                    try:
-                        logmsg(f"[v14-memory] HARD {rss:.0f}MB — "
-                               f"gc({collected}) + owned-caches cleanup")
-                    except Exception:
-                        pass
-                elif rss >= self.soft_mb:
-                    self.soft_events += 1
-                    V14_METRICS.inc("v14.memory.soft_events")
-                    collected = _v14_gc.collect()
-                    V14_JOURNAL.record("memory_soft", rss_mb=round(rss, 1),
-                                       collected=collected)
-                V14_METRICS.gauge("v14.memory.soft_events", self.soft_events)
-                V14_METRICS.gauge("v14.memory.hard_events", self.hard_events)
-            except _v14_asyncio.CancelledError:
-                raise
-            except Exception:
-                await v14_backoff_sleep(1, base=2.0, cap=15.0)
-
-
-class V14DiskGuard:
-    """حارس قرص — يفحص المساحة الحرة كل 10 دقائق على مجلدات HST وقاعدة
-    الشموع. عند الانخفاض يفعّل تفريغ الحمل (يوقف الجلب الخلفي فقط —
-    البث الحي وسد الثغرات للمفتوحات لا يتوقفان أبداً) ويسجل.
-
-    العتبات: warn < 1GB ، shed < 500MB ، critical < 200MB.
-    """
-
-    def __init__(self) -> None:
-        self.warn_free_mb = 1024.0
-        self.shed_free_mb = 500.0
-        self.critical_free_mb = 200.0
-        self.last_free_mb = 0.0
-        self.shed_active = False
-
-    def _targets(self) -> _v14_List[str]:
-        out = []
-        try:
-            out.append(globals().get("MT4_HISTORY_PATH") or ".")
-        except Exception:
-            out.append(".")
-        return out
-
-    def min_free_mb(self) -> float:
-        vals = []
-        for t in self._targets():
-            try:
-                usage = _v14_shutil.disk_usage(t)
-                vals.append(usage.free / (1024.0 * 1024.0))
-            except Exception:
-                continue
-        return min(vals) if vals else 0.0
-
-    async def loop(self) -> None:
-        await _v14_asyncio.sleep(30.0)
-        while True:
-            try:
-                await _v14_asyncio.sleep(600.0)
-                free = self.min_free_mb()
-                self.last_free_mb = free
-                V14_METRICS.gauge("v14.disk.free_mb", round(free, 1))
-                if free <= 0:
-                    continue
-                if free <= self.critical_free_mb:
-                    self.shed_active = True
-                    V14_PAUSE_PRELOAD.set(True)
-                    V14_SHED_PRESSURE.set(True)
-                    V14_JOURNAL.record("disk_critical", free_mb=round(free, 1))
-                    try:
-                        logmsg(f"[v14-disk] CRITICAL {free:.0f}MB free — "
-                               f"background fetching paused (live streams "
-                               f"and gap-fill continue)")
-                    except Exception:
-                        pass
-                elif free <= self.shed_free_mb:
-                    self.shed_active = True
-                    V14_PAUSE_PRELOAD.set(True)
-                    V14_SHED_PRESSURE.set(True)
-                    V14_JOURNAL.record("disk_shed", free_mb=round(free, 1))
-                else:
-                    if self.shed_active:
-                        self.shed_active = False
-                        V14_PAUSE_PRELOAD.set(False)
-                        V14_JOURNAL.record("disk_recovered",
-                                           free_mb=round(free, 1))
-            except _v14_asyncio.CancelledError:
-                raise
-            except Exception:
-                await v14_backoff_sleep(1, base=2.0, cap=15.0)
-
-
-class V14LoadShedder:
-    """مفرّغ الحمل — يصنف الضغط GREEN/AMBER/RED من أربعة مؤشرات:
-
-      - عمق بوابة الطلبات (تكدس = ضغط).
-      - ذاكرة RSS.
-      - معدل إعادة الاتصال الأخير.
-      - مساحة القرص (من الحارس).
-
-    RED: يوقف الصيانة فقط (يعلّم V14_PAUSE_PRELOAD و V14_SHED_PRESSURE).
-    البث الحي، سد الثغرات للمفتوحات، وفتح الشموع للمستخدم لا يتوقفان أبداً.
-    """
-
-    def __init__(self) -> None:
-        self.state = "GREEN"
-
-    def evaluate(self) -> str:
-        try:
-            depth = V14_GATE.depth()
-            rss = V14_MEMORY.last_rss_mb if "V14_MEMORY" in globals() else 0.0
-            reconnect_hint = V14_RECONNECT_HINT.get()
-            disk = V14_DISK.last_free_mb if "V14_DISK" in globals() else 0.0
-            if depth >= 40 or reconnect_hint or \
-                    (disk > 0 and disk <= V14_DISK.critical_free_mb):
-                return "RED"
-            if depth >= 15 or (rss and rss >= V14_MEMORY.soft_mb):
-                return "AMBER"
-            return "GREEN"
-        except Exception:
-            return "GREEN"
-
-    async def loop(self) -> None:
-        await _v14_asyncio.sleep(25.0)
-        while True:
-            try:
-                await _v14_asyncio.sleep(15.0)
-                new_state = self.evaluate()
-                if new_state != self.state:
-                    old = self.state
-                    self.state = new_state
-                    V14_METRICS.gauge("v14.pressure_state",
-                                      {"GREEN": 0, "AMBER": 1, "RED": 2}
-                                      .get(new_state, 0))
-                    V14_JOURNAL.record("pressure", old=old, new=new_state)
-                    try:
-                        logmsg(f"[v14-shed] pressure {old} -> {new_state}")
-                    except Exception:
-                        pass
-                if self.state == "RED":
-                    V14_PAUSE_PRELOAD.set(True)
-                    V14_SHED_PRESSURE.set(True)
-                elif self.state == "AMBER":
-                    V14_PAUSE_PRELOAD.set(True)
-                    V14_SHED_PRESSURE.set(False)
-                else:
-                    # GREEN: أزل العلم فقط لو حارس القرص ليس هو الفاعل
-                    if not V14_DISK.shed_active:
-                        V14_PAUSE_PRELOAD.set(False)
-                    V14_SHED_PRESSURE.set(False)
-                V14_METRICS.gauge("v14.gate.depth", V14_GATE.depth())
-            except _v14_asyncio.CancelledError:
-                raise
-            except Exception:
-                await v14_backoff_sleep(1, base=2.0, cap=15.0)
-
-
-class V14Heartbeat:
-    """نبضة الحياة — تكتب qx_server_heartbeat.json كل 10 ثوانٍ:
-
-      وقت، pid، uptime، حالة الحلقات المشرفة، عمق البوابة، تيكات/ثانية،
-      حالة الضغط، الذاكرة، القرص، سد الثغرات، النقاط، الجلسة.
-
-    كتابة ذرية (tmp + rename) — القراءة آمنة دائماً من التطبيق أو المشغل.
-    """
-
-    def __init__(self, interval: float = 10.0) -> None:
-        self.interval = float(interval)
-        try:
-            self.path = _v14_os.path.join(
-                _v14_base_dir(), "qx_server_heartbeat.json")
-        except Exception:
-            self.path = "qx_server_heartbeat.json"
-        self.writes = 0
-
-    def payload(self) -> dict:
-        try:
-            mem = V14_MEMORY.rss_mb()
-        except Exception:
-            mem = 0.0
-        try:
-            disk = V14_DISK.last_free_mb
-        except Exception:
-            disk = 0.0
-        try:
-            endpoint_info = V14_ENDPOINTS.info()
-        except Exception:
-            endpoint_info = {}
-        try:
-            session = V14_SESSION.info()
-        except Exception:
-            session = {}
-        try:
-            shed = V14_LOAD_SHEDDER.state
-        except Exception:
-            shed = "GREEN"
-        return {
-            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "epoch": time.time(),
-            "pid": _v14_os.getpid(),
-            "uptime_s": round(time.time() - _V14_STARTED_AT, 1),
-            "connection_alive": bool(globals().get("CONNECTION_ALIVE")),
-            "active_host": globals().get("QX_HOST", ""),
-            "streaming_assets": len(globals().get("ALL_STREAMING_ASSETS") or []),
-            "opened_assets": len(V14_OPENED),
-            "pressure": shed,
-            "memory_rss_mb": round(mem, 1),
-            "disk_free_mb": round(disk, 1),
-            "gate": v14_gate_snapshot(),
-            "ticks_rate_30s": round(V14_TICKS_RATE.rate(30.0), 2),
-            "gap_fills": V14_METRICS.counter("v14.gap.fill_runs"),
-            "gap_audits_holes": V14_METRICS.counter("v14.gap.holes_found"),
-            "supervisor": V14_SUPERVISOR.status(),
-            "endpoints": endpoint_info,
-            "session": session,
-            "journal": V14_JOURNAL.info(),
-        }
-
-    async def loop(self) -> None:
-        await _v14_asyncio.sleep(10.0)
-        while True:
-            try:
-                await _v14_asyncio.sleep(self.interval)
-                data = self.payload()
-                tmp = self.path + ".tmp"
-                with open(tmp, "w", encoding="utf-8") as f:
-                    _v14_json.dump(data, f, ensure_ascii=False, indent=1)
-                _v14_os.replace(tmp, self.path)
-                self.writes += 1
-                V14_METRICS.gauge("v14.heartbeat.writes", self.writes)
-            except _v14_asyncio.CancelledError:
-                raise
-            except Exception:
-                await v14_backoff_sleep(1, base=1.0, cap=10.0)
-
-
-# الكائنات العامة للحارس (تُنشأ هنا — تستعملها الحلقات ومفرّغ الحمل)
-V14_MEMORY = V14MemoryGuard()
-V14_DISK = V14DiskGuard()
-V14_LOAD_SHEDDER = V14LoadShedder()
-V14_HEARTBEAT = V14Heartbeat()
-
-
-async def v14_harvester_loop() -> None:
-    await V14TaskHarvester().loop()
-
-
-async def v14_memory_guard_loop() -> None:
-    await V14_MEMORY.loop()
-
-
-async def v14_disk_guard_loop() -> None:
-    await V14_DISK.loop()
-
-
-async def v14_load_shedder_loop() -> None:
-    await V14_LOAD_SHEDDER.loop()
-
-
-async def v14_heartbeat_loop() -> None:
-    await V14_HEARTBEAT.loop()
-
-
-async def v14_metrics_loop() -> None:
-    """لوحة المقاييس الدورية في الترمينال — كل 90 ثانية كتلة مرتبة."""
-    await _v14_asyncio.sleep(45.0)
-    while True:
-        try:
-            try:
-                report = V14_METRICS.format_report(
-                    f"V14 METRICS — host={globals().get('QX_HOST', '?')} "
-                    f"assets={len(globals().get('ALL_STREAMING_ASSETS') or [])} "
-                    f"opened={len(V14_OPENED)} pressure={V14_LOAD_SHEDDER.state}")
-                logmsg(report)
-            except Exception:
-                pass
-            await _v14_asyncio.sleep(90.0)
-        except _v14_asyncio.CancelledError:
-            raise
-        except Exception:
-            await v14_backoff_sleep(1, base=2.0, cap=15.0)
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# الوحدة 8 — V14 RESILIENCE (إعادة تشغيل البث بعد العودة + مراقب جلسة)
-# ════════════════════════════════════════════════════════════════════════════
-# منقول من pyquotex/ws/client.py:
-#   _replay_subscriptions(): بعد كل إعادة اتصال ناجحة (open_count > 1)
-#   انتظر حتى CONNECTED (حتى 40 × 0.05s) ثم أعد إصدار كل اشتراك متتبع.
-#
-# الخادم الأساسي auto_reconnect يعيد الاتصال نفسه — لكنه (بحسب توقيت انقطاع)
-# يعيد تشغيل البث للأصول المتدفقة فقط، ويعيد الجلب الكامل فقط للانقطاع
-# الطويل. v14 يضيف طبقة ضمان مستقلة: مراقب انتقال CONNECTION_ALIVE
-# False→True يعيد تشغيل بث كل أصل متدفق له ماتت مهمته (بنفس نمط
-# auto_reconnect حرفياً: إلغاء المهمة القديمة ثم run_coroutine_threadsafe
-# لـ realtime_stream / subsecond_stream) — بلا أي مسار اتصال جديد.
-# ════════════════════════════════════════════════════════════════════════════
-
-class V14SessionStateMachine:
-    """آلة حالات الجلسة — BOOT→CONNECTING→CONNECTED→DEGRADED→
-    RECONNECTING→CONNECTED ... توثق كل انتقال بمدته في السجل والمقاييس.
-
-    لا تتحكم في الاتصال — تراقب وتوثق فقط (المسار الرسمي أصحاب القرار).
-    """
-
-    BOOT = "BOOT"
-    CONNECTED = "CONNECTED"
-    DEGRADED = "DEGRADED"          # اتصال حي لكن بلا تيكات/صمت طويل
-    RECONNECTING = "RECONNECTING"  # الكود الأساسي يعيد الاتصال الآن
-
-    def __init__(self) -> None:
-        self.state = self.BOOT
-        self.entered_at = time.time()
-        self.transitions = 0
-        self.drops = 0
-        self.longest_connected_s = 0.0
-        self.last_connected_at = 0.0
-        self.total_connected_s = 0.0
-        self._lock = _v14_threading.Lock()
-
-    def _enter(self, state: str, note: str = "") -> None:
-        now = time.time()
-        with self._lock:
-            prev = self.state
-            dur = now - self.entered_at
-            self.state = state
-            self.entered_at = now
-            self.transitions += 1
-            if prev == self.CONNECTED:
-                self.total_connected_s += dur
-                self.longest_connected_s = max(self.longest_connected_s, dur)
-        if state == self.CONNECTED:
-            self.last_connected_at = now
-        if state == self.RECONNECTING:
-            self.drops += 1
-        V14_JOURNAL.record("session_state", old=prev, new=state,
-                           prev_duration_s=round(dur, 1), note=note[:120])
-        V14_METRICS.inc("v14.session.transitions")
-        try:
-            logmsg(f"[v14-session] {prev} -> {state} "
-                   f"(prev lasted {dur:.0f}s)")
-        except Exception:
-            pass
-
-    def observe(self) -> None:
-        """قراءة الواقع الحالي وتحديث الحالة وفقها — بلا أي تدخل."""
-        alive = bool(globals().get("CONNECTION_ALIVE"))
-        client = globals().get("CLIENT")
-        has_client = client is not None and getattr(client, "api", None) is not None
-        with self._lock:
-            state = self.state
-        if alive and has_client:
-            if state in (self.BOOT, self.RECONNECTING, self.DEGRADED):
-                self._enter(self.CONNECTED)
-        elif alive and not has_client:
-            if state == self.CONNECTED:
-                self._enter(self.DEGRADED, "alive but client lost")
-        elif not alive:
-            if state in (self.CONNECTED, self.DEGRADED):
-                self._enter(self.RECONNECTING, "connection lost")
-
-    def info(self) -> dict:
-        with self._lock:
-            cur_dur = time.time() - self.entered_at
-            return {
-                "state": self.state,
-                "state_age_s": round(cur_dur, 1),
-                "transitions": self.transitions,
-                "drops": self.drops,
-                "longest_connected_s": round(self.longest_connected_s, 1),
-                "total_connected_s": round(self.total_connected_s, 1),
-            }
-
-
-V14_SESSION = V14SessionStateMachine()
-
-
-class V14SubscriptionReplay:
-    """إعادة تشغيل البث بعد العودة — نمط pyquotex _replay_subscriptions.
-
-    يعمل مع مراقب الجلسة: عند انتقال RECONNECTING→CONNECTED بعد انقطاع
-    يُعاد تشغيل بث كل أصل متدفق مهمته ماتة — بنفس نمط auto_reconnect
-    (إلغاء + run_coroutine_threadsafe + إيقاع 0.05s). المهمة الحية
-    لا تُلمس (لا ازدواجية بث).
-    """
-
-    def __init__(self) -> None:
-        self.replays = 0
-        self.restarted_assets = 0
-        self._last_replay_at = 0.0
-
-    async def replay_all(self) -> int:
-        """يعيد تشغيل البث لكل أصل متدفق مهمته ماتة — يعيد عدد المعادين."""
-        loop = _v14_asyncio.get_running_loop()
-        # انتظار جاهزية الاتصال — نمط pyquotex (حتى 40 × 0.05s = 2s)
-        for _ in range(40):
-            client = globals().get("CLIENT")
-            if client is not None and getattr(client, "api", None) is not None \
-                    and globals().get("CONNECTION_ALIVE"):
-                break
-            await _v14_asyncio.sleep(0.05)
-        client = globals().get("CLIENT")
-        if client is None or getattr(client, "api", None) is None:
-            return 0
-        restarted = 0
-        for asset in list(globals().get("ALL_STREAMING_ASSETS") or []):
-            try:
-                task = getattr(asset, "stream_task", None)
-                alive = False
-                try:
-                    alive = task is not None and not task.done()
-                except Exception:
-                    alive = False
-                if alive and getattr(asset, "streaming", False):
-                    continue   # حي — لا تلمس (بلا ازدواجية)
-                try:
-                    if task is not None and not task.done():
-                        task.cancel()
-                except Exception:
-                    pass
-                asset.streaming = False
-                asset.stream_task = asyncio.run_coroutine_threadsafe(
-                    subsecond_stream(asset) if globals().get("IS_SUBSECOND")
-                    else realtime_stream(asset), loop)
-                restarted += 1
-                await _v14_asyncio.sleep(0.05)  # نفس إيقاع auto_reconnect
-            except Exception as e:
-                V14_JOURNAL.record("replay_asset_fail",
-                                   asset=getattr(asset, "api_symbol", "?"),
-                                   error=str(e)[:160])
-        if restarted:
-            self.replays += 1
-            self.restarted_assets += restarted
-            self._last_replay_at = time.time()
-            V14_METRICS.inc("v14.resilience.replays")
-            V14_METRICS.inc("v14.resilience.restarted_assets", restarted)
-            V14_JOURNAL.record("subscription_replay", restarted=restarted)
-            try:
-                logmsg(f"[v14-resilience] subscription replay: restarted "
-                       f"{restarted} dead stream(s) after reconnect")
-            except Exception:
-                pass
-        return restarted
-
-    async def loop(self) -> None:
-        """المراقب الدوري: يلاحظ انتقالات الجلسة ويشغل الإعادة عند العودة."""
-        await _v14_asyncio.sleep(10.0)
-        prev_state = None
-        while True:
-            try:
-                await _v14_asyncio.sleep(2.0)
-                V14_SESSION.observe()
-                state = V14_SESSION.state
-                if prev_state is not None and \
-                        prev_state == V14SessionStateMachine.RECONNECTING and \
-                        state == V14SessionStateMachine.CONNECTED:
-                    # العودة من انقطاع — أعد الاشتراكات (نمط pyquotex)
-                    await self.replay_all()
-                    # أيضاً: سد ثغرات سريع لكل المفتوحات بعد الانقطاع
-                    for sym in V14_OPENED.opened():
-                        asyncio.ensure_future(
-                            v14_gap_fill_for_asset(sym, reason="reconnect"))
-                        await _v14_asyncio.sleep(0.05)
-                prev_state = state
-            except _v14_asyncio.CancelledError:
-                raise
-            except Exception as e:
-                V14_JOURNAL.record("replay_watcher_error", error=str(e)[:200])
-                await v14_backoff_sleep(1, base=1.0, cap=15.0)
-
-
-V14_REPLAY = V14SubscriptionReplay()
-
-
-async def v14_replay_watcher_loop() -> None:
-    await V14_REPLAY.loop()
-
-
-async def v14_session_watcher_loop() -> None:
-    """مراقب الجلسة — يحدّث آلة الحالات كل ثانيتين."""
-    await _v14_asyncio.sleep(5.0)
-    while True:
-        try:
-            V14_SESSION.observe()
-            info = V14_SESSION.info()
-            V14_METRICS.gauge("v14.session.drops", info["drops"])
-            await _v14_asyncio.sleep(2.0)
-        except _v14_asyncio.CancelledError:
-            raise
-        except Exception:
-            await v14_backoff_sleep(1, base=1.0, cap=15.0)
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# الوحدة 9 — V14 API + التركيب على المسارات الرسمية + بناء الحلقات المشرفة
-# ════════════════════════════════════════════════════════════════════════════
-# التركيب (hooking) قاعدة الذهبي فيه: كل غلاف يستدعي الأصل الكامل أولاً
-# ثم يضيف سلوك v14 — المسارات الرسمية لم تُمَس حرفياً.
-# ════════════════════════════════════════════════════════════════════════════
-
-def _v14_wrap_cache_tick() -> None:
-    """غلاف _cache_tick: يخزن بالطريقة الرسمية ثم يوقظ مضخة التيكات.
-    «التكس لا ينام» — نقطة الالتقاط هذه هي الحدث الذي يوقظ المضخة فوراً."""
-    global _cache_tick
-    if bool(globals().get("_V14_CACHE_TICK_WRAPPED", False)):
-        return
-    orig = globals().get("_cache_tick")
-    if orig is None:
-        return
-
-    def _wrapped(api_symbol, ts, price):
-        try:
-            orig(api_symbol, ts, price)       # الطريقة الرسمية كما هي
-        except Exception:
-            pass
-        try:
-            V14_TICKS.ingest_tick(api_symbol, ts, price)   # الإيقاظ الفوري
-        except Exception:
-            pass
-    globals()["_cache_tick"] = _wrapped
-    globals()["_V14_CACHE_TICK_WRAPPED"] = True
-    V14_JOURNAL.record("hook_installed", hook="_cache_tick")
-
-
-def _v14_wrap_ensure_asset_loaded() -> None:
-    """غلاف ensure_asset_loaded: ينادي الأصل كاملاً ثم يسجل الفتح ويجدول
-    سد ثغرات فوري — «على كل عملة تم فتحها»."""
-    global ensure_asset_loaded
-    if bool(globals().get("_V14_ENSURE_WRAPPED", False)):
-        return
-    orig = globals().get("ensure_asset_loaded")
-    if orig is None:
-        return
-
-    async def _wrapped(api_symbol):
-        n = await orig(api_symbol)               # الأصل الكامل كما هو
-        try:
-            if n:
-                v14_note_asset_opened(api_symbol, "ensure_asset_loaded")
-        except Exception:
-            pass
-        return n
-
-    globals()["ensure_asset_loaded"] = _wrapped
-    globals()["_V14_ENSURE_WRAPPED"] = True
-    # حدّث واجهة الخادم للفتح المبطن (التطبيق يقرأها من PAGINATION_API)
-    try:
-        pag = globals().get("PAGINATION_API")
-        if isinstance(pag, dict):
-            pag["ensure_asset_loaded"] = _wrapped
-    except Exception:
-        pass
-    V14_JOURNAL.record("hook_installed", hook="ensure_asset_loaded")
-
-
-def _v14_wrap_fetch_older_batch() -> None:
-    """غلاف fetch_older_batch: الأصل كاملاً ثم تسجيل الفتح + سد فوري —
-    التمرير للخلف كجزء من تغطية «كل عملة مفتوحة»."""
-    global fetch_older_batch
-    if bool(globals().get("_V14_OLDER_WRAPPED", False)):
-        return
-    orig = globals().get("fetch_older_batch")
-    if orig is None:
-        return
-
-    async def _wrapped(api_symbol, *args, **kwargs):
-        n = await orig(api_symbol, *args, **kwargs)   # الأصل الكامل
-        try:
-            v14_note_asset_opened(api_symbol, "fetch_older_batch")
-        except Exception:
-            pass
-        return n
-
-    globals()["fetch_older_batch"] = _wrapped
-    globals()["_V14_OLDER_WRAPPED"] = True
-    V14_JOURNAL.record("hook_installed", hook="fetch_older_batch")
-
-
-def _v14_wrap_preload_one_asset() -> None:
-    """غلاف preload_one_asset: الأصل كاملاً ثم تسجيل الفتح — يغطي أيضاً
-    عملة فتح الشارت الافتراضية (opener) عند جلبها الأولى."""
-    global preload_one_asset
-    if bool(globals().get("_V14_PRELOAD_WRAPPED", False)):
-        return
-    orig = globals().get("preload_one_asset")
-    if orig is None:
-        return
-
-    async def _wrapped(api_symbol, *args, **kwargs):
-        t0 = time.monotonic()
-        n = await orig(api_symbol, *args, **kwargs)   # الأصل الكامل
-        try:
-            dt = time.monotonic() - t0
-            V14_METRICS.observe("v14.preload.exec_s", dt)
-            if n:
-                v14_note_asset_opened(api_symbol, "preload_one_asset")
-        except Exception:
-            pass
-        return n
-
-    globals()["preload_one_asset"] = _wrapped
-    globals()["_V14_PRELOAD_WRAPPED"] = True
-    V14_JOURNAL.record("hook_installed", hook="preload_one_asset")
-
-
-def install_v14_hooks() -> None:
-    """يستبق تثبيت كل الأغلفة مرتين — idempotent."""
-    global _V14_HOOKS_INSTALLED
-    if globals().get("_V14_HOOKS_INSTALLED"):
-        return
-    _v14_wrap_cache_tick()
-    _v14_wrap_ensure_asset_loaded()
-    _v14_wrap_fetch_older_batch()
-    _v14_wrap_preload_one_asset()
-    install_v14_exception_hooks()
-    globals()["_V14_HOOKS_INSTALLED"] = True
-    V14_JOURNAL.record("v14_hooks_installed")
-
-
-# ─── واجهة v14 العامة للتطبيق والمشغل ───
-
-V14_API = {
-    "version": _V14_VERSION,
-    # جلب بأولوية عبر بوابة التفرز (نفس الرد الخام الرسمي):
-    "fetch": v14_fetch,
-    "fetch_with_priority": v14_fetch,
-    "gate_stats": v14_gate_snapshot,
-    # سد الثغرات الأصلي لعملة محددة (بلا تغيير طريقة):
-    "gap_fill_for_asset": v14_gap_fill_for_asset,
-    "note_asset_opened": v14_note_asset_opened,
-    "opened_registry": lambda: V14_OPENED.snapshot(),
-    # التيكات: لا تنام — اشتراك + قراءة فورية:
-    "ticks": V14_TICKS,
-    "subscribe_ticks": V14_TICKS.subscribe,
-    "unsubscribe_ticks": V14_TICKS.unsubscribe,
-    "recent_ticks": V14_TICKS.recent_ticks,
-    "ticks_snapshot": V14_TICKS.snapshot,
-    # النقاط والجلسة والمقاييس:
-    "endpoints": lambda: V14_ENDPOINTS.info(),
-    "session": lambda: V14_SESSION.info(),
-    "metrics": lambda: V14_METRICS.snapshot(),
-    "metrics_report": V14_METRICS.format_report,
-    "supervisor_status": lambda: V14_SUPERVISOR.status(),
-    "journal_tail": V14_JOURNAL.tail,
-    "journal_info": V14_JOURNAL.info,
-    "heartbeat_path": lambda: V14_HEARTBEAT.path,
-    "heartbeat_payload": V14_HEARTBEAT.payload,
-    "pressure_state": lambda: V14_LOAD_SHEDDER.state,
-    "pause_preload_flag": V14_PAUSE_PRELOAD,
-    # السياسات (منقولة من pyquotex):
-    "policy": V14_POLICY,
-    "backoff_delay": v14_backoff_delay,
-    "slots": V14_SLOTS,
-}
-
-
-def v14_build_background_loops() -> _v14_List[Tuple[str, Callable[[], _v14_Awaitable]]]:
-    """يبني قائمة كل حلقات v14 الخلفية المشرفة — تستدعى مرة واحدة عند
-    التشغيل (من __main__ في وضع الترمينال، ومن التطبيق بعد الدخول).
-
-    كل عنصر (اسم، مُصنع coroutine) — المشرف يستدعي المصنع عند كل إعادة
-    تشغيل فتكون الحلقة جديدة نظيفة كل مرة (نمط pyquotex run_forever).
-    التركيب (hooks) يثبت هنا أيضاً قبل تشغيل أي شيء.
-    """
-    install_v14_hooks()
-
-    async def _gate_worker():
-        await V14_GATE.worker()
-
-    async def _tick_pump():
-        await V14_TICKS.pump_loop()
-
-    async def _tick_sampler():
-        await V14_TICKS.sampler_loop()
-
-    async def _tick_silence():
-        await V14_TICKS.silence_watchdog()
-
-    async def _gap_guard():
-        await v14_gap_guard_loop()
-
-    async def _gap_audit():
-        await V14_GAP_AUDITOR.loop()
-
-    async def _endpoint_probe():
-        await v14_endpoint_probe_loop()
-
-    async def _replay_watcher():
-        await v14_replay_watcher_loop()
-
-    async def _session_watcher():
-        await v14_session_watcher_loop()
-
-    async def _harvester():
-        await v14_harvester_loop()
-
-    async def _memory_guard():
-        await v14_memory_guard_loop()
-
-    async def _disk_guard():
-        await v14_disk_guard_loop()
-
-    async def _load_shedder():
-        await v14_load_shedder_loop()
-
-    async def _heartbeat():
-        await v14_heartbeat_loop()
-
-    async def _metrics():
-        await v14_metrics_loop()
-
-    async def _selftest():
-        await v14_selftest_loop()
-
-    return [
-        ("gate_worker", _gate_worker),           # تفرز الطلبات
-        ("tick_pump", _tick_pump),               # التكس لا ينام
-        ("tick_sampler", _tick_sampler),
-        ("tick_silence", _tick_silence),
-        ("gap_guard", _gap_guard),               # سد الثغرات لكل مفتوح
-        ("gap_audit", _gap_audit),               # ولا يتم فقدان
-        ("endpoint_probe", _endpoint_probe),     # تقوي نقاط الخوادم
-        ("replay_watcher", _replay_watcher),     # دون انهيار
-        ("session_watcher", _session_watcher),
-        ("harvester", _harvester),
-        ("memory_guard", _memory_guard),
-        ("disk_guard", _disk_guard),
-        ("load_shedder", _load_shedder),
-        ("heartbeat", _heartbeat),
-        ("metrics", _metrics),
-        ("selftest", _selftest),                 # تشخيص ذاتي دوري
-    ]
-
-
-def v14_print_banner() -> None:
-    """يطبع بانر طبقة التقوية — يُستدعى من __main__ بعد نجاح الدخول."""
-    try:
-        print()
-        print(f"{Colors.CYAN}{'═' * 64}{Colors.RESET}")
-        print(f"{Colors.BOLD}  V14 STRENGTHENING LAYER ACTIVE "
-              f"(طبقة تقوية الخادم){Colors.RESET}")
-        modules = [
-            "تفرز الطلبات: بوابة أولوية (OPENING > GAP_FILL > SCROLL > PRELOAD)",
-            "سد الثغرات الأصلي يُنفَّذ على كل عملة تم فتحها — ولا فقدان",
-            "التكس لا ينام: مضخة مُيقَظة بالأحداث + كاشف فقدان التيكات",
-            "تقوي نقاط الخوادم: مسابر RTT + قاطع دائرة + تقرير نطاقات",
-            "دون انهيار: مشرف كل حلقة + خطافات استثناء + حارس ذاكرة/قرص",
-            "إعادة تشغيل البث بعد كل عودة (نمط pyquotex subscription replay)",
-            "نبضة حياة qx_server_heartbeat.json كل 10 ثوانٍ",
-        ]
-        for i, m in enumerate(modules, 1):
-            print(f"  {Colors.DIM}{i}) {m}{Colors.RESET}")
-        print(f"{Colors.CYAN}{'═' * 64}{Colors.RESET}")
-    except Exception:
-        pass
-
-
-def v14_line_inventory() -> dict:
-    """جرد أسطر الخادم — إثبات وصول الكود للعدد المطلوب (طلب المستخدم:
-    «الكود يجب ان يصل الى 15الف سطر على الاقل» مع التطبيق)."""
-    try:
-        src_file = globals().get("__file__", "")
-        total = 0
-        if src_file and _v14_os.path.exists(src_file):
-            with open(src_file, "r", encoding="utf-8", errors="ignore") as f:
-                total = sum(1 for _ in f)
-        return {
-            "server_lines": total,
-            "v14_layer_marker": "# v14 الجزء C — الوحدات 7 و 8 و 9",
-        }
-    except Exception:
-        return {"server_lines": 0, "v14_layer_marker": ""}
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# v14 الجزء D — الوحدة 10: التشخيص الذاتي (V14 SELF-DIAGNOSTICS)
-# ════════════════════════════════════════════════════════════════════════════
-# لماذا؟ «طريقة العمل دون انهيار الخوادم» تحتاج إثباتاً لا ادعاءً.
-# هذه الوحدة تفحص نفسها عند الإقلاع وتعطي الأمر الجاهز للمشغل/التطبيق:
-#   V14_API["selftest"]() → تقرير نجاح/فشل كل ضمانة من ضمانات v14:
-#     1) بوابة الطلبات: الأولوية تُخدم قبل الخلفية، سلسلة العملة متسلسلة،
-#        dedupe يعيد نفس الرد، مهلة الوفاة تفشل سريعاً لا تعليقاً.
-#     2) دلو الرموز: المعدل محدود فعلاً.
-#     3) متتبع التيكات: تصنيف NEW/DUP/STALE + كشف الفجوة (لا فقدان صامت).
-#     4) قاطع الدائرة: CLOSED→OPEN→HALF_OPEN→CLOSED كلها تتحول صحيحة.
-#     5) سجل الجلسة: يكتب ويقرأ (JSONL + دوران الحجم).
-#     6) النبضة: payload مكتمل المفاتيح.
-#     7) المشرف: يعيد تشغيل حلقة ماتة ويحصي الانهيار.
-# كل الفحوصات تعمل على نُسخ معزولة (لا تلمس حالة الخادم الحية أبداً).
-# ════════════════════════════════════════════════════════════════════════════
-
-class V14SelfTest:
-    """تشخيص ذاتي لطبقة v14 — كل فحص على نسخة معزولة بلا لمس حالة حية."""
-
-    def __init__(self) -> None:
-        self.results: _v14_List[Tuple[str, bool, str]] = []
-
-    # ─────────────── أدوات مساعدة ───────────────
-    def _record(self, name: str, ok: bool, note: str = "") -> None:
-        self.results.append((name, bool(ok), note))
-
-    # ─────────────── 1) بوابة الطلبات ───────────────
-    async def _test_gate_priority(self) -> None:
-        """الأولوية: طلب PRELOAD يُدخل أولاً ثم OPENING — OPENING يُخدم أولاً."""
-        gate = V14RequestGate()
-        served: _v14_List[str] = []
-
-        async def fake_fetch(api_symbol, end_time, seconds, period,
-                             foreground=False, timeout=None, retries=2):
-            served.append(api_symbol)
-            await _v14_asyncio.sleep(0.01)
-            return [{"fake": api_symbol}]
-
-        # نستبدل جلب العامل بنسخة الاختبار عبر التصحيح المحلي للنطاق
-        real = globals()["qx_fetch_window_raw"]
-        globals()["qx_fetch_window_raw"] = fake_fetch
-        try:
-            fut_bg = gate.submit_nowait("BG_PRELOAD_TEST", 0, 60, 60,
-                                        priority=int(RequestPriority.PRELOAD),
-                                        label="selftest")
-            fut_fg = gate.submit_nowait("FG_OPENING_TEST", 0, 60, 60,
-                                        priority=int(RequestPriority.OPENING),
-                                        label="selftest")
-            worker = _v14_asyncio.create_task(gate.worker())
-            await _v14_asyncio.wait_for(fut_fg, timeout=5.0)
-            await _v14_asyncio.wait_for(fut_bg, timeout=5.0)
-            worker.cancel()
-            try:
-                await worker
-            except _v14_asyncio.CancelledError:
-                pass
-            ok = (served and served[0] == "FG_OPENING_TEST"
-                  and len(served) == 2)
-            self._record("gate.priority.order", ok,
-                         f"served={served} (expected FG first)")
-        except Exception as e:
-            self._record("gate.priority.order", False, f"error: {e}")
-        finally:
-            globals()["qx_fetch_window_raw"] = real
-
-    async def _test_gate_dedupe(self) -> None:
-        """نفس الطلب المعلق مرتين → نفس الرد (لا طلب مكرر يختلط)."""
-        gate = V14RequestGate()
-        calls = []
-
-        async def fake_fetch(api_symbol, end_time, seconds, period,
-                             foreground=False, timeout=None, retries=2):
-            calls.append(api_symbol)
-            await _v14_asyncio.sleep(0.05)
-            return [{"fake": api_symbol}]
-
-        real = globals()["qx_fetch_window_raw"]
-        globals()["qx_fetch_window_raw"] = fake_fetch
-        try:
-            worker = _v14_asyncio.create_task(gate.worker())
-            fut1 = gate.submit_nowait("DEDUPE_TEST", 100, 60, 60,
-                                      priority=int(RequestPriority.OPENING))
-            fut2 = gate.submit_nowait("DEDUPE_TEST", 100, 60, 60,
-                                      priority=int(RequestPriority.OPENING))
-            ok_same = fut1 is fut2
-            await _v14_asyncio.wait_for(
-                _v14_asyncio.gather(fut1, fut2), timeout=5.0)
-            worker.cancel()
-            try:
-                await worker
-            except _v14_asyncio.CancelledError:
-                pass
-            self._record("gate.dedupe.same_future", ok_same and len(calls) == 1,
-                         f"calls={len(calls)} (expected 1)")
-        except Exception as e:
-            self._record("gate.dedupe.same_future", False, f"error: {e}")
-        finally:
-            globals()["qx_fetch_window_raw"] = real
-
-    async def _test_gate_expiry(self) -> None:
-        """مهلة الوفاة: طلب بقي في الطابور بعد مهلته يفشل سريعاً (لا تعليق).
-
-        الترتيب المتعمد: نرسل الطلب بمهلة 0.2 ثانية، لا نشغّل العامل إلا
-        بعد انقضائها — فالعامل عند السحب يفحص المهلة ويرفض فوراً."""
-        gate = V14RequestGate()
-
-        async def fake_slow_fetch(api_symbol, end_time, seconds, period,
-                                  foreground=False, timeout=None, retries=2):
-            await _v14_asyncio.sleep(1.5)
-            return []
-
-        real = globals()["qx_fetch_window_raw"]
-        globals()["qx_fetch_window_raw"] = fake_slow_fetch
-        try:
-            fut = gate.submit_nowait("EXPIRE_TEST", 0, 60, 60,
-                                     priority=int(RequestPriority.OPENING),
-                                     wait_deadline=0.2)
-            await _v14_asyncio.sleep(0.3)   # انقضت المهلة قبل بدء العامل
-            worker = _v14_asyncio.create_task(gate.worker())
-            failed_fast = False
-            t0 = time.monotonic()
-            try:
-                await _v14_asyncio.wait_for(fut, timeout=2.0)
-            except Exception:
-                failed_fast = (time.monotonic() - t0) < 1.0
-            worker.cancel()
-            try:
-                await worker
-            except _v14_asyncio.CancelledError:
-                pass
-            self._record("gate.deadline.fails_fast", failed_fast,
-                         f"elapsed={time.monotonic() - t0:.2f}s")
-        except Exception as e:
-            self._record("gate.deadline.fails_fast", False, f"error: {e}")
-        finally:
-            globals()["qx_fetch_window_raw"] = real
-
-    async def _test_gate_asset_chain(self) -> None:
-        """سلسلة العملة: طلبان لنفس العملة لا يتداخلان — التسلسل مطلق."""
-        gate = V14RequestGate()
-        active = {"n": 0, "max": 0}
-
-        async def fake_fetch(api_symbol, end_time, seconds, period,
-                             foreground=False, timeout=None, retries=2):
-            active["n"] += 1
-            active["max"] = max(active["max"], active["n"])
-            await _v14_asyncio.sleep(0.03)
-            active["n"] -= 1
-            return []
-
-        real = globals()["qx_fetch_window_raw"]
-        globals()["qx_fetch_window_raw"] = fake_fetch
-        try:
-            worker = _v14_asyncio.create_task(gate.worker())
-            futs = [gate.submit_nowait(f"CHAIN_TEST_{i}", 0, 60, 60,
-                                       priority=int(RequestPriority.PRELOAD))
-                    for i in range(4)]
-            await _v14_asyncio.wait_for(_v14_asyncio.gather(*futs), timeout=10.0)
-            worker.cancel()
-            try:
-                await worker
-            except _v14_asyncio.CancelledError:
-                pass
-            # عامل واحد → التزامن الفعلي لا يتجاوز 1 أبداً
-            self._record("gate.asset_chain.never_parallel",
-                         active["max"] == 1, f"max_concurrent={active['max']}")
-        except Exception as e:
-            self._record("gate.asset_chain.never_parallel", False, f"error: {e}")
-        finally:
-            globals()["qx_fetch_window_raw"] = real
-
-    # ─────────────── 2) دلو الرموز ───────────────
-    def _test_token_bucket(self) -> None:
-        """دلو الرموز: المعدل محدود — 5 محاولات فورية على دلو rate=0.5
-        ينجح منها فقط ما فيه رموز (سعة 1)."""
-        bucket = V14TokenBucket(rate=0.5, capacity=1.0)
-        got = sum(1 for _ in range(5) if bucket.try_acquire())
-        self._record("bucket.limits_burst", got == 1, f"acquired={got}/5")
-
-    # ─────────────── 3) متتبع التيكات ───────────────
-    def _test_tracker(self) -> None:
-        """تصنيف التيكات: NEW ثم DUP ثم STALE ثم قفزة كبيرة=فقدان محتمل.
-
-        التتابع واقعي: تيكات متقاربة 2s تؤسس متوسط الفاصل، ثم تيك بعده
-        100 ثانية (8× أضعاف المتوسط) = قفزة شاذة → GAP."""
-        tr = V14TickTracker("SELFTEST")
-        c1 = tr.ingest(1000, 1.0)                 # NEW
-        c2 = tr.ingest(1000, 1.05)                # DUP (سعر أحدث بنفس الثانية)
-        c3 = tr.ingest(999, 1.0)                  # STALE (أقدم)
-        tr.ingest(1002, 1.1)                      # NEW (فاصل 2s)
-        tr.ingest(1004, 1.15)                     # NEW (فاصل 2s)
-        c6 = tr.ingest(1104, 1.2)                 # قفزة 100s → GAP
-        ok = (c1 == TickClassification.NEW
-              and c2 == TickClassification.DUPLICATE
-              and c3 == TickClassification.STALE
-              and c6 == TickClassification.GAP
-              and tr.gap_events == 1)
-        self._record("tracker.classification+gap", ok,
-                     f"{c1}/{c2}/{c3}/{c6} gaps={tr.gap_events}")
-
-    # ─────────────── 4) قاطع الدائرة ───────────────
-    def _test_breaker(self) -> None:
-        """الدورة الكاملة: CLOSED→OPEN (5 أخطاء)→HALF_OPEN (بعد استشفاء)→CLOSED."""
-        br = V14CircuitBreaker("selftest", failure_threshold=3,
-                               recovery_interval=0.05, half_open_successes=2)
-        for _ in range(3):
-            br.record_failure("sim")
-        opened = br.state() == BreakerState.OPEN
-        time.sleep(0.06)
-        probe = br.allow_probe()                  # استشفاء
-        half = br.state() == BreakerState.HALF_OPEN
-        br.record_success()
-        br.record_success()
-        closed = br.state() == BreakerState.CLOSED
-        self._record("breaker.full_cycle", opened and probe and half and closed,
-                     f"open={opened} half={half} closed={closed}")
-
-    # ─────────────── 5) سجل الجلسة ───────────────
-    def _test_journal(self) -> None:
-        """السجل يكتب ويقرأ — JSONL صالح."""
-        tmp = _v14_os.path.join(_v14_os.path.dirname(V14_JOURNAL.path),
-                                "qx_v14_selftest_journal.jsonl")
-        j = V14SessionJournal(path=tmp, max_bytes=1024 * 1024)
-        j.record("selftest_write", k=1, s="نص عربي")
-        j.record("selftest_write2", k=2)
-        tail = j.tail(2)
-        ok = (len(tail) == 2 and tail[-1]["event"] == "selftest_write2"
-              and tail[0]["s"] == "نص عربي")
-        self._record("journal.write_read_utf8", ok, f"n={len(tail)}")
-
-    # ─────────────── 6) النبضة ───────────────
-    def _test_heartbeat(self) -> None:
-        """payload النبضة يحتوي كل المفاتيح الحرجة."""
-        try:
-            hb = V14Heartbeat()
-            data = hb.payload()
-            required = {"time", "pid", "uptime_s", "connection_alive",
-                        "gate", "supervisor", "session", "pressure",
-                        "opened_assets", "memory_rss_mb"}
-            missing = required - set(data.keys())
-            self._record("heartbeat.payload_complete", not missing,
-                         f"missing={missing or 'none'}")
-        except Exception as e:
-            self._record("heartbeat.payload_complete", False, f"error: {e}")
-
-    # ─────────────── 7) المشرف ───────────────
-    async def _test_supervisor_restart(self) -> None:
-        """المشرف يعيد تشغيل حلقة ماتة ويحصي الانهيار.
-
-        ملاحظة: supervise لا يعود أبداً بالتصميم (حماية دون انهيار) —
-        الفحص يشغّله مهمة، يراقب عدّادات الحالة، ثم يلغيه."""
-        runs = {"n": 0}
-
-        async def dying_loop():
-            runs["n"] += 1
-            await _v14_asyncio.sleep(0.02)
-            if runs["n"] <= 2:
-                raise RuntimeError("simulated crash for selftest")
-            # من هنا تكمل طبيعياً حتى الإلغاء — والمشرف يعيد تشغيلها
-
-        sup = V14Supervisor()
-        task = _v14_asyncio.create_task(
-            sup.supervise("selftest_dying", dying_loop))
-        # انتظر حتى 3 تشغيلات (2 انهيار + إعادة) أو مهلة 15 ثانية
-        for _ in range(300):
-            st = sup.status_of("selftest_dying")
-            if st.runs >= 3:
-                break
-            await _v14_asyncio.sleep(0.05)
-        task.cancel()
-        try:
-            await task
-        except _v14_asyncio.CancelledError:
-            pass
-        st = sup.status_of("selftest_dying")
-        ok = st.runs >= 3 and st.crashes >= 2
-        self._record("supervisor.restarts_dead_loop", ok,
-                     f"runs={st.runs} crashes={st.crashes}")
-
-    # ─────────────── 8) backoff ───────────────
-    def _test_backoff(self) -> None:
-        """backoff أُسّي مهزوز — ضمن حدود pyquotex."""
-        d0 = v14_backoff_delay(0, base=1.0, cap=30.0, jitter=0.0)
-        d3 = v14_backoff_delay(3, base=1.0, cap=30.0, jitter=0.0)
-        d10 = v14_backoff_delay(10, base=1.0, cap=30.0, jitter=0.0)
-        ok = (abs(d0 - 1.0) < 1e-9 and abs(d3 - 8.0) < 1e-9
-              and d10 == 30.0)
-        self._record("backoff.exponential+cap", ok,
-                     f"d0={d0} d3={d3} d10={d10}")
-
-    # ─────────────── التنفيذ الكامل ───────────────
-    async def run_all(self) -> dict:
-        self.results.clear()
-        self._test_backoff()
-        self._test_tracker()
-        self._test_breaker()
-        self._test_journal()
-        self._test_heartbeat()
-        self._test_token_bucket()
-        await self._test_gate_priority()
-        await self._test_gate_dedupe()
-        await self._test_gate_expiry()
-        await self._test_gate_asset_chain()
-        await self._test_supervisor_restart()
-        passed = sum(1 for _, ok, _ in self.results if ok)
-        total = len(self.results)
-        ok_all = passed == total
-        V14_JOURNAL.record("selftest", passed=passed, total=total)
-        V14_METRICS.inc("v14.selftest.runs")
-        if not ok_all:
-            V14_METRICS.inc("v14.selftest.failures")
-        return {
-            "ok": ok_all,
-            "passed": passed,
-            "total": total,
-            "results": [
-                {"name": name, "ok": ok, "note": note}
-                for name, ok, note in self.results
-            ],
-        }
-
-
-async def v14_selftest() -> dict:
-    """التشخيص الذاتي الكامل — V14_API["selftest"]."""
-    return await V14SelfTest().run_all()
-
-
-# أضف التشخيص الذاتي للواجهة العامة
-try:
-    V14_API["selftest"] = v14_selftest
-except Exception:
-    pass
-
-
-async def v14_selftest_loop() -> None:
-    """تشخيص ذاتي دوري خفيف (كل 10 دقائق) — نفس الفحوصات، يحصي الفشل."""
-    await _v14_asyncio.sleep(60.0)
-    while True:
-        try:
-            await _v14_asyncio.sleep(600.0)
-            try:
-                res = await v14_selftest()
-                if not res["ok"]:
-                    V14_JOURNAL.record("selftest_periodic_fail",
-                                       passed=res["passed"],
-                                       total=res["total"])
-                    try:
-                        logmsg(f"[v14-selftest] periodic: {res['passed']}/"
-                               f"{res['total']} passed — see journal")
-                    except Exception:
-                        pass
-            except Exception as e:
-                V14_JOURNAL.record("selftest_error", error=str(e)[:200])
-        except _v14_asyncio.CancelledError:
-            raise
-        except Exception:
-            await v14_backoff_sleep(1, base=2.0, cap=15.0)
-
+    # تبسيط العنوان: سطر واحد فاصل بدل 3 خطوط زرقاء كثيفة
+    print(f"  {Colors.DIM}{'─'*68}{Colors.RESET}")
+    print(f"  {Colors.BOLD}QXChartMT4 Pro - v8.0  {Colors.DIM}|  @qxzero1  |  2026{Colors.RESET}")
+    print(f"  {Colors.DIM}{'─'*68}{Colors.RESET}")
+    print(f"  {Colors.CYAN}Timeframe  {Colors.RESET}: {_tf_label} ({PERIOD_SECONDS}s)")
+    print(f"  {Colors.CYAN}History    {Colors.RESET}: {HISTORY_DAYS:.2f} day = {INITIAL_CANDLES} candles")
+    # FIX L11: TZ offset display
+    _tz_sec = _get_tz_offset()
+    _tz_sign = '+' if _tz_sec >= 0 else '-'
+    _tz_h, _tz_m = divmod(abs(_tz_sec) // 60, 60)
+    _tz_src = "manual" if LOCAL_TZ_OFFSET_SECONDS is not None else "system"
+    print(f"  {Colors.CYAN}TZ offset  {Colors.RESET}: UTC{_tz_sign}{_tz_h:02d}:{_tz_m:02d} (source={_tz_src})")
+    print(f"  {Colors.CYAN}Gap fill   {Colors.RESET}: {GAP_FILL_CANDLES} candles / {GAP_FILL_REFRESH_INTERVAL}s")
+    print(f"  {Colors.GREEN}Contact    {Colors.RESET}: https://t.me/qxchart")
+    print(f"  {Colors.DIM}{'─'*68}{Colors.RESET}\n")
 
 if __name__ == "__main__":
     # ════════════════════════════════════════════════════════════════════
-    # v13.0 — Preload Engine (بطلب المستخدم):
-    #   - نفس تدفق v12: نطاق تلقائي + دخول (البريد وكلمة المرور فقط) + جدول
-    #     العملات الكامل في الترمينال.
-    #   - جديد: بعد الدخول مباشرة يجلب 300 شمعة لـ BRLUSD_otc (عملة فتح الشارت)
-    #     مع حالتها ونسبة دفعها، ثم يجلب 300 شمعة لبقية الأصول المفتوحة واحدة
-    #     تلو الأخرى، ويشغّل البث الحي لكل عملة حتى يكون أي شارت جاهزاً فوراً.
-    #   - جديد: fetch_older_batch() تجلب دفعة 300 شمعة أقدم للتمرير للخلف —
-    #     جاهزة على الخادم، وربطها بالتطبيق يُضاف لاحقاً (ليس الآن).
-    #   - جديد: التيكات في الذاكرة فقط وتُحذف تلقائياً بعد 5 دقائق + تدوير
-    #     السجل + ترميم candles.db — حتى لا يمتلئ القرص أبداً.
-    #   - طريقة الدخول وطريقة جلب الشموع كما هي دون أي تغيير.
+    # STAGE 1: STARTUP — شعار QXMT4 + التحقق من الترخيص
     # ════════════════════════════════════════════════════════════════════
-    print()
-    print(f"{Colors.CYAN}{'═' * 64}{Colors.RESET}")
-    print(f"{Colors.BOLD}  QX SERVER v14.1 — Chart-Driven Loading + Strengthened Server (طبقة تقوية){Colors.RESET}")
-    print(f"  {Colors.DIM}BRLUSD_otc: 300 شمعة فوراً بعد الدخول + الحالة ونسبة الدفع{Colors.RESET}")
-    print(f"  {Colors.DIM}أي عملة أخرى: 300 شمعة تُجلب فقط عند فتح شارتها — واحدة تلو الأخرى{Colors.RESET}")
-    print(f"  {Colors.DIM}التمرير للخلف: دفعة 300 شمعة أقدم في كل تمرير{Colors.RESET}")
-    print(f"{Colors.CYAN}{'═' * 64}{Colors.RESET}")
+    # Top-level safety net: any UnicodeError that escapes qx_run_startup
+    # (or any later stage) gets logged once and we exit cleanly instead
+    # of leaving an unhandled-exception traceback that sys.excepthook
+    # would also turn into a process exit.
+    try:
+        license_result = qx_run_startup()
+    except UnicodeError as _ue:
+        try:
+            ts = datetime.now().strftime("%H:%M:%S")
+            safe = str(_ue).encode('utf-8', errors='ignore').decode('utf-8', errors='ignore')
+            print(f"  \033[93m[{ts}] Top-level UnicodeError caught: {safe}\033[0m")
+            print(f"  \033[93mContinuing as if no saved license. Please enter a license key manually.\033[0m")
+            _log_to_file(f"[{ts}] Top-level UnicodeError caught in __main__: {safe}")
+        except Exception:
+            pass
+        license_result = None
+    if license_result is None:
+        # المستخدم خرج قبل إدخال ترخيص صالح
+        sys.exit(0)
+    # نقطة التكامل: الترخيص مُفعّل، نُكمل إلى قوائم الفريمات/التاريخ/الدومين
+    # ════════════════════════════════════════════════════════════════════
 
-    # v12/v13: لا يوجد جدول حي — اطبع رسائل السجل مباشرة
-    globals()['_STATUS_MESSAGES_QUEUE'] = None
+    # ════════════════════════════════════════════════════════════════════
+    # STAGE 2: Select Timeframe — 3 أعمدة × 5 صفوف (بدون خطوط زرقاء كثيرة)
+    # ════════════════════════════════════════════════════════════════════
+    # ترتيب الفريمات حسب الطلب:
+    # العمود الأول (1-5): M1, M2, M3, M5, M10
+    # العمود الثاني (6-10): M15, M30, H1, H4, D1
+    # العمود الثالث (11-14): S5, S10, S15, S30
+    _TF_DISPLAY_ORDER = [
+        # (idx, mt4_period, seconds, short_label, full_label)
+        (1,  1,    60,    "M1",  "1 minute"),
+        (2,  2,    120,   "M2",  "2 minutes"),
+        (3,  3,    180,   "M3",  "3 minutes"),
+        (4,  5,    300,   "M5",  "5 minutes"),
+        (5,  10,   600,   "M10", "10 minutes"),
+        (6,  15,   900,   "M15", "15 minutes"),
+        (7,  30,   1800,  "M30", "30 minutes"),
+        (8,  60,   3600,  "H1",  "1 hour"),
+        (9,  240,  14400, "H4",  "4 hours"),
+        (10, 1440, 86400, "D1",  "1 day"),
+        (11, 1,    5,     "S5",  "5 seconds"),
+        (12, 1,    10,    "S10", "10 seconds"),
+        (13, 1,    15,    "S15", "15 seconds"),
+        (14, 1,    30,    "S30", "30 seconds"),
+    ]
+    # خريطة (idx → is_subsecond)
+    _TF_SUBSEC = {11: True, 12: True, 13: True, 14: True}
 
-    # ---- STAGE 1: النطاق تلقائياً حسب البلد (بدون أي سؤال) ----
     print()
-    print(f"{Colors.BOLD}  Domain: detecting country automatically ...{Colors.RESET}")
-    resolve_qx_host()
+    print(f"{Colors.BOLD}  Select Timeframe{Colors.RESET}")
+    print(f"  {Colors.DIM}{'═' * 55}{Colors.RESET}")
+    # عرض القائمة في 3 أعمدة × 5 صفوف
+    # صف 0: idx 1,6,11 | صف 1: 2,7,12 | صف 2: 3,8,13 | صف 3: 4,9,14 | صف 4: 5,10,—
+    _ROWS = [
+        (1, 6, 11),   # M1   M15   S5
+        (2, 7, 12),   # M2   M30   S10
+        (3, 8, 13),   # M3   H1    S15
+        (4, 9, 14),   # M5   H4    S30
+        (5, 10, None),# M10  D1    —
+    ]
+    _tf_lookup = {row[0]: row for row in _TF_DISPLAY_ORDER}
+    # ثوابت المحاذاة: كل عمود 17 حرف ظاهر، فجوة 2 حرف بين الأعمدة
+    # → كل صف = 2 (indent) + 17*3 + 2*2 = 57 حرف (مطابق لخط ═ 55 + 2 indent)
+    # الصيغة: "XX - XXXXX - XXX" = 2 + 3 + 5 + 3 + 4 = 17 حرف ظاهر لكل خلية
+    _TF_COL_WIDTH = 17
+    _TF_GAP = "  "  # فجوة صغيرة بين الأعمدة (قرّب الأعمدة من بعضها)
+    for row in _ROWS:
+        cells = []
+        for idx in row:
+            if idx is None:
+                # ملء بمسافات بنفس عرض العمود (يحافظ على تساوي طول الصف)
+                cells.append(" " * _TF_COL_WIDTH)
+                continue
+            entry = _tf_lookup[idx]
+            sec = entry[2]      # seconds (int)
+            label = entry[3]    # short_label (M1, S30, ...)
+            # التنسيق: idx(يمين 2) + " - " + sec(يسار 5) + " - " + label(يسار 4) = 17 حرف
+            # Cyan = لون الشعار (بدل Yellow)
+            cells.append(f"{Colors.CYAN}{idx:>2}{Colors.RESET} - {sec:<5} - {label:<4}")
+        print(f"  {cells[0]}{_TF_GAP}{cells[1]}{_TF_GAP}{cells[2]}")
+    print(f"  {Colors.DIM}{'═' * 55}{Colors.RESET}")
+    while True:
+        try:
+            tf_choice = input(f"{Colors.CYAN}  Choose 1-14 (default=1 for M1): {Colors.RESET}").strip()
+            if not tf_choice:
+                _chosen_idx = 1
+            else:
+                _chosen_idx = int(tf_choice)
+                if not (1 <= _chosen_idx <= 14):
+                    print(f"{Colors.RED}  Invalid choice (1-14).{Colors.RESET}")
+                    continue
+            break
+        except (ValueError, KeyboardInterrupt):
+            print(f"{Colors.RED}  Invalid input.{Colors.RESET}")
+        except EOFError:
+            _chosen_idx = 1
+            break
+    _tf_entry = _tf_lookup[_chosen_idx]
+    PERIOD, PERIOD_SECONDS = _tf_entry[1], _tf_entry[2]
+    _tf_short = _tf_entry[2]
+    _tf_full = _tf_entry[3]
+    _is_subsecond = _TF_SUBSEC.get(_chosen_idx, False)
+    globals()['PERIOD'] = PERIOD
+    globals()['PERIOD_SECONDS'] = PERIOD_SECONDS
+    if PERIOD_SECONDS < 60:
+        globals()['IS_SUBSECOND'] = True
+        globals()['SUBSECOND_SECONDS'] = PERIOD_SECONDS
+        _subsec_label = f"{PERIOD_SECONDS}S"
+        globals()['SUBSECOND_LABEL'] = _subsec_label
+        print(f"{Colors.GREEN}  Using timeframe: {_tf_short} - {_tf_full}{Colors.RESET}")
+        print(f"{Colors.DIM}  Sub-minute: fetches period=1 history + aggregates locally{Colors.RESET}\n")
+    else:
+        globals()['IS_SUBSECOND'] = False
+        globals()['SUBSECOND_SECONDS'] = 0
+        globals()['SUBSECOND_LABEL'] = ""
+        print(f"{Colors.GREEN}  Using timeframe: {_tf_short} - {_tf_full}{Colors.RESET}\n")
+
+    # ════════════════════════════════════════════════════════════════════
+    # STAGE 3: Select History Size
+    # للفريمات الفرعية (subsecond) نستخدم قيمة ثابتة ولا نسأل المستخدم
+    # لأن النظام يجلب period=1 ويُجمّع محلياً — عدد الأيام غير ذي معنى هنا
+    # ════════════════════════════════════════════════════════════════════
+    if PERIOD_SECONDS < 60:
+        # الفريمات الفرعية (5S/10S/15S/30S): قيمة ثابتة بدون سؤال
+        INITIAL_CANDLES = SUBSECOND_HISTORY_CANDLES
+        HISTORY_DAYS = (INITIAL_CANDLES * PERIOD_SECONDS) / 86400.0 * 1.15
+        FETCH_DURATION_SECONDS = int(86400 * HISTORY_DAYS)
+        globals()['INITIAL_CANDLES'] = INITIAL_CANDLES
+        globals()['HISTORY_DAYS'] = HISTORY_DAYS
+        globals()['FETCH_DURATION_SECONDS'] = FETCH_DURATION_SECONDS
+        # رسالة قصيرة بدل قائمة كاملة
+        print(f"{Colors.DIM}  Sub-second timeframe: auto history ({INITIAL_CANDLES} candles, {HISTORY_DAYS:.2f} days){Colors.RESET}\n")
+    else:
+        # الفريمات 60s+: نسأل المستخدم عن عدد الأيام
+        _default_days = (1000 * PERIOD_SECONDS) / 86400.0 * 1.15  # +15% margin
+        print(f"{Colors.BOLD}  Select History Size{Colors.RESET}")
+        print(f"  {Colors.DIM}Default: 1000 candles ({_default_days:.2f} days). Or enter days manually.{Colors.RESET}")
+        while True:
+            try:
+                days_input = input(f"{Colors.CYAN}  Days (default={_default_days:.2f}): {Colors.RESET}").strip()
+                if not days_input:
+                    INITIAL_CANDLES = 1000
+                    HISTORY_DAYS = _default_days
+                else:
+                    days_val = float(days_input)
+                    if days_val <= 0:
+                        print(f"{Colors.RED}  Must be positive.{Colors.RESET}")
+                        continue
+                    HISTORY_DAYS = days_val * 1.15
+                    INITIAL_CANDLES = max(int((days_val * 86400) / PERIOD_SECONDS), 100)
+                FETCH_DURATION_SECONDS = int(86400 * HISTORY_DAYS)
+                globals()['INITIAL_CANDLES'] = INITIAL_CANDLES
+                globals()['HISTORY_DAYS'] = HISTORY_DAYS
+                globals()['FETCH_DURATION_SECONDS'] = FETCH_DURATION_SECONDS
+                break
+            except (ValueError, KeyboardInterrupt):
+                print(f"{Colors.RED}  Invalid input.{Colors.RESET}")
+            except EOFError:
+                INITIAL_CANDLES = 1000
+                HISTORY_DAYS = _default_days
+                FETCH_DURATION_SECONDS = int(86400 * HISTORY_DAYS)
+                globals()['INITIAL_CANDLES'] = INITIAL_CANDLES
+                globals()['HISTORY_DAYS'] = HISTORY_DAYS
+                globals()['FETCH_DURATION_SECONDS'] = FETCH_DURATION_SECONDS
+                break
+        print(f"{Colors.GREEN}  Using history: {HISTORY_DAYS:.2f} days = {INITIAL_CANDLES} candles{Colors.RESET}\n")
+
+    # (تم حذف كتلة Dashboard بناءً على طلب المستخدم — الترحيب + القوائم كافية)
+
+    # ════════════════════════════════════════════════════════════════════
+    # STAGE 4: Select Domain — عنوان + قائمة مختصرة + سطر إدخال
+    # ════════════════════════════════════════════════════════════════════
+    saved_host = session_manager.get_saved_host()
+    print()
+    print(f"{Colors.BOLD}  Select Domain{Colors.RESET}")
+    for i, (host, label) in enumerate(DOMAINS, 1):
+        marker = f" {Colors.GREEN}(saved){Colors.RESET}" if host == saved_host else ""
+        print(f"  {Colors.CYAN}{i}{Colors.RESET} - {label}{marker}")
+    _saved_idx = next((i for i, (h, l) in enumerate(DOMAINS) if h == saved_host), 0)
+    _default_choice = str(_saved_idx + 1)
+    while True:
+        try:
+            choice = input(f"{Colors.CYAN}  Choose 1-{len(DOMAINS)} (default={_default_choice}): {Colors.RESET}").strip()
+            if not choice:
+                QX_HOST = saved_host if saved_host else DOMAINS[0][0]
+            else:
+                idx = int(choice) - 1
+                if 0 <= idx < len(DOMAINS):
+                    QX_HOST = DOMAINS[idx][0]
+                else:
+                    print(f"{Colors.RED}  Invalid choice.{Colors.RESET}")
+                    continue
+            break
+        except (ValueError, KeyboardInterrupt):
+            print(f"{Colors.RED}  Invalid input.{Colors.RESET}")
+        except EOFError:
+            QX_HOST = saved_host if saved_host else DOMAINS[0][0]
+            break
     globals()['QX_HOST'] = QX_HOST
-    _geo_country = _GEO_CACHE.get("country") or "unknown"
-    print(f"{Colors.GREEN}  Country: {_geo_country}  ->  Domain: {QX_HOST}{Colors.RESET}")
+    print(f"{Colors.GREEN}  Using domain: {QX_HOST}{Colors.RESET}\n")
 
-    # ---- STAGE 2: تسجيل الدخول — البريد وكلمة المرور فقط ----
-    # نفس كود v10/v11/v12 حرفياً (حفظ الجلسة + connect_quotex + نفس المهلات).
+    # ════════════════════════════════════════════════════════════════════
+    # STAGE 5: تسجيل دخول Quotex
+    # ════════════════════════════════════════════════════════════════════
+    # Wipe the sessions table on every launch so the app always starts from a
+    # clean state — no stale cookies/token from a previous run. The saved
+    # credentials (email + password) live in app_state, which is intentionally
+    # preserved so the user does not have to retype them.
+    session_manager.delete_session_file()
+    session_manager.delete_browser_dir()
     should_force = session_manager.should_force_fresh()
     saved_email = session_manager.get_saved_email()
+    saved_password = session_manager.get_saved_password()
     success = False
-    if saved_email and not should_force:
+    # Case 1: both email and password are saved AND the previous login was
+    # healthy (not too old, not too many failed attempts) → auto-login with
+    # force_fresh=True (the sessions table is already empty).
+    if saved_email and saved_password and not should_force:
+        print(f"{Colors.GREEN}Found saved credentials: {saved_email}{Colors.RESET}")
+        fut = asyncio.run_coroutine_threadsafe(connect_quotex(saved_email, saved_password, force_fresh=True, max_attempts=3), ASYNC_LOOP)
+        success = fut.result(timeout=180)
+    # Case 2: saved email only (no password on file) → ask for the password.
+    if not success and saved_email and not should_force:
         print(f"{Colors.GREEN}Found saved email: {saved_email}{Colors.RESET}")
         PASSWORD_INPUT = input(f"{Colors.CYAN} Password: {Colors.RESET}").strip()
-        fut = asyncio.run_coroutine_threadsafe(connect_quotex(saved_email, PASSWORD_INPUT, force_fresh=False, max_attempts=3), ASYNC_LOOP)
+        fut = asyncio.run_coroutine_threadsafe(connect_quotex(saved_email, PASSWORD_INPUT, force_fresh=True, max_attempts=3), ASYNC_LOOP)
         success = fut.result(timeout=180)
+    # Case 3: no usable saved credentials → prompt for both email and password.
     if not success:
         print()
         EMAIL_INPUT = input(f"{Colors.CYAN}Email: {Colors.RESET}").strip()
@@ -13657,69 +8625,1253 @@ if __name__ == "__main__":
     if not success:
         print(f"\n{Colors.RED}[FAILED] Could not connect after all attempts.{Colors.RESET}")
         sys.exit(1)
+        
+    # (FIX D) "Connected successfully!" —
+    if WINAPI_AVAILABLE:
+        time.sleep(1)
+        find_mt4_window()
 
-    # ---- STAGE 3: المراقبة + القائمة + التحميل المسبق + البث الحي ----
+    # (FIX D) HST —
     try:
         os.makedirs(MT4_HISTORY_PATH, exist_ok=True)
     except Exception:
         pass
-    # v14.3 (طلب المستخدم: «طريقة سد الثغرات لماذا لا تعمل») — تصفير علامات
-    # التجمّد القديمة قبل تشغيل الآلة: الجلسات السابقة تجمّدت العملات على
-    # شموع فيها ثغرات فتوقفت الآلة للأبد. الخوارزمية نفسها كما هي.
-    _reset_n = reset_gap_flags()
-    if _reset_n:
-        logmsg(f"[gapfill] reset {_reset_n} stale gap flags — filler active again")
+
+    total_assets = len(ASSET_LIST)
+    # ===== FIX 8: 1 — =====
+    print(f"\n{Colors.CYAN}{'═'*60}{Colors.RESET}")
+    print(f"{Colors.BOLD}  SECTION 1: CANDLE FETCHING ({total_assets} assets, {INITIAL_CANDLES} candles each){Colors.RESET}")
+    print(f"{Colors.CYAN}{'═'*60}{Colors.RESET}\n")
+
+    all_assets = []
+    total_loaded = 0
+    consecutive_disconnects = 0
+    for idx, symbol in enumerate(ASSET_LIST, 1):
+        # ===== FIX 3: =====
+        # auto_reconnect .
+        # ASYNC_LOOP run_coroutine_threadsafe
+        # main async.
+        if not CONNECTION_ALIVE or CLIENT is None or CLIENT.api is None:
+            logmsg(f"[fetch_loop] connection dead before asset {idx}/{total_assets}; waiting for reconnect...")
+            async def _wait_reconnect(timeout=30.0):
+                try:
+                    await wait_until(
+                        lambda: CONNECTION_ALIVE and CLIENT is not None and CLIENT.api is not None,
+                        timeout=timeout,
+                        poll_interval=0.5,
+                    )
+                    return True
+                except asyncio.TimeoutError:
+                    return False
+            reconnected = asyncio.run_coroutine_threadsafe(_wait_reconnect(30.0), ASYNC_LOOP).result(timeout=35)
+            if reconnected:
+                consecutive_disconnects = 0
+            else:
+                consecutive_disconnects += 1
+                logmsg(f"[fetch_loop] reconnect failed within 30s (streak={consecutive_disconnects})")
+                if consecutive_disconnects >= MAX_RECONNECTS_DURING_FETCH:
+                    logmsg(f"[fetch_loop] giving up after {consecutive_disconnects} failed reconnects")
+                    break
+                continue
+        asset = Asset(symbol)
+        display = pretty_asset_name(symbol)
+        all_assets.append(asset)
+        ALL_STREAMING_ASSETS.append(asset)
+        start_time = time.time()
+        # Use 1.0s delay between assets for sub-minute (server sensitive to period=1)
+        # 0.1s for 60s+ timeframes (normal speed)
+        _asset_delay = 1.0 if PERIOD_SECONDS < 60 else FETCH_ASSET_DELAY
+        # Start realtime_stream FIRST (before historical fetch)
+        # This way the stream collects live ticks DURING the fetch, closing the gap
+        # between historical last candle and live first candle
+        asset.stream_task = asyncio.run_coroutine_threadsafe(realtime_stream(asset), ASYNC_LOOP)
+        # Small delay to let stream subscribe before fetch
+        time.sleep(0.1)
+        # Now fetch historical candles (stream is collecting live ticks in parallel)
+        fut = asyncio.run_coroutine_threadsafe(fetch_candles_with_retry(asset, max_retries=MAX_FETCH_RETRIES, idx=idx, total=total_assets), ASYNC_LOOP)
+        try:
+            candles_count, attempts = fut.result(timeout=180)
+            elapsed = time.time() - start_time
+            if candles_count >= MIN_CANDLES_THRESHOLD:
+                total_loaded += candles_count
+                consecutive_disconnects = 0
+                attempts_str = "" if attempts == 1 else f" ({attempts} attempts)"
+                print(f"\r{Colors.CLEAR_LINE}  {Colors.CYAN}{display:<25}{Colors.RESET} {Colors.GREEN}{candles_count} candles in {elapsed:.1f}s{attempts_str}{Colors.RESET} Streaming")
+            else:
+                print(f"\r{Colors.CLEAR_LINE}  {Colors.CYAN}{display:<25}{Colors.RESET} {Colors.RED}Only {candles_count} candles{Colors.RESET} Streaming")
+        except Exception as e:
+            print(f"\r{Colors.CLEAR_LINE}  {Colors.CYAN}{display:<25}{Colors.RESET} {Colors.RED}Error: {str(e)[:30]}{Colors.RESET}")
+            if "Connection" in str(e) or "closed" in str(e).lower():
+                consecutive_disconnects += 1
+                if consecutive_disconnects >= MAX_RECONNECTS_DURING_FETCH:
+                    logmsg(f"[fetch_loop] too many disconnects ({consecutive_disconnects}); aborting fetch")
+                    break
+        # Merge: any live ticks collected during fetch are already in asset.candles
+        # fetch_candles_with_retry overwrites asset.candles with historical only.
+        # To preserve live ticks, merge them back after fetch.
+        # (handled inside realtime_stream which appends to asset.candles)
+        # ===== FIX 7: cooldown — =====
+        # . keepalive_loop .
+        if FETCH_COOLDOWN_EVERY > 0 and idx > 0 and idx % FETCH_COOLDOWN_EVERY == 0 and idx < total_assets:
+            logmsg(f"[fetch_loop] cooldown {FETCH_COOLDOWN_DURATION}s after {idx}/{total_assets} assets")
+            time.sleep(FETCH_COOLDOWN_DURATION)
+        else:
+            # Use 1.0s for sub-minute (server sensitive to period=1), 0.1s for 60s+
+            time.sleep(_asset_delay)
+
+    # NOTE: gap filler runs automatically on its interval (every GAP_FILL_REFRESH_INTERVAL).
+    # First cycle waits 60s, then runs periodically. Not forced at startup.
+    # Gap fill respects the user's chosen timeframe via dynamic _align_time/_fill_missing_slots.
+
     asyncio.run_coroutine_threadsafe(health_monitor(), ASYNC_LOOP)
     asyncio.run_coroutine_threadsafe(auto_reconnect(), ASYNC_LOOP)
     asyncio.run_coroutine_threadsafe(keepalive_loop(), ASYNC_LOOP)
     asyncio.run_coroutine_threadsafe(stale_message_watchdog(), ASYNC_LOOP)
-    # جدول العملات الكامل (الدفع + مفتوح/مغلق) — كما في v12 تماماً:
-    asyncio.run_coroutine_threadsafe(asset_payout_monitor(), ASYNC_LOOP)
-    # v13: BRLUSD_otc فوراً (300 شمعة + بث حي) ثم بقية الأصول المفتوحة واحدة تلو الأخرى:
-    asyncio.run_coroutine_threadsafe(preload_all_assets(), ASYNC_LOOP)
-    # v13.1 (طلب المستخدم): آلية سد الثغرات تعمل الآن فعلاً — كانت معرّفة في
-    # الكود بلا تشغيل (لذلك ظهرت فراغات في الشموع). نفس الآلية نفسها بلا أي تغيير:
+    # start the automatic gap filler loop (runs every GAP_FILL_REFRESH_INTERVAL)
     asyncio.run_coroutine_threadsafe(mt4_gap_filler(), ASYNC_LOOP)
-    # v13: كاش التيكات في الذاكرة + حذف التيكات الأقدم من 5 دقائق:
-    asyncio.run_coroutine_threadsafe(tick_cache_collector(), ASYNC_LOOP)
-    asyncio.run_coroutine_threadsafe(tick_retention_loop(), ASYNC_LOOP)
-    # v13: ترميم candles.db (أحدث 5000 شمعة لكل عملة) — القرص لا يمتلئ أبداً:
-    asyncio.run_coroutine_threadsafe(candlestore_trim_loop(), ASYNC_LOOP)
+    
+    # ===== FIX 8: dashboard — 3 =====
+    # 1: ( )
+    # 2: ( status line )
+    # 3: ( mt4_gap_filler)
+    print(f"\n{Colors.GREEN}{'═'*60}{Colors.RESET}")
+    print(f"{Colors.BOLD}  All assets loaded and streaming!{Colors.RESET}")
+    print(f"  Total: {total_loaded} candles for {len(all_assets)} assets")
+    print(f"  History window: {HISTORY_DAYS} day (optimized, fast fetch)")
+    print(f"  Writer Thread: ACTIVE (every {WRITE_INTERVAL}s)")
+    print(f"  Refresh: BATCHED (every {REFRESH_INTERVAL}s)")
+    print(f"  Stream Poll: {STREAM_POLL_INTERVAL}s")
+    print(f"  Health Monitor: ACTIVE (Lenient: ignores websocket flickers)")
+    print(f"  Keepalive Ping: ACTIVE (every {KEEPALIVE_PING_INTERVAL}s, multi-type)")
+    print(f"  Stale Watchdog: ACTIVE (recycles if silent > {STALE_MESSAGE_TIMEOUT}s)")
+    print(f"  Auto-Reconnect: instant detect + exponential backoff (never gives up)")
+    print(f"  Internal Watchdog: ACTIVE (recycles stale connections > 90s)")
+    print(f"  Fetch: {FETCH_MAX_WORKERS} workers, {FETCH_CHUNK_SIZE}c/batch, {FETCH_BATCH_DELAY}s delay, {FETCH_ASSET_DELAY}s between assets")
+    print(f"  Retry: {MAX_FETCH_RETRIES} attempts, backoff {RETRY_BACKOFF_BASE}-{RETRY_BACKOFF_MAX}s")
+    print(f"{Colors.GREEN}{'═'*60}{Colors.RESET}\n")
 
-    # ════════ v14.0: طبقة التقوية — كل الحلقات الجديدة تحت المشرف ════════
-    # (دون انهيار الخوادم): تفرز الطلبات + سد الثغرات على كل مفتوح +
-    # التكس لا ينام + تقوي النقاط + مشرف الحلقات + النبضة — والكود
-    # الأساسي أعلاه كما هو حرفياً.
-    try:
-        for _v14_name, _v14_factory in v14_build_background_loops():
-            asyncio.run_coroutine_threadsafe(
-                v14_supervise(_v14_name, _v14_factory), ASYNC_LOOP)
-        v14_print_banner()
-    except Exception as _v14e:
-        logmsg(f"[v14] layer issue (server continues unchanged): {_v14e}")
+    # ===== FIX E/F/G: — =====
+    # FIX E: ( 6)
+    # FIX F: ( print() )
+    # FIX G: ( / ) +
+    # FIX H: (columns/rows) —
 
+    import shutil as _shutil
+    def _get_term_size():
+        try:
+            s = _shutil.get_terminal_size((80, 24))
+            return s.columns, s.lines
+        except Exception:
+            return 80, 24
+
+    def _fmt_price(p):
+        if p <= 0: return "—"
+        if p >= 1000: return f"{p:.3f}"
+        if p >= 100:  return f"{p:.3f}"
+        if p >= 1:    return f"{p:.5f}"
+        return f"{p:.5f}"
+
+    def _draw_live_table(first_draw=False):
+        cols, rows = _get_term_size()
+        # ===== FIX H: — =====
+        # : 25 chars (name=12 + price=10 + )
+        # : 50 chars (name=25 + price=15 + status=8 + )
+        cols = max(25, cols)
+        if cols >= 55:
+            name_w, price_w = 25, 15
+            show_status = True
+        elif cols >= 40:
+            name_w, price_w = 20, 12
+            show_status = True
+        elif cols >= 30:
+            name_w, price_w = 15, 10
+            show_status = False
+        else:
+            name_w, price_w = 12, 8
+            show_status = False
+        bar_w = max(20, min(70, cols - 2))
+        # ( )
+        header_lines = 3
+        data_lines = len(all_assets) + 1  # +1
+        gap_lines = 0
+        if GAP_FILL_SUMMARY:
+            gap_lines = 3  # ===, summary, ===
+        # status messages lines (queued log messages)
+        msg_lines_count = min(len(_STATUS_MESSAGES_QUEUE), 3)
+        msg_lines = msg_lines_count + (1 if msg_lines_count > 0 else 0)  # +1 for separator
+        total_lines = header_lines + data_lines + gap_lines + msg_lines
+        if not first_draw:
+            sys.stdout.write(f"\033[{total_lines}A")
+        # ===== =====
+        sys.stdout.write(f"\033[2K{Colors.CYAN}{'═'*bar_w}{Colors.RESET}\n")
+        sys.stdout.write(f"\033[2K{Colors.BOLD}  LIVE PRICES{Colors.RESET}\n")
+        sys.stdout.write(f"\033[2K{Colors.CYAN}{'═'*bar_w}{Colors.RESET}\n")
+        # ===== =====
+        for asset in all_assets:
+            display = pretty_asset_name(asset.api_symbol)
+            # name_w
+            if len(display) > name_w:
+                display = display[:name_w-1] + "~"
+            # FIX G:
+            name_visible = f"{display:<{name_w}}"
+            name_colored = f"{Colors.BLUE}{name_visible}{Colors.RESET}"
+            # FIX G: ( / )
+            price_str = _fmt_price(asset.price)
+            if asset.previous_price > 0 and asset.price > 0:
+                if asset.price > asset.previous_price:
+                    price_colored = f"{Colors.GREEN}{price_str:<{price_w}}{Colors.RESET}"
+                elif asset.price < asset.previous_price:
+                    price_colored = f"{Colors.RED}{price_str:<{price_w}}{Colors.RESET}"
+                else:
+                    price_colored = f"{price_str:<{price_w}}"
+            else:
+                price_colored = f"{price_str:<{price_w}}"
+
+            if show_status:
+                if asset.updates > 0:
+                    status_str = f"{Colors.GREEN}LIVE{Colors.RESET}"
+                else:
+                    status_str = f"{Colors.RED}WAIT{Colors.RESET}"
+                sys.stdout.write(f"\033[2K  {name_colored} {price_colored} {status_str}\n")
+            else:
+                sys.stdout.write(f"\033[2K  {name_colored} {price_colored}\n")
+
+        if CONNECTION_ALIVE:
+            conn_status = f"{Colors.GREEN}CONNECTED{Colors.RESET}"
+        else:
+            conn_status = f"{Colors.RED}RECONNECTING...{Colors.RESET}"
+        if show_status:
+            sys.stdout.write(f"\033[2K  {Colors.BLUE}{'Connection':<{name_w}}{Colors.RESET} {'':<{price_w}} {conn_status}\n")
+        else:
+            sys.stdout.write(f"\033[2K  {Colors.BLUE}{'Connection':<{name_w}}{Colors.RESET} {conn_status}\n")
+        # ===== FIX F: ( ) =====
+        if GAP_FILL_SUMMARY:
+            summary = GAP_FILL_SUMMARY
+            # bar_w-4
+            max_len = bar_w - 4
+            if len(summary) > max_len:
+                summary = summary[:max_len-3] + "..."
+            # :
+            if "ABORTED" in GAP_FILL_SUMMARY or "Failed:" in GAP_FILL_SUMMARY and "0 failed" not in GAP_FILL_SUMMARY:
+                summary_colored = f"{Colors.RED}{summary}{Colors.RESET}"
+            elif "COMPLETE" in GAP_FILL_SUMMARY:
+                summary_colored = f"{Colors.GREEN}{summary}{Colors.RESET}"
+            elif GAP_FILL_ACTIVE:
+                summary_colored = f"{Colors.CYAN}{summary}{Colors.RESET}"
+            else:
+                summary_colored = summary
+            sys.stdout.write(f"\033[2K{Colors.CYAN}{'═'*bar_w}{Colors.RESET}\n")
+            sys.stdout.write(f"\033[2K  {summary_colored}\n")
+            sys.stdout.write(f"\033[2K{Colors.CYAN}{'═'*bar_w}{Colors.RESET}\n")
+        # Display queued log messages (last 3)
+        if _STATUS_MESSAGES_QUEUE:
+            sys.stdout.write(f"\033[2K{Colors.DIM}{'─'*bar_w}{Colors.RESET}\n")
+            for msg in _STATUS_MESSAGES_QUEUE[-3:]:
+                # truncate to bar_w-4
+                if len(msg) > bar_w - 4:
+                    msg = msg[:bar_w-7] + "..."
+                sys.stdout.write(f"\033[2K  {Colors.DIM}{msg}{Colors.RESET}\n")
+        sys.stdout.flush()
+
+    # Initial draw
+    _draw_live_table(first_draw=True)
     print()
-    print(f"{Colors.GREEN}{'═' * 64}{Colors.RESET}")
-    print(f"{Colors.BOLD}  Connected! Chart opener ready + chart-driven loading ...{Colors.RESET}")
-    print(f"  {Colors.DIM}1) BRLUSD_otc: 300 شمعة فوراً + الحالة ونسبة الدفع + بث حي{Colors.RESET}")
-    print(f"  {Colors.DIM}2) أي عملة أخرى: تُجلب 300 شمعة فقط عند فتح شارتها (واحدة تلو الأخرى){Colors.RESET}")
-    print(f"  {Colors.DIM}3) التمرير للخلف: دفعة 300 شمعة أقدم في كل تمرير{Colors.RESET}")
-    print(f"  {Colors.DIM}4) الجدول الكامل (الدفع + مفتوح/مغلق) يُطبع ويُحدّث تلقائياً{Colors.RESET}")
-    print(f"  {Colors.DIM}5) سد الثغرات يعمل: أي فجوة تُملأ بشموع مسطحة — لا فراغات{Colors.RESET}")
-    print(f"  {Colors.DIM}6) التيكات في الذاكرة فقط وتُحذف بعد 5 دقائق — القرص لا يمتلئ{Colors.RESET}")
-    print(f"  {Colors.DIM}للخروج: Ctrl+C{Colors.RESET}")
-    print(f"{Colors.GREEN}{'═' * 64}{Colors.RESET}")
+    print(f"{Colors.CYAN}Live streaming active. Press Enter for menu, Ctrl+C to stop.{Colors.RESET}")
+    print()
+
+    # Interactive menu state
+    stop_requested = False
+    reinit_requested = False
+    _enter_pressed = threading.Event()
+
+    def _stdin_listener():
+        while not stop_requested and not reinit_requested:
+            try:
+                line = sys.stdin.readline()
+                if line == '' or line is None:
+                    time.sleep(0.5)
+                    continue
+                _enter_pressed.set()
+                while _enter_pressed.is_set() and not stop_requested and not reinit_requested:
+                    time.sleep(0.1)
+            except (KeyboardInterrupt, EOFError):
+                time.sleep(0.5)
+            except Exception:
+                time.sleep(0.5)
+
+    _stdin_thread = threading.Thread(target=_stdin_listener, daemon=True, name="StdinListener")
+    _stdin_thread.start()
+
+    def _show_interactive_menu():
+        print()
+        print(f"{Colors.CYAN}{'═'*70}{Colors.RESET}")
+        print(f"{Colors.BOLD}  MENU{Colors.RESET}")
+        print(f"{Colors.CYAN}{'═'*70}{Colors.RESET}")
+        print(f"  {Colors.CYAN}1{Colors.RESET} - Change Timeframe (current: {_current_period_label()})")
+        print(f"  {Colors.CYAN}2{Colors.RESET} - Change History days (current: {HISTORY_DAYS:.2f}d = {INITIAL_CANDLES} candles)")
+        print(f"  {Colors.CYAN}3{Colors.RESET} - Change both timeframe and history days")
+        print(f"  {Colors.CYAN}4{Colors.RESET} - Resume streaming (continue)")
+        print(f"  {Colors.CYAN}5{Colors.RESET} - Exit program")
+        print(f"{Colors.CYAN}{'═'*70}{Colors.RESET}")
+        while True:
+            try:
+                c = input(f"{Colors.CYAN}Choose 1-5: {Colors.RESET}").strip()
+                if c in ('1', '2', '3', '4', '5'):
+                    return int(c)
+                print(f"{Colors.RED}Invalid choice.{Colors.RESET}")
+            except (ValueError, KeyboardInterrupt):
+                print(f"{Colors.RED}Invalid input.{Colors.RESET}")
+            except EOFError:
+                return 4
+
+    def _choose_timeframe():
+        # نفس تنسيق القائمة الأولية: 3 أعمدة × 5 صفوف
+        # The cell layout must match Stage 2 exactly: "XX - SSSSS - LLLL" (17 chars).
+        # The current item is highlighted in GREEN instead of an inline asterisk,
+        # so column widths stay perfectly aligned with the initial menu.
+        print()
+        print(f"{Colors.BOLD}  Select Timeframe{Colors.RESET}")
+        print(f"  {Colors.DIM}{'═' * 55}{Colors.RESET}")
+        _ROWS_LOCAL = [
+            (1, 6, 11), (2, 7, 12), (3, 8, 13), (4, 9, 14), (5, 10, None),
+        ]
+        _TF_COL_WIDTH = 17
+        _TF_GAP = "  "
+        for row in _ROWS_LOCAL:
+            cells = []
+            for idx in row:
+                if idx is None:
+                    cells.append(" " * _TF_COL_WIDTH)
+                    continue
+                tf_tuple = TIMEFRAMES[idx - 1]
+                mt4_p = tf_tuple[0]
+                secs = tf_tuple[1]
+                full_label = tf_tuple[2]            # e.g. "M1  - 1 minute"
+                short_label = full_label.split()[0]   # e.g. "M1"
+                is_current = (mt4_p == PERIOD and secs == PERIOD_SECONDS)
+                cell_color = Colors.GREEN if is_current else Colors.CYAN
+                # Identical layout to Stage 2: "XX - SSSSS - LLLL" = 17 visible chars
+                cells.append(f"{cell_color}{idx:>2}{Colors.RESET} - {secs:<5} - {short_label:<4}")
+            print(f"  {cells[0]}{_TF_GAP}{cells[1]}{_TF_GAP}{cells[2]}")
+        print(f"  {Colors.DIM}{'═' * 55}{Colors.RESET}")
+        print(f"  {Colors.DIM}(green = current){Colors.RESET}")
+        while True:
+            try:
+                tf_choice = input(f"{Colors.CYAN}  Choose 1-14 (default=1 for M1): {Colors.RESET}").strip()
+                if not tf_choice:
+                    return TIMEFRAMES[0]
+                tf_idx = int(tf_choice) - 1
+                if 0 <= tf_idx < len(TIMEFRAMES):
+                    return TIMEFRAMES[tf_idx]
+                print(f"{Colors.RED}  Invalid choice (1-14).{Colors.RESET}")
+            except (ValueError, KeyboardInterrupt):
+                print(f"{Colors.RED}  Invalid input.{Colors.RESET}")
+            except EOFError:
+                return TIMEFRAMES[0]
+
+    def _choose_history_days():
+        # للفريمات الفرعية: لا نسأل، نُرجع قيمة ثابتة (نفس سلوك Initial Setup)
+        if PERIOD_SECONDS < 60:
+            _auto_days = (SUBSECOND_HISTORY_CANDLES * PERIOD_SECONDS) / 86400.0 * 1.15
+            print(f"{Colors.DIM}  Sub-second timeframe: auto history ({SUBSECOND_HISTORY_CANDLES} candles){Colors.RESET}")
+            return _auto_days, SUBSECOND_HISTORY_CANDLES
+        # للفريمات 60s+: نسأل المستخدم
+        print(f"{Colors.CYAN}{'═'*70}{Colors.RESET}")
+        print(f"{Colors.BOLD}  Select History Size:{Colors.RESET}")
+        print(f"{Colors.CYAN}{'═'*70}{Colors.RESET}")
+        _default_days_local = (1000 * PERIOD_SECONDS) / 86400.0 * 1.15  # +15% margin
+        print(f"  {Colors.CYAN}Enter number of days (e.g., 1, 2, 3, 4...)")
+        print(f"   Or press Enter for default 1000 candles ({_default_days_local:.2f} days){Colors.RESET}")
+        print(f"{Colors.CYAN}{'═'*70}{Colors.RESET}")
+        while True:
+            try:
+                days_input = input(f"{Colors.CYAN}Days: {Colors.RESET}").strip()
+                if not days_input:
+                    return _default_days_local, 1000
+                days_val = float(days_input)
+                if days_val <= 0:
+                    print(f"{Colors.RED}Must be positive.{Colors.RESET}")
+                    continue
+                # Apply 15% margin to user-specified days too
+                days_with_margin = days_val * 1.15
+                candles = max(int((days_val * 86400) / PERIOD_SECONDS), 100)
+                return days_with_margin, candles
+            except (ValueError, KeyboardInterrupt):
+                print(f"{Colors.RED}Invalid input.{Colors.RESET}")
+            except EOFError:
+                return _default_days_local, 1000
+
+    # status update loop with interactive menu support
+    while not stop_requested:
+        try:
+            while True:
+                if _enter_pressed.is_set() or stop_requested or reinit_requested:
+                    break
+                _draw_live_table(first_draw=False)
+                time.sleep(STATUS_REFRESH_INTERVAL)
+            if stop_requested:
+                break
+            if reinit_requested:
+                break
+            action = _show_interactive_menu()
+            _enter_pressed.clear()
+            if action == 4:
+                _draw_live_table(first_draw=True)
+                continue
+            elif action == 5:
+                stop_requested = True
+                break
+            elif action in (1, 2, 3):
+                new_period = PERIOD
+                new_period_seconds = PERIOD_SECONDS
+                if action in (1, 3):
+                    _new_tf = _choose_timeframe()
+                    new_period = _new_tf[0]
+                    new_period_seconds = _new_tf[1]
+                new_days = HISTORY_DAYS
+                new_candles = INITIAL_CANDLES
+                # للفريمات الفرعية: _choose_history_days يُرجع قيمة ثابتة تلقائياً
+                # للفريمات 60s+: يسأل المستخدم
+                if action in (2, 3):
+                    new_days, new_candles = _choose_history_days()
+                # Update globals BEFORE the live re-fetch — refetch_all_candles()
+                # reads IS_SUBSECOND / SUBSECOND_SECONDS to decide which stream
+                # function (subsecond_stream vs realtime_stream) to restart.
+                globals()['PERIOD'] = new_period
+                globals()['PERIOD_SECONDS'] = new_period_seconds
+                if new_period_seconds < 60:
+                    globals()['IS_SUBSECOND'] = True
+                    globals()['SUBSECOND_SECONDS'] = new_period_seconds
+                    globals()['SUBSECOND_LABEL'] = f"{new_period_seconds}S"
+                else:
+                    globals()['IS_SUBSECOND'] = False
+                    globals()['SUBSECOND_SECONDS'] = 0
+                    globals()['SUBSECOND_LABEL'] = ""
+                globals()['HISTORY_DAYS'] = new_days
+                globals()['INITIAL_CANDLES'] = new_candles
+                globals()['FETCH_DURATION_SECONDS'] = int(86400 * new_days) if new_days > 0 else 0
+                print(f"\n{Colors.GREEN}Switching to {_current_period_label()}, {new_days:.2f} days = {new_candles} candles...{Colors.RESET}")
+                # ===== LIVE SWITCH (no restart) =====
+                # Instead of os.execv() (which kills the process and forces the
+                # user to re-enter license / timeframe / domain / login), we
+                # stop the existing streams, clear the candles for every asset,
+                # re-fetch with the new timeframe and restart the streams —
+                # all in-place. The status loop simply continues afterwards.
+                if not (CONNECTION_ALIVE and CLIENT is not None and CLIENT.api is not None):
+                    print(f"{Colors.YELLOW}  Connection is currently down — waiting for auto-reconnect to apply the new timeframe.{Colors.RESET}")
+                    # The auto_reconnect loop will pick up the new globals on
+                    # its next iteration and re-fetch with the new timeframe.
+                else:
+                    try:
+                        print(f"{Colors.DIM}  Re-fetching all assets live (no restart)...{Colors.RESET}")
+                        refetch_fut = asyncio.run_coroutine_threadsafe(refetch_all_candles(), ASYNC_LOOP)
+                        refetch_fut.result(timeout=900)  # up to 15 minutes for 41 assets
+                    except Exception as e:
+                        print(f"{Colors.RED}  Live re-fetch error: {e}{Colors.RESET}")
+                _enter_pressed.clear()
+                _draw_live_table(first_draw=True)
+                continue
+        except KeyboardInterrupt:
+            stop_requested = True
+            break
+        except Exception as e:
+            log_exception("main status loop", e)
+            try:
+                print(f"\n{Colors.CYAN}[main loop] recovered from error: {e}{Colors.RESET}", flush=True)
+            except Exception:
+                pass
+            time.sleep(1)
+
+    # If reinit was requested: نُعيد تشغيل البرنامج بشكل نظيف
+    # ملاحظة: هذا إعادة بناء كاملة (full re-init) لكنها أسرع من إغلاق الترمنال
+    # لأن البرنامج يبدأ مباشرة من نقطة الترخيص المحفوظ (لا يسأل المستخدم ثانية)
+    if reinit_requested:
+        print(f"\n{Colors.CYAN}Applying new timeframe settings...{Colors.RESET}")
+        print(f"{Colors.DIM}  (Saved license will auto-apply on restart){Colors.RESET}")
+        sys.stdout.flush()
+        time.sleep(1.0)
+        # إعادة تنفيذ البرنامج بشكل نظيف — saved_license سيُفعّل تلقائياً
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
+    # graceful shutdown
+    cols, rows = _get_term_size()
+    gap_lines = 3 if GAP_FILL_SUMMARY else 0
+    total_lines_now = 3 + len(all_assets) + 1 + gap_lines
+    sys.stdout.write(f"\033[{total_lines_now}B\n")
+    sys.stdout.flush()
+    print(f"{Colors.RED}Stopped{Colors.RESET}")
+    print(f"{Colors.CYAN}Total updates: {sum(a.updates for a in all_assets):,}{Colors.RESET}")
+    print(f"{Colors.CYAN}Total candles stored: {sum(len(a.candles) for a in all_assets):,}{Colors.RESET}")
+    print()
+    writer_thread.running = False
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ═══ طبقة ربط التطبيق (APP GLUE) — v15.0 «الأصل هو الخادم»                  ═══
+# ═══════════════════════════════════════════════════════════════════════════
+# هذا القسم يُضاف **فوق** كود الخادم الأصلي (الملصق حرفياً) دون تعديل أي سطر
+# فيه. كل ما يلي ليس منطقاً جديداً ولا منطقاً معدّلاً — إنه مجرد جسور تمرّر
+# طلبات التطبيق إلى آلة الخادم الأصلية نفسها كما هي حرفياً:
+#   fetch_candles_with_retry / realtime_stream / MT4_WRITER.fill_gap_once /
+#   _fill_missing_slots / _align_time / CLIENT.get_candles /
+#   CLIENT._fetch_historical_batch / WriterThread / mt4_gap_filler ...
+# (كود الخادم الأصلي أعلاه لم يُمَس بايت واحد — وهذا القسم يبدأ بعده مباشرة)
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ─── استيرادات الطبقة فقط (المحرك الأصلي لم يُمَس) ───
+from collections import deque as _qx_deque
+
+# ═══ 1) النطاقات + البلد (نفس كتلة v10 الرسمية حرفياً) ═══
+DEFAULT_DOMAIN_GLOBAL = "quotex.com"
+DEFAULT_DOMAIN_BANGLADESH = "market-qx.info"
+_GEO_CACHE = {"country": None, "checked_at": 0.0}
+
+def detect_country_code(timeout: float = 4.0):
+    """يرجع رمز البلد فقط (مثل BD / SA / EG) عبر IP العام. لا يجلب أي موقع دقيق."""
+    if _GEO_CACHE["country"] and time.time() - _GEO_CACHE["checked_at"] < 3600:
+        return _GEO_CACHE["country"]
+    endpoints = [
+        ("http://ip-api.com/json/?fields=status,countryCode", lambda d: (d or {}).get("countryCode")),
+        ("https://ipapi.co/json/", lambda d: (d or {}).get("country_code")),
+        ("https://api.ip.sb/geoip", lambda d: (d or {}).get("country_code")),
+    ]
+    for url, extract in endpoints:
+        try:
+            r = requests.get(url, timeout=timeout, headers={"User-Agent": USER_AGENT})
+            code = extract(r.json())
+            if code:
+                _GEO_CACHE["country"] = str(code).upper()
+                _GEO_CACHE["checked_at"] = time.time()
+                return _GEO_CACHE["country"]
+        except Exception:
+            continue
+    return None
+
+def resolve_qx_host() -> str:
+    """يحدد النطاق تلقائياً حسب البلد ويضبط QX_HOST العام:
+    بنغلاديش -> market-qx.info ، أي دولة أخرى (أو فشل التعرف) -> quotex.com."""
+    global QX_HOST
+    country = detect_country_code()
+    if country == "BD":
+        QX_HOST = DEFAULT_DOMAIN_BANGLADESH
+    else:
+        QX_HOST = DEFAULT_DOMAIN_GLOBAL
+    return QX_HOST
+
+# ═══ 2) قائمة العملات الكاملة + الدفع + الحالة (نفس كتلة v10 حرفياً) ═══
+PAYOUT_REFRESH_INTERVAL = 60
+try:
+    ASSETS_PAYOUT_FILE = Path("qx_assets_payouts.json")
+except Exception:
+    ASSETS_PAYOUT_FILE = Path("qx_assets_payouts.json")
+
+def _instruments_snapshot():
+    """يبني قائمة الأصول الكاملة (الاسم + نسبة الدفع + الحالة) من instruments."""
+    if CLIENT is None or CLIENT.api is None:
+        return []
+    insts = getattr(CLIENT.api, "instruments", None) or []
+    out = []
+    for i in insts:
+        try:
+            if not isinstance(i, (list, tuple)) or len(i) < 6:
+                continue
+            entry = {
+                "asset": str(i[1]) if len(i) > 1 else "",
+                "name": str(i[2]).replace("\n", " ").strip() if len(i) > 2 else "",
+                "payout": i[5] if len(i) > 5 else None,
+            }
+            try:
+                entry["id"] = str(i[0])
+            except Exception:
+                entry["id"] = ""
+            try:
+                entry["turbo_payout"] = i[18] if len(i) > 18 else None
+            except Exception:
+                entry["turbo_payout"] = None
+            try:
+                entry["open"] = bool(i[14]) if len(i) > 14 else None
+            except Exception:
+                entry["open"] = None
+            try:
+                entry["profit_24h"] = i[-10]
+            except Exception:
+                entry["profit_24h"] = None
+            try:
+                entry["profit_1m"] = i[-9]
+            except Exception:
+                entry["profit_1m"] = None
+            try:
+                entry["profit_5m"] = i[-8]
+            except Exception:
+                entry["profit_5m"] = None
+            out.append(entry)
+        except Exception:
+            continue
+    return out
+
+def _save_assets_payout_file(entries):
+    """يحفظ لقطة كاملة إلى qx_assets_payouts.json بجانب الملف."""
+    try:
+        payload = {
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "host": QX_HOST,
+            "count": len(entries),
+            "open_count": sum(1 for e in entries if e.get("open")),
+            "closed_count": sum(1 for e in entries if e.get("open") is False),
+            "assets": entries,
+        }
+        ASSETS_PAYOUT_FILE.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        return True
+    except Exception as e:
+        logmsg(f"[payout] failed to save {ASSETS_PAYOUT_FILE}: {e}")
+        return False
+
+async def fetch_instruments_now(timeout: float = 12.0):
+    """طريقة pyquotex الرسمية: إرسال 42["instruments/get"] عبر نفس WebSocket
+    والانتظار حتى وصول 451-["instruments/list"] ثم تخزينها في CLIENT.api.instruments.
+    طريقة الدخول وطريقة جلب الشموع لا تتأثر إطلاقاً."""
+    if CLIENT is None or CLIENT.api is None:
+        return []
+    try:
+        await CLIENT.api.event_registry.clear_event("instruments_ready")
+    except Exception:
+        pass
+    try:
+        CLIENT.api.send_websocket_request('42["instruments/get"]')
+    except Exception as e:
+        logmsg(f"[payout] instruments request failed: {e}")
+    data = await CLIENT.api.event_registry.wait_event("instruments_ready", timeout=timeout)
+    if isinstance(data, dict) and data.get("_placeholder"):
+        data = await CLIENT.api.event_registry.wait_event("instruments_ready", timeout=5.0)
+    if isinstance(data, list) and data:
+        CLIENT.api.instruments = data
+    return list(getattr(CLIENT.api, "instruments", None) or [])
+
+def _print_payout_table(entries):
+    """طباعة الجدول الكامل: العملة / نسبة الدفع / الحالة (مفتوح أو مغلق)."""
+    open_entries = [e for e in entries if e.get("open")]
+    closed_entries = [e for e in entries if e.get("open") is False]
+    print(f"\n{Colors.CYAN}{'═' * 72}{Colors.RESET}")
+    print(f"{Colors.BOLD}  FULL ASSET LIST — PAYOUT % — OPEN/CLOSED{Colors.RESET}")
+    print(f"  Total: {len(entries)}  |  {Colors.GREEN}OPEN: {len(open_entries)}{Colors.RESET}"
+          f"  |  {Colors.RED}CLOSED: {len(closed_entries)}{Colors.RESET}"
+          f"  |  Domain: {QX_HOST}")
+    print(f"{Colors.CYAN}{'─' * 72}{Colors.RESET}")
+    print(f"  {'ASSET':<16}{'PAYOUT':>7}  {'TURBO':>6}  {'1M':>5}  {'5M':>5}  STATUS")
+    print(f"{Colors.DIM}{'─' * 72}{Colors.RESET}")
+    for e in entries:
+        name = (e.get("asset") or "?")[:16]
+        payout = e.get("payout")
+        turbo = e.get("turbo_payout")
+        p1 = e.get("profit_1m")
+        p5 = e.get("profit_5m")
+        payout_str = f"{payout}%" if isinstance(payout, (int, float)) else "-"
+        turbo_str = f"{turbo}%" if isinstance(turbo, (int, float)) else "-"
+        p1_str = f"{p1}%" if isinstance(p1, (int, float)) else "-"
+        p5_str = f"{p5}%" if isinstance(p5, (int, float)) else "-"
+        if e.get("open"):
+            status = f"{Colors.GREEN}OPEN{Colors.RESET}"
+        else:
+            status = f"{Colors.RED}CLOSED{Colors.RESET}"
+        print(f"  {name:<16}{payout_str:>7}  {turbo_str:>6}  {p1_str:>5}  {p5_str:>5}  {status}")
+    print(f"{Colors.CYAN}{'═' * 72}{Colors.RESET}")
+
+async def asset_payout_monitor():
+    """يجلب قائمة العملات الكاملة + نسبة الدفع + حالة الزوج (مفتوح/مغلق) مباشرة
+    بعد تسجيل الدخول، يطبع الجدول مرة واحدة، يحفظ لقطة JSON، ثم يحدّث بهدوء
+    كل PAYOUT_REFRESH_INTERVAL ثانية."""
+    await asyncio.sleep(2.0)
+    first = True
+    last_signature = None
+    while True:
+        try:
+            if CLIENT is None or CLIENT.api is None or not CONNECTION_ALIVE:
+                await asyncio.sleep(5.0)
+                continue
+            entries = []
+            try:
+                await fetch_instruments_now(timeout=12.0)
+                entries = _instruments_snapshot()
+            except Exception as e:
+                logmsg(f"[payout] refresh failed: {e}")
+            if entries:
+                _save_assets_payout_file(entries)
+                signature = tuple(sorted(
+                    (e.get("asset"), str(e.get("payout")), str(e.get("open")))
+                    for e in entries))
+                if first:
+                    try:
+                        _print_payout_table(entries)
+                    except Exception:
+                        pass
+                    first = False
+                elif signature != last_signature:
+                    open_n = sum(1 for e in entries if e.get("open"))
+                    closed_n = sum(1 for e in entries if e.get("open") is False)
+                    logmsg(f"[payout] updated: {len(entries)} assets "
+                           f"({open_n} open / {closed_n} closed) — snapshot saved")
+                last_signature = signature
+        except Exception as e:
+            log_exception("asset_payout_monitor", e)
+        await asyncio.sleep(PAYOUT_REFRESH_INTERVAL)
+
+# ═══ 3) مرصد instruments فوق on_message الأصلي ═══
+# الأصل يعمل كاملاً أولاً حرفياً (_qx_orig_on_message(self, wss, msg)) ثم نلتقط
+# فقط 451-["instruments/list",[...]] لنوقظ من ينتظره — نفس كتلة v10 حرفياً.
+_qx_orig_on_message = WebsocketClient.on_message
+
+def _qx_on_message_with_instruments(self, wss, msg):
+    _qx_orig_on_message(self, wss, msg)      # الأصل حرفياً — كل شيء كما هو
+    try:
+        msg_str = msg.decode("utf-8", errors="ignore") if isinstance(msg, bytes) else str(msg)
+        if "instruments/list" not in msg_str:
+            return
+        _idx = msg_str.find('["')
+        if _idx == -1:
+            return
+        _payload = json.loads(msg_str[_idx:])
+        _data = _payload[1] if isinstance(_payload, list) and len(_payload) >= 2 else None
+        if isinstance(_data, dict) and "list" in _data:
+            _data = _data["list"]
+        if isinstance(_data, list) and _data:
+            self.api.instruments = _data
+            _loop = getattr(self.api, "_async_loop", None)
+            if _loop is not None and _loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    self.api.event_registry.set_event("instruments_ready", _data),
+                    _loop,
+                )
+            logger.info(f"Instruments list received: {len(_data)} assets")
+    except Exception as _e:
+        logger.debug(f"instruments/list parse error: {_e}")
+
+WebsocketClient.on_message = _qx_on_message_with_instruments
+
+# ═══ 4) إعدادات التطبيق على المحرك (نفس آلية قائمة الأصل نفسها) ═══
+# القيم الافتراضية حسب طلب المستخدم: دفعة 700 شمعة (حتى 1000 من الإعدادات)
+# وتاريخ 0.80 يوم لكل عملة.
+PRELOAD_CANDLES = 700
+PAGINATION_BATCH = 700
+QX_HISTORY_DAYS = 0.80
+ASSET_MAX_CANDLES = 45000
+PRELOAD_FIRST_SYMBOL = ASSET_LIST[0] if ASSET_LIST else "BRLUSD_otc"
+_PRELOADED_INFO = {}
+V14_DEEP_REPAIRED = {}
+_QX_WINDOW_BUSY = False
+
+def apply_history_days(days_val):
+    """تطبيق عدد أيام التاريخ بنفس آلية قائمة الأصل حرفياً (STAGE 3 وقائمة
+    «Change History days» في الكود الأصلي): هامش +15% على المدى، INITIAL_CANDLES
+    من الأيام، وFETCH_DURATION_SECONDS من المدى مع الهامش — نفس الثلاثي الأصلي."""
+    global HISTORY_DAYS, INITIAL_CANDLES, FETCH_DURATION_SECONDS, QX_HISTORY_DAYS
+    try:
+        d = float(days_val)
+    except Exception:
+        d = 0.80
+    d = max(0.05, d)
+    days_with_margin = d * 1.15
+    try:
+        INITIAL_CANDLES = max(int((d * 86400) / max(1, PERIOD_SECONDS)), 100)
+    except Exception:
+        INITIAL_CANDLES = 1000
+    HISTORY_DAYS = days_with_margin
+    FETCH_DURATION_SECONDS = int(86400 * days_with_margin)
+    QX_HISTORY_DAYS = d
+    return QX_HISTORY_DAYS
+
+# ═══ 5) سجل الأصول: نفس Asset الأصلي حرفياً (بلا أي حقن) ═══
+def _get_or_create_asset(api):
+    """يجلب أصل العملة من سجل البث أو ينشئه بـ Asset الأصلي نفسه."""
+    sym = str(api or "").strip()
+    if not sym:
+        return None
+    for a in ALL_STREAMING_ASSETS:
+        try:
+            if a.api_symbol == sym:
+                return a
+        except Exception:
+            continue
+    a = Asset(sym)
+    ALL_STREAMING_ASSETS.append(a)
+    return a
+
+def _apply_candles_to_asset(asset, unique):
+    """كتابة الخط الكامل في ذاكرة الأصل (Asset الأصلي) + السعر الحي."""
+    try:
+        asset.candles = list(unique or [])
+        if asset.candles:
+            asset.price = asset.candles[-1]["close"]
+        asset.mark_dirty()
+    except Exception:
+        pass
+
+async def ensure_asset_loaded(api):
+    """عملة فُتح شارتها: البث الحي فوراً (realtime_stream الأصلية) ثم الجلب
+    المباشر الأصلي fetch_candles_with_retry (كل ما يجلب فيه الأصل من تاريخ +
+    جسر + سد فجوات + كتابة HST كما هي حرفياً). تعيد عدد الشموع في الذاكرة."""
+    if CLIENT is None or CLIENT.api is None:
+        return 0
+    asset = _get_or_create_asset(api)
+    if asset is None:
+        return 0
+    try:
+        st = getattr(asset, "stream_task", None)
+        if st is not None and hasattr(st, "done") and not st.done():
+            pass
+        else:
+            asset.streaming = False
+            asset.stream_task = asyncio.ensure_future(realtime_stream(asset))
+    except Exception:
+        try:
+            asset.streaming = False
+            asset.stream_task = asyncio.ensure_future(realtime_stream(asset))
+        except Exception:
+            pass
+    if len(asset.candles) >= MIN_CANDLES_THRESHOLD:
+        return len(asset.candles)
+    try:
+        await fetch_candles_with_retry(asset, max_retries=MAX_FETCH_RETRIES, idx=1, total=1)
+    except Exception as e:
+        logmsg(f"[ensure:{api}] fetch failed: {e}")
+    return len(asset.candles)
+
+# ═══ 6) جسور الجلب — نفس دوال الأصل حرفياً ═══
+def _format_raw_candles(raw):
+    """تنسيق رد الخادم الرسمي: تحليل _parse_raw_candles الأصلي + محاذاة
+    _align_time الأصلية + إزالة تكرار وترتيب — نفس حلقة التنسيق في
+    fetch_candles_once الأصلية."""
+    if not raw:
+        return []
+    parsed = _parse_raw_candles(raw)          # الأصل حرفياً
+    formatted = []
+    for c in parsed:
+        try:
+            aligned = _align_time(int(c["time"]))
+            formatted.append({"time": aligned, "open": c["open"], "high": c["high"],
+                              "low": c["low"], "close": c["close"],
+                              "volume": int(c.get("volume", 0) or 0)})
+        except Exception:
+            continue
+    seen, unique = set(), []
+    for c in formatted:
+        if c["time"] not in seen:
+            seen.add(c["time"])
+            unique.append(c)
+    unique.sort(key=lambda x: x["time"])
+    return unique
+
+async def qx_fetch_window_raw(api, end_ts, seconds, tf_sec, foreground=False, timeout=45.0):
+    """بوابة الجلب الأمامية الواحدة — نداء CLIENT.get_candles الأصلي نفسه
+    (المُجرّب والآمن). foreground يمنع اختلاط طلب العرض الحالي مع التحميل المسبق."""
+    global _QX_WINDOW_BUSY
+    if CLIENT is None or CLIENT.api is None:
+        return []
+    if foreground:
+        for _ in range(int(max(1.0, float(timeout) * 10))):
+            if not _QX_WINDOW_BUSY:
+                break
+            await asyncio.sleep(0.1)
+    _QX_WINDOW_BUSY = True
+    try:
+        res = await asyncio.wait_for(
+            CLIENT.get_candles(api, int(end_ts), int(max(60, seconds)), int(tf_sec)),
+            timeout=float(timeout))
+        return list(res or [])
+    except Exception:
+        return []
+    finally:
+        _QX_WINDOW_BUSY = False
+
+async def fetch_older_batch(api, before_ts, batch=300):
+    """دفعة أقدم للتمرير للخلف — نداء CLIENT.get_candles الأصلي بمرساة before_ts،
+    والدمج في ذاكرة الأصل بلا تقليص (setdefault: القديم الناقص فقط يُضاف)."""
+    if CLIENT is None or CLIENT.api is None:
+        return 0
+    psec = max(1, int(PERIOD_SECONDS))
+    batch = max(50, int(batch or 300))
+    try:
+        res = await asyncio.wait_for(
+            CLIENT.get_candles(api, int(before_ts), batch * psec, psec), timeout=45.0)
+    except Exception:
+        return 0
+    if not res:
+        return 0
+    candles = [c for c in res
+               if isinstance(c, dict) and int(c.get("time", 0) or 0) < int(before_ts)]
+    if not candles:
+        return 0
+    asset = _get_or_create_asset(api)
+    if asset is None:
+        return 0
+    merged_map = {c["time"]: c for c in asset.candles}
+    for c in candles:
+        merged_map.setdefault(c["time"], c)
+    merged = sorted(merged_map.values(), key=lambda x: x["time"])
+    asset.candles = merged[-int(ASSET_MAX_CANDLES):]
+    if asset.candles:
+        asset.price = asset.candles[-1]["close"]
+    asset.mark_dirty()
+    return len(candles)
+
+async def qx_get_historical_batches(asset, amount_of_seconds, period, timeout=30,
+                                    max_workers=5, batch_callback=None):
+    """نفس طريقة الأصل get_historical_candles بكل تفاصيلها (نفس
+    CLIENT._fetch_historical_batch الأصلية، نفس chunk=period×FETCH_CHUNK_SIZE،
+    نفس عدد العمال max_workers، نفس الرجوع للخلف ونفس قاعدة 3 فشل، نفس
+    FETCH_BATCH_DELAY) — الفرق الوحيد: كل دفعة تُسلَّم فور وصولها عبر
+    batch_callback(batch, worker_id) ليرفعها التطبيق إلى الشارت حية."""
+    if CLIENT is None or CLIENT.api is None:
+        return []
+    max_workers = max_workers or 1
+    chunk_seconds = period * FETCH_CHUNK_SIZE
+    all_candles = {}
+    current_time = int(time.time())
+    target_start_time = current_time - amount_of_seconds
+    block_size = max(1, amount_of_seconds // max_workers)
+    semaphore = asyncio.Semaphore(max_workers)
+
+    async def worker(start_t, end_t, worker_id):
+        worker_candles = {}
+        async with semaphore:
+            oldest_t = start_t
+            consecutive_failures_in_worker = 0
+            while oldest_t > end_t:
+                if not CLIENT or not getattr(getattr(CLIENT, "api", None), "state", None) \
+                        or not getattr(CLIENT.api.state, "check_accepted_connection", False):
+                    break
+                index = next(_request_counter)
+                batch_data = await CLIENT._fetch_historical_batch(
+                    asset, oldest_t, chunk_seconds, period, index, timeout)
+                if not batch_data:
+                    oldest_t -= chunk_seconds
+                    consecutive_failures_in_worker += 1
+                    if consecutive_failures_in_worker >= 3:
+                        break
+                    await asyncio.sleep(FETCH_BATCH_DELAY * 2)
+                    continue
+                consecutive_failures_in_worker = 0
+                new_batch = CLIENT._parse_historical_candles(batch_data)
+                if not new_batch:
+                    oldest_t -= chunk_seconds
+                    continue
+                batch_times = []
+                for c in new_batch:
+                    ts = c["time"]
+                    if ts >= end_t and ts <= start_t:
+                        worker_candles[ts] = c
+                        batch_times.append(ts)
+                if not batch_times:
+                    oldest_t -= chunk_seconds
+                    continue
+                batch_times.sort()
+                new_oldest = batch_times[0]
+                if batch_callback:
+                    try:
+                        batch_callback([worker_candles[t] for t in batch_times], worker_id)
+                    except Exception:
+                        pass
+                oldest_t = new_oldest if new_oldest < oldest_t else oldest_t - chunk_seconds
+                await asyncio.sleep(FETCH_BATCH_DELAY)
+        return list(worker_candles.values())
 
     try:
-        # الخيط الرئيسي يبقى حيّاً فقط — كل العمل في حلقات الخلفية
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
+        await CLIENT.start_candles_stream(asset, period)
+    except Exception:
         pass
-    finally:
-        print()
-        print(f"{Colors.RED}Stopped{Colors.RESET}")
-        writer_thread.running = False
+    tasks = []
+    for i in range(max_workers):
+        s = current_time - (i * block_size)
+        e = max(target_start_time, s - block_size)
+        tasks.append(worker(s, e, i))
+    results = await asyncio.gather(*tasks)
+    for batch in results:
+        for c in batch:
+            all_candles[c["time"]] = c
+    return sorted(all_candles.values(), key=lambda x: x["time"])
+
+async def v14_deep_gap_seal(api, reason=""):
+    """السد العميق: مرساة عند أقدم شمعة اصطناعية (volume==0) — نداء الجلب
+    الأصلي CLIENT.get_candles يعيد شموعاً حقيقية تُستبدل بالشرطات المسطحة داخل
+    نافذة محدودة (حتى 200 شمعة) دون لمس الشمعة الحية ولا تقليص الذاكرة."""
+    if CLIENT is None or CLIENT.api is None:
+        return 0
+    asset = _get_or_create_asset(api)
+    if asset is None or len(asset.candles) < 2:
+        return 0
+    psec = max(1, int(PERIOD_SECONDS))
+    cur_start = _align_time(int(time.time()))
+    art = [c for c in asset.candles
+           if int(c.get("volume", 1) or 0) == 0 and c["time"] < cur_start]
+    if not art:
+        return 0
+    oldest = min(c["time"] for c in art)
+    span = max(1, (cur_start - oldest) // psec)
+    window = min(200, span + 10)
+    try:
+        res = await asyncio.wait_for(
+            CLIENT.get_candles(api, cur_start + psec, window * psec, psec),
+            timeout=30.0)
+    except Exception:
+        return 0
+    if not res:
+        return 0
+    real = {}
+    for c in res:
+        if isinstance(c, dict) and int(c.get("time", 0) or 0) > 0:
+            real[int(c["time"])] = c
+    if not real:
+        return 0
+    merged = []
+    for c in asset.candles:
+        if c["time"] >= cur_start:
+            merged.append(c)                      # الشمعة الحية لا تُلمس
+            continue
+        r = real.get(c["time"])
+        if r is not None and int(c.get("volume", 1) or 0) == 0:
+            merged.append(dict(r))
+        else:
+            merged.append(c)
+    have = {c["time"] for c in merged}
+    for t, r in real.items():
+        if t not in have and t < cur_start:
+            merged.append(dict(r))
+    merged.sort(key=lambda x: x["time"])
+    asset.candles = merged[-int(ASSET_MAX_CANDLES):]
+    if asset.candles:
+        asset.price = asset.candles[-1]["close"]
+    asset.mark_dirty()
+    V14_DEEP_REPAIRED[api] = time.time()
+    return len(real)
+
+# ═══ 7) التيكات في الذاكرة (فريمات الثواني S5..S30) — الأصل لم يُمَس ═══
+_TICK_CACHE = {}
+_TICK_QUEUE_MAX = 4096
+_TICK_MAX_AGE = 300.0      # 5 دقائق — ذاكرة فقط
+
+async def tick_cache_collector():
+    """يلتقط كل تيك يصل (realtime_candles الأصلية — يتحدث عند كل تيك) في ذاكرة
+    كل عملة بث حي، بلا أي كتابة على القرص. يبني منه التطبيق فريمات الثواني."""
+    while True:
+        try:
+            if CLIENT is not None and getattr(CLIENT, "api", None) is not None:
+                rc = getattr(CLIENT.api, "realtime_candles", {}) or {}
+                for sym, tick in list(rc.items()):
+                    if not isinstance(tick, (list, tuple)) or len(tick) < 3:
+                        continue
+                    try:
+                        ts, price = int(tick[1]), float(tick[2])
+                    except Exception:
+                        continue
+                    if price <= 0 or ts <= 0:
+                        continue
+                    q = _TICK_CACHE.get(sym)
+                    if q is None:
+                        q = _qx_deque(maxlen=_TICK_QUEUE_MAX)
+                        _TICK_CACHE[sym] = q
+                    if q and q[-1][0] == ts and q[-1][1] == price:
+                        continue
+                    q.append((ts, price))
+        except Exception:
+            pass
+        await asyncio.sleep(0.05)
+
+async def tick_retention_loop():
+    """حذف التيكات الأقدم من 5 دقائق (ذاكرة فقط)."""
+    while True:
+        try:
+            now = time.time()
+            for sym, q in list(_TICK_CACHE.items()):
+                while q and (now - q[0][0]) > _TICK_MAX_AGE:
+                    q.popleft()
+                if not q:
+                    _TICK_CACHE.pop(sym, None)
+        except Exception:
+            pass
+        await asyncio.sleep(30.0)
+
+async def candlestore_trim_loop():
+    """تشذيب candles.db بهدوء: الاحتفاظ بأحدث 5000 شمعة لكل رمز معروف
+    + نقطة تحقق WAL كل ساعات — حماية القرص دون أي مساس بالجلب."""
+    while True:
+        try:
+            store = MT4_WRITER.candle_store
+            conn = store._get_write_conn()
+            try:
+                syms = set()
+                try:
+                    syms.update(str(k) for k in MT4_WRITER._gap_filled.keys())
+                except Exception:
+                    pass
+                for a in list(ALL_STREAMING_ASSETS):
+                    try:
+                        syms.add(str(a.symbol))
+                    except Exception:
+                        pass
+                for sym in syms:
+                    try:
+                        conn.execute(
+                            "DELETE FROM candles WHERE symbol=? AND time <= "
+                            "(SELECT time FROM candles WHERE symbol=? "
+                            "ORDER BY time DESC LIMIT 1 OFFSET 5000)",
+                            (sym, sym))
+                    except Exception:
+                        pass
+                conn.commit()
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        await asyncio.sleep(6 * 3600.0)
+
+# ═══ 8) علامات تجمّد السد — نفس مخازن الأصل حرفياً ═══
+def clear_gap_flag_any(variants):
+    """رفع علامة التجمّد عن رمز بأي صيغة تخزين ممكنة (الذاكرة + candles.db)."""
+    syms = [str(v or "").strip() for v in (variants or []) if str(v or "").strip()]
+    for sym in syms:
+        try:
+            MT4_WRITER._gap_filled[sym] = False
+        except Exception:
+            pass
+        try:
+            MT4_WRITER._gap_filled_at.pop(sym, None)
+        except Exception:
+            pass
+        try:
+            MT4_WRITER.candle_store.set_gap_filled(sym, False)
+        except Exception:
+            pass
+
+def reset_gap_flags():
+    """تصفير علامات التجمّد في الذاكرة (نفس مخازن MT4_WRITER الأصلية)."""
+    try:
+        for sym in list(MT4_WRITER._gap_filled.keys()):
+            MT4_WRITER._gap_filled[sym] = False
+    except Exception:
+        pass
+    try:
+        MT4_WRITER._gap_filled_at.clear()
+    except Exception:
+        pass
+
+# ═══ 9) التحميل المسبق المتسلسل — «ضع كل العملات واحدة تلو الأخرى» ═══
+async def preload_all_assets():
+    """التحميل المسبق المتسلسل لكل العملات المفتوحة **واحدة تلو الأخرى** —
+    نفس تدفق الكتلة الرئيسية للأصل حرفياً لكل عملة:
+      realtime_stream أولاً (يجمع التيك أثناء الجلب) ← fetch_candles_with_retry
+      الأصلية (تاريخ FETCH_DURATION_SECONDS + الجسر + سد الفجوات + HST) ←
+      فاصل بين عملة وأخرى.
+    فاتحة الشارت أولاً (BRLUSD_otc) ثم بقية العملات المفتوحة من instruments
+    بالترتيب. كل عملة تُسجَّل في _PRELOADED_INFO لحالة التحميل في الواجهة."""
+    if CLIENT is None or CLIENT.api is None:
+        return 0
+    # اطلب قائمة instruments مرة واحدة (الطريقة الرسمية) وانتظر وصولها باختصار
+    try:
+        await fetch_instruments_now(timeout=12.0)
+    except Exception:
+        pass
+    try:
+        await wait_until(lambda: bool(_instruments_snapshot()),
+                         timeout=15.0, poll_interval=0.5)
+    except asyncio.TimeoutError:
+        pass
+    symbols, seen = [], set()
+    opener = PRELOAD_FIRST_SYMBOL
+    if opener:
+        symbols.append(opener)
+        seen.add(opener)
+    entries = _instruments_snapshot()
+    for e in entries:
+        sym = str((e or {}).get("asset") or "").strip()
+        if not sym or sym in seen:
+            continue
+        if e.get("open") is False:
+            continue        # المغلقة الآن لا بث حي لها — تُحمّل عند فتح شارتها
+        symbols.append(sym)
+        seen.add(sym)
+    if len(symbols) <= 1:
+        # fallback: قائمة الأصل الافتراضية ASSET_LIST كما هي
+        for sym in list(ASSET_LIST):
+            if sym not in seen:
+                symbols.append(sym)
+                seen.add(sym)
+    total = len(symbols)
+    logmsg(f"[preload] sequential preload: {total} assets, ONE after another "
+           f"(history window {FETCH_DURATION_SECONDS}s each)")
+    loaded = 0
+    streak = 0
+    for idx, sym in enumerate(symbols, 1):
+        if not CONNECTION_ALIVE or CLIENT is None or CLIENT.api is None:
+            logmsg(f"[preload] connection lost at {idx}/{total}; waiting reconnect…")
+            try:
+                await wait_until(
+                    lambda: CONNECTION_ALIVE and CLIENT is not None and CLIENT.api is not None,
+                    timeout=30.0, poll_interval=0.5)
+            except asyncio.TimeoutError:
+                streak += 1
+                if streak >= MAX_RECONNECTS_DURING_FETCH:
+                    logmsg("[preload] giving up after repeated disconnects")
+                    break
+                continue
+        streak = 0
+        asset = _get_or_create_asset(sym)
+        if asset is None:
+            continue
+        try:
+            st = getattr(asset, "stream_task", None)
+            if st is None or (hasattr(st, "done") and st.done()):
+                asset.streaming = False
+                asset.stream_task = asyncio.ensure_future(realtime_stream(asset))
+        except Exception:
+            pass
+        if len(asset.candles) < MIN_CANDLES_THRESHOLD:
+            try:
+                n, _att = await fetch_candles_with_retry(
+                    asset, max_retries=MAX_FETCH_RETRIES, idx=idx, total=total)
+                if n >= MIN_CANDLES_THRESHOLD:
+                    loaded += 1
+            except Exception as e:
+                logmsg(f"[preload] {sym}: {str(e)[:80]}")
+        else:
+            loaded += 1
+        _PRELOADED_INFO[sym] = {"candles": len(asset.candles), "at": time.time()}
+        if idx % 10 == 0:
+            logmsg(f"[preload] progress: {idx}/{total} assets ({loaded} loaded)")
+        # فاصل بين عملة وأخرى — نفس الأصل: واحدة تلو الأخرى بلا تسرّع
+        await asyncio.sleep(1.0 if PERIOD_SECONDS < 60 else FETCH_ASSET_DELAY)
+    logmsg(f"[preload] done: {loaded}/{total} assets loaded sequentially")
+    return loaded
+
+def v14_print_banner():
+    try:
+        print("[QX] engine = الخادم الأصلي مدمجاً حرفياً + طبقة ربط التطبيق "
+              "(منطق الخادم لم يُغيَّر)")
+    except Exception:
+        pass
+
+def v14_build_background_loops():
+    """كل حلقات الأصل الخلفية تعمل أصلاً (health_monitor/auto_reconnect/
+    keepalive_loop/stale_message_watchdog/asset_payout_monitor/preload/
+    mt4_gap_filler/tick_cache_collector/...) — لا حلقات إضافية هنا."""
+    return []
+
+def v14_supervise(name, factory):
+    """مشرف مباشر: يُمرّر كوروتين الحلقة كما هو (احتياط — لا يُستدعى حالياً)."""
+    async def _sup():
+        try:
+            coro = factory()
+            if coro is not None:
+                await coro
+        except Exception as e:
+            try:
+                logmsg(f"[supervise:{name}] {e}")
+            except Exception:
+                pass
+    return _sup()
+
 '''
 
 
@@ -15953,9 +12105,9 @@ class Backend(QObject):
         # v14.3 (طلب المستخدم): عدد أيام شموع التاريخ المجلوبة عند فتح العملة —
         # الافتراضي يومان، يقبل 0.5 حتى 30 يوم. يُضبط من بطاقة الإعدادات وحفظ.
         try:
-            _hd = float(str(cfg.get("hist_days", 2.0)).replace(",", "."))
+            _hd = float(str(cfg.get("hist_days", 0.80)).replace(",", "."))
         except Exception:
-            _hd = 2.0
+            _hd = 0.80
         self._hist_days = max(0.5, min(30.0, _hd))
         # v14.7 (طلب المستخدم حرفياً): «اريد ان تجلب 700 شمعة بدل 300 شمعة
         # كدفعة مباشرة للعملة ويمكن تعديلها في الاعدادات الى 1000 شمعة في
@@ -16062,7 +12214,9 @@ class Backend(QObject):
         # تسحب الأسعار الحية من محرك الخادم (يعمل داخل التطبيق) وتدفعها للشارت،
         # وتراقب لوحة العملات (الدفع + مفتوح/مغلق) وحالة التحميل المسبق.
         self._qxT = QTimer(self)
-        self._qxT.setInterval(400)
+        # v15 (طلب المستخدم حرفياً): التحديث ليس كل 400/500 ميلي ثانية بل كل
+        # تيك يصل — المؤقّت فاتح فقط (40ms) و_qx_poll تخرج فوراً بلا تيك جديد
+        self._qxT.setInterval(40)
         self._qxT.timeout.connect(self._qx_poll)
         self._qxT.start()
 
@@ -16984,7 +13138,7 @@ class Backend(QObject):
 
     # ---------- v14.3: دفعات التاريخ عند فتح العملة (دفعة مباشرة) ----------
     def _hist_days_cfg(self):
-        """عدد أيام شموع التاريخ المضبوط من الإعدادات (0.5 حتى 30، الافتراضي 2).
+        """عدد أيام شموع التاريخ المضبوط من الإعدادات (0.5 حتى 30، الافتراضي 0.80 — طلب المستخدم).
 
         v14.8 (سبب موت سلسلة جلب التاريخ من أساسها): كانت الدالة تحمل الاسم
         نفسه `_hist_days` الذي يحمله متغير الإعدادات، فكان المتغير يحجب
@@ -17071,6 +13225,7 @@ class Backend(QObject):
         if qx:
             try:
                 qx.QX_HISTORY_DAYS = d
+                qx.apply_history_days(d)   # آلية قائمة الأصل نفسها (هامش +15% + INITIAL_CANDLES + FETCH_DURATION)
             except Exception:
                 pass
         self._log("ok", T[self._lang].get("histSaved", "History days saved"))
@@ -17348,6 +13503,7 @@ class Backend(QObject):
                     return False
             try:
                 qx.QX_HISTORY_DAYS = days
+                qx.apply_history_days(days)   # آلية قائمة الأصل نفسها
             except Exception:
                 pass
             if _stale():
@@ -17384,7 +13540,7 @@ class Backend(QObject):
                     pass
 
             fut = asyncio.run_coroutine_threadsafe(
-                qx.CLIENT.get_historical_candles(
+                qx.qx_get_historical_batches(
                     api, amount_of_seconds=target, period=tf_sec,
                     max_workers=5, batch_callback=_on_batch),
                 qx.ASYNC_LOOP)
@@ -17441,7 +13597,9 @@ class Backend(QObject):
                     try:
                         eng = self._qx_engine_candles(api)
                         if eng:
-                            self._candles = eng[-self._QX_FEED_CAP:]
+                            # v15: استيعاب بلا تقليص — نافذة البث الأصلية (INITIAL_CANDLES)
+                            # لا تُقصّ شموع دفعات التاريخ من الشارت أبداً
+                            self._qx_absorb_engine_no_shrink(eng)
                             self._qx_last_sig = None   # المضخة تدفع الغذاء المُصلَح فوراً
                     except Exception:
                         pass
@@ -17771,6 +13929,31 @@ class Backend(QObject):
         qx = _qx_module()
         if qx is None or getattr(qx, "CLIENT", None) is None:
             return
+        # ═══ v15 (طلب المستخدم حرفياً): التحديث عند وصول كل تيك ═══
+        # realtime_stream الأصلية تحدّث last_update_time عند كل تيك يصل —
+        # لا تيك جديد → خروج فوري بلا أي عمل. اللوحة والحالة كل ثانيتين.
+        try:
+            _api_now = self._qx_symbols.get(self._asset) or self._api_from_display(self._asset)
+        except Exception:
+            _api_now = None
+        _stamp = None
+        try:
+            _a = qx._get_or_create_asset(_api_now) if _api_now else None
+            if _a is not None:
+                _stamp = (float(getattr(_a, "last_update_time", 0) or 0),
+                          float(getattr(_a, "price", 0) or 0),
+                          len(getattr(_a, "candles", []) or []))
+        except Exception:
+            _stamp = None
+        _now = time.time()
+        _tick_new = (_stamp is not None and _stamp != getattr(self, "_qx_tick_stamp", None))
+        if _tick_new:
+            self._qx_tick_stamp = _stamp
+        _board_due = (_now - getattr(self, "_qx_board_at", 0.0)) >= 2.0
+        if not _tick_new and not _board_due and not getattr(self, "_qx_resync_pending", False):
+            return
+        if _board_due:
+            self._qx_board_at = _now
         # 1) لوحة العملات الحقيقية (الاسم + الدفع + مفتوح/مغلق) — تُدفع عند أي تغيير
         try:
             entries = qx._instruments_snapshot()
@@ -17845,7 +14028,7 @@ class Backend(QObject):
                     _ds_t = int((getattr(qx, "V14_DEEP_REPAIRED", {}) or {}).get(api, 0) or 0)
                     if _ds_t > int(getattr(self, "_qx_deep_seen", 0) or 0):
                         self._qx_deep_seen = _ds_t
-                        self._candles = candles[-self._QX_FEED_CAP:]
+                        self._qx_absorb_engine_no_shrink(candles)
                         self._qx_last_sig = None
                         self._qx_resync_pending = True
                 except Exception:
@@ -18017,6 +14200,7 @@ class Backend(QObject):
                 pass
             try:
                 qx.QX_HISTORY_DAYS = self._hist_days_cfg()
+                qx.apply_history_days(self._hist_days_cfg())   # آلية قائمة الأصل نفسها
             except Exception:
                 pass
             # v14.7 (طلب المستخدم حرفياً): الدفعة المباشرة للعملة بحجم
@@ -18090,9 +14274,7 @@ class Backend(QObject):
                 # مزامنة غذاء بايثون فوراً حتى لا يعيد المضخة إرسال إعادة ضبط للشارت
                 if tf == self._tf and asset == self._asset and batch:
                     if tf_sec == 60:
-                        self._candles = self._qx_engine_candles(api)
-                        if len(self._candles) > self._QX_FEED_CAP:
-                            self._candles = self._candles[-self._QX_FEED_TRIM:]
+                        self._qx_absorb_engine_no_shrink(self._qx_engine_candles(api))
                     else:
                         self._candles = batch + self._candles
                         if len(self._candles) > self._QX_FEED_CAP:
