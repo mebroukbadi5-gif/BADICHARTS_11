@@ -1,91 +1,111 @@
 # BadiCharts Studio — Desktop (Python)
 
-تطبيق ديسكتوب لبرمجة المؤشرات وأدوات الرسم وإرسال إشارات تلجرام.
-الشارت والمحرر هما تطبيق الويب HTML نفسه (شارت **BADI-CHARTS-V2 v2.13.0** + محرر **Monaco**)
-يعملان داخل نافذة التطبيق عبر QtWebEngine — وليسا معاد بنائهما ببايثون.
+A desktop application for programming indicators and drawing tools and sending Telegram
+signals. The chart and the editor are the same HTML web app (**BADI-CHARTS-V2 v2.16.0**
+chart + the **Monaco** editor) running inside the app window through QtWebEngine —
+not rebuilt in Python.
 
-## التشغيل
+## Run
 ```bash
 pip install PySide6 cryptography quickjs
 python BadiChartsStudio.py
 ```
 
-## الملفان
-`BadiChartsStudio.py` هو التطبيق الكامل (صفحة الاستوديو + تطبيق سطح المكتب مقروءة، ومكتبة
-الشارت مدموجة b64). `BadiChartsStudio_readable.py` **وُلّد منه حرفيًا** بتعديل واحد فقط:
-مكتبة الرسم تظهر فيه بنصها المقروء بدل كتلة b64 — والفحص الآلي يثبت أن النسختين تنتجان
-نفس الصفحة ونفس المحرك بايت ببايت. كل شيء في ملف واحد: الواجهة، المحرك، التشفير BADI،
-ومزامنة مجلد المؤشرات.
+## The two files
+`BadiChartsStudio.py` is the complete app (studio page + desktop app, all readable).
+`BadiChartsStudio_readable.py` is **generated literally from it** with one difference only:
+an explanatory banner after the coding line — automated checks prove both copies produce
+the byte-identical page and engine. The chart library itself is not embedded in either
+file: the page loads it **directly from the official CDN link** (owner request):
+`https://cdn.jsdelivr.net/gh/salahbadi19/BADI-CHARTS-V2@v2.16.0/chart.js`.
+Everything lives in one file: the UI, the engine, BADI encryption, and the indicator
+folder sync.
 
-## الميزات
-- **مجلد BadiCharts على القرص**: كل مؤشر أو أداة ينشئها المستخدم يُحفظ كملف حقيقي في
-  `BadiCharts/Indicators` (المؤشرات .js و.py) أو `BadiCharts/Tools` (الأدوات .js) —
-  ويُحمَّل من هناك عند إقلاع التطبيق وعند فتح المحرر. يمكن للمستخدم أن يضع ملفاته مباشرة
-  في هذين المجلدين وسيتعرف عليها التطبيق ويستوردها تلقائياً (القرص هو المرجع).
-- **تشفير BADI (BADI Secure Indicator Format) على طريقة ميتاتريدر**: زر التشفير في المحرر
-  يكتب ملف **.badi بجوار ملف المؤشر الأصلي** في نفس المجلد (مثل .mq5/.ex5)، ويظهر الملف المشفر
-  في قائمة المحرر **بجوار اسم المؤشر الحقيقي** بأيقونة القفل. المفتاح 256-بت **مدموج داخل
-  التطبيق** (`BADI_MASTER_KEY_HEX`) — ثابت للجميع ليشتغل المؤشر عند كل شخص، ولا يُكتب أبدًا
-  في أي ملف، ولا يُنسخ ولا يُعرض (لا توجد أي وصلة تُخرجه من التطبيق). فك تشفير ملف تالف
-  أو معدَّل يُرفض برسالة واضحة (AES-256-GCM + AAD).
-- **المؤشر المشفر يعمل داخليًا فقط**: كودــه لا يُفتح في المحرر ولا يُحفظ في أي مكان ولا
-  يظهر للمستخدم إطلاقًا، وبطاقته على الشارت بلا زر تعديل — وإشاراته تعمل كأي مؤشر آخر.
-  قبل تشغيل أي مؤشر مشفر يفحصه التطبيق مرتين: **ماسح أنماط ممنوعة** (الشبكة، التخزين،
-  ملفات التطبيق وأجزاءه الداخلية — أي محاولة مرور عليها ترفض الملف كله) ثم **تشغيل تجريبي
-  داخل QuickJS معزولة** بلا ملفات ولا شبكة — مناسب للمؤشرات المدفوعة.
-- **زر الإعدادات (بجانب زر اللغة)**: إدارة عملات الشريط + **مظهر الشارت** — تغيير خلفية
-  الشارت وألوان الشموع الصاعدة/الهابطة والشبكة ونص المحاور ومؤشر التقاطع وأدوات الرسم
-  **بأي لون بحرية** (hex مثل #22E08A أو rgba — لا قوائم محدودة)، يُطبَّق فوراً ويُحفظ،
-  مع زر استعادة الافتراضي + قسم BADI (بصمة المفتاح + مسار مجلد BadiCharts) —
-  والنقر على مربّع اللون يفتح **نافذة اختيار لون حرة** (ColorDialog مع قناة الشفافية).
-- **الشعار في مكان واحد فقط**: شعار BadiCharts الكامل في شريط التطبيق العلوي (النقر عليه
-  يعيدك لصفحة الشارت) + سطر BADI STUDIO v2.13.0 تحته + أيقونة التطبيق في شريط العنوان
-  وشريط المهام.
-- **شاشة الافتتاح = حركة ظهور الشعار نفسها**: رسم الأيقونة خطاً خطاً ← نبضة ← صعود الحروف
-  ← اللمعة ← سطر CHARTING ENGINE — على خلفية سوداء (نقرة تُخفيها).
-- **زر الانضمام للقناة**: @badicharts (t.me/badicharts) + زر **Bot Telegram** بنصه لفتح
-  صفحة البوت مع زر «عودة إلى الشارت».
-- **شريط العملات**: شرائح العملات (العلمان المدموجان + الاسم + الدفع — **بلا أيقونة حذف**،
-  الإضافة والحذف من قائمة +) — **زر (+) بجانب السهمين وبحجم زر فتح بطاقة الإشارات** بقائمة
-  فيها خانة بحث — سهمان (‹ ›) — **شريط تمرير مصغّر لون تكيفي مع الثيم** بعرض الشريط
-  كاملاً — لا تُحذف كل العملات (تبقى واحدة على الأقل).
-- **لوحة الإشارات يسار الشارت (قابلة للإخفاء والإظهار من الجرس، ولا تُفتح تلقائيًا) بتبويبين**:
-  **الإشارات** (الجارية الآن قبل انتهاء المدة) و**السجل** (المنتهية بنتيجتها) — عدّاد لكل
-  تبويب، وبطاقات سوداء دائماً + **شريط اتجاه على الحافة** + شارة BUY/SELL (أخضر #22E08A /
-  أحمر #FF4D5E) + علم العملة + المدة والمؤشر وسعر الدخول + نتيجة WIN/LOSS — النقر يفتح
-  شارت عملتها — أصوات الإشارة والنتيجة (WebAudio) + زر كتم.
-- **شريط معلومات بسيط تحت الشارت**: الحالة (مباشر) + **المنطقة الزمنية (UTC±…)** +
-  الساعة + FPS + **معرّف المستخدم الثابت BADI-XXXX-XXXX-XXXX (انقر لنسخه)** — بدون اسم العملة.
-- **الشموع الحية متحركة دائمًا**: البث الحي يعمل مباشرة عند الإقلاع — لا زر تشغيل/إيقاف،
-  وزر الوضع الليلي/النهاري في الترويسة العليا للتطبيق فقط (لا زر مكرر في شريط الويب).
-- **API السوق للمؤشرات**: المؤشر المبرمَج من المستخدم يقرأ معلومات أي زوج
-  (`Indicators.market.info(name)` → {name, payout, open, otc}) — نسبة الدفع وحالة السوق
-  مفتوح/مغلق (OTC والرقمية دائمًا مفتوحة والفوركس الأحد 22:00 → الجمعة 22:00 UTC)،
-  و`assets()` لكل العملات و`added()` لعملات الشريط و`current()` لعملة الشارت.
-- **إرسال الإشارات على نطاق عملات يحدده المبرمج**: إعداد `scope` في المؤشر:
-  `added` (العملات المضافة للشريط فقط) أو `high` (الأعلى نسبة دفع ≥ minPayout — لا يشترط
-  أن تكون مضافة) أو `all` (كل العملات إذا أراد المستخدم) — والبدونه يعمل على عملة الشارت.
-- **معرف محادثة تلجرام من المؤشر نفسه**: `signal()` يرجع {dir, price, chats} — الإشارة
-  ونتيجتها تُرسلان لتلك المحادثة مباشرة — صفحة البوت فيها توكن البوت فقط (لا حقل شات ايدي
-  ولا قالب رسالة يكتبه المستخدم).
-- **صورة مصغرة واضحة لكل مؤشر**: تُلتقط مرة واحدة عند أول تشغيل **بعد أن يرسم المؤشر نفسه
-  فعلاً على الشارت** (مراقبة أول render ناجح) بدقة عالية 1440px — تُعرض في بطاقة المؤشر
-  ويمكن تكبيرها بالنقر عليها.
-- **شارت واحد نظيف**: لا تقسيم ولا إطار أزرق حول الشارت — كل لوحة مستقلة تماماً
-  (العملة + الفريم + الدفع) والمحرر يشغّل المؤشرات عليها.
-- **لون الشارت يتبع التطبيق حياً**: خلفية الشارت والشموع والشبكة والمحاور وثيم Monaco
-  تتبع ثيم التطبيق (داكن/فاتح) عبر setTheme — وتخصيصات المستخدم تُطبَّق فوقها دائماً.
-- **المحرر**: Monaco مع بديل نصي — معالج إنشاء ملفات من 3 خطوات (مؤشر JS / أداة / مؤشر
-  Python) — مكتبة مؤشرات جاهزة — حفظ تلقائي إلى مجلد BadiCharts — مؤشرات Python تعمل في
-  محرك التطبيق وتُرسم على الشارت.
-- **إشارات تلجرام** بنفس ستايل بطاقة الإشارة + رسالة نتيجة WIN/LOSS + لقطة شارت — صفحة
-  البوت فيها الإعدادات وسجل الإشارات بفلاتر Sent/Failed.
-- **خفيف وسريع**: Monaco لا يُحمَّل إلا عند أول فتح، دفع آخر شمعة فقط كل ثانية، معدل رسم
-  ذكي (33ms تفاعلاً / 150ms سكوناً).
+## Features
+- **BadiCharts folder on disk**: every indicator or tool the user creates is saved as a
+  real file in `BadiCharts/Indicators` (indicators .js/.py) or `BadiCharts/Tools`
+  (tools .js), loaded at app boot and when the editor opens. The user can drop files
+  directly into these folders and the app recognizes and imports them automatically
+  (the disk is the reference).
+- **BADI encryption (BADI Secure Indicator Format) the MetaTrader way**: the encrypt
+  button in the editor writes a **.badi file next to the original indicator file** in the
+  same folder (like .mq5/.ex5), and the encrypted file appears in the editor list **next
+  to the real indicator name** with a lock icon. The 256-bit key is **fused inside the
+  app** (`BADI_MASTER_KEY_HEX`) — fixed for everyone so the indicator runs everywhere,
+  never written to any file, never copied and never shown (no path exports it from the
+  app). Decrypting a corrupt or modified file is refused with a clear message
+  (AES-256-GCM + AAD).
+- **The encrypted indicator runs internally only**: its code never opens in the editor,
+  is never saved anywhere and is never shown to the user, and its card on the chart has
+  no edit button — its signals work like any other indicator. Before running any
+  encrypted indicator the app checks it twice: a **forbidden-pattern scanner** (network,
+  storage, app files and internal parts — any attempt to touch them rejects the whole
+  file) and then a **trial run inside an isolated QuickJS** sandbox with no files and no
+  network — suitable for paid indicators.
+- **Settings button (next to the language button)**: manage the strip currencies +
+  **chart appearance** — change the chart background and the bullish/bearish candle,
+  grid, axis text, crosshair and drawing-tool colors **with any color freely** (hex like
+  #22E08A or rgba — no fixed lists), applied instantly and saved, with a reset-to-default
+  button + a BADI section (key fingerprint + BadiCharts folder path) — clicking a color
+  swatch opens a **free color picker dialog** (ColorDialog with the alpha channel).
+- **The logo in one place only**: the full BadiCharts logo in the app top bar (clicking
+  it returns to the chart page) + a BADI STUDIO v2.16.0 line under it + the app icon in
+  the title bar and taskbar.
+- **Splash screen = the same logo reveal animation**: the icon drawn stroke by stroke →
+  pulse → letters rising → the shine → the CHARTING ENGINE line — on a black background
+  (a click skips it).
+- **Join-channel button**: @badicharts (t.me/badicharts) + a **Bot Telegram** button
+  (kept as text) opening the bot page with a "back to chart" button.
+- **Currency strip**: currency chips (merged flags + name + payout — **no delete icon**,
+  adding and removing from the + list) — **a (+) button beside the two arrows, sized like
+  the signals-card button**, with a searchable list — two arrows (‹ ›) — **a
+  theme-adaptive mini scrollbar** spanning the full strip width — not every currency can
+  be removed (at least one always stays). Clicking a currency in the list adds it to the
+  strip AND opens its chart.
+- **Signals panel left of the chart (hide/show from the bell, never auto-opened) with two
+  tabs**: **Signals** (running now, before the duration ends) and **History** (finished
+  with their result) — a counter per tab, always-black cards + a **direction strip on the
+  edge** + a BUY/SELL badge (green #22E08A / red #FF4D5E) + the currency flag + duration,
+  indicator and entry price + the WIN/LOSS result — clicking a card opens its currency
+  chart — signal and result sounds (WebAudio) + a mute button.
+- **Simple info bar under the chart**: status (live) + **timezone (UTC±…)** + clock +
+  FPS + **the fixed user ID BADI-XXXX-XXXX-XXXX (click to copy)** — no currency name.
+- **Live candles always animating**: the live feed starts directly at boot — no
+  play/pause button, and the dark/light toggle lives only in the app top bar (no
+  duplicated button on the web bar).
+- **Market API for indicators**: a user-programmed indicator can read any pair info
+  (`Indicators.market.info(name)` → {name, payout, open, otc}) — the payout and the
+  market open/closed state (OTC and crypto always open, forex Sunday 22:00 → Friday
+  22:00 UTC), plus `assets()` for every currency, `added()` for strip currencies and
+  `current()` for the chart currency.
+- **Signals scoped to currencies chosen by the developer**: the `scope` setting in the
+  indicator: `added` (strip currencies only) or `high` (highest payout ≥ minPayout — they
+  do not have to be added) or `all` (every currency) — without it the indicator runs on
+  the chart currency.
+- **The Telegram chat ID comes from the indicator itself**: `signal()` returns
+  {dir, price, chats} — the signal and its result are sent straight to that chat — the
+  bot page holds the bot token only (no chat-ID field and no user-written message
+  template).
+- **A clean thumbnail per indicator**: captured once on first run **after the indicator
+  really draws itself on the chart** (watching the first successful render) at high
+  1440px resolution — shown on the indicator card and enlarged on click.
+- **One clean chart**: no splitting and no blue frame around the chart — every panel is
+  fully independent (currency + timeframe + payout) and the editor runs indicators on it.
+- **The chart color follows the app live**: chart background, candles, grid, axes and the
+  Monaco theme follow the app theme (dark/light) via setTheme — user customizations
+  always apply on top.
+- **Editor**: Monaco with a text fallback — a 3-step new-file wizard (JS indicator /
+  tool / Python indicator) — a ready-made indicator library — autosave into the
+  BadiCharts folder — Python indicators run in the app engine and draw on the chart.
+- **Telegram signals** styled like the signal card + a WIN/LOSS result message + a chart
+  screenshot — the bot page holds the settings and the signals log with Sent/Failed
+  filters.
+- **Light and fast**: Monaco loads only on first editor open, the last candle is pushed
+  every second, smart render rate (33ms interactive / 150ms idle).
 
-## لقطات الشاشة (وضع BADI_SHOTS)
-`splash` شاشة الشعار · `window-dark` الشريط العلوي: الشعار + اللغة + الإعدادات + القناة ·
-`settings-pop` العملات + مظهر الشارت (ألوان حرة + منتقي ألوان) + BADI + مجلد المؤشرات ·
-`studio-dark` / `studio-light` الاستوديو (الشارت + لوحة الإشارات بتبويبيها يسار + شريط المعلومات) ·
-`panels-hidden` اللوحة مخفية · `login` شاشة الدخول · `indicators` / `signals` صفحتا
-المؤشرات وتلجرام.
+## Screenshots (BADI_SHOTS mode)
+`splash` logo screen · `window-dark` top bar: logo + language + settings + channel ·
+`settings-pop` currencies + chart appearance (free colors + picker) + BADI + indicators
+folder · `studio-dark` / `studio-light` the studio (chart + the two-tab signals panel on
+the left + info bar) · `panels-hidden` panel hidden · `login` login screen ·
+`indicators` / `signals` the indicators and Telegram pages.
