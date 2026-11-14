@@ -1,0 +1,721 @@
+if __name__ == "__main__":
+    # ════════════════════════════════════════════════════════════════════
+    # STAGE 1: STARTUP — شعار QXMT4 + التحقق من الترخيص
+    # ════════════════════════════════════════════════════════════════════
+    # Top-level safety net: any UnicodeError that escapes qx_run_startup
+    # (or any later stage) gets logged once and we exit cleanly instead
+    # of leaving an unhandled-exception traceback that sys.excepthook
+    # would also turn into a process exit.
+    try:
+        license_result = qx_run_startup()
+    except UnicodeError as _ue:
+        try:
+            ts = datetime.now().strftime("%H:%M:%S")
+            safe = str(_ue).encode('utf-8', errors='ignore').decode('utf-8', errors='ignore')
+            print(f"  \033[{ts}] Top-level UnicodeError caught: {safe}\033")
+            print(f"  \033Continuing as if no saved license. Please enter a license key manually.\033")
+            _log_to_file(f"[{ts}] Top-level UnicodeError caught in __main__: {safe}")
+        except Exception:
+            pass
+        license_result = None
+    if license_result is None:
+        # المستخدم خرج قبل إدخال ترخيص صالح
+        sys.exit(0)
+    # نقطة التكامل: الترخيص مُفعّل، نُكمل إلى قوائم الفريمات/التاريخ/الدومين
+    # ════════════════════════════════════════════════════════════════════
+
+    # ════════════════════════════════════════════════════════════════════
+    # STAGE 2: Select Timeframe — 3 أعمدة × 5 صفوف (بدون خطوط زرقاء كثيرة)
+    # ════════════════════════════════════════════════════════════════════
+    # ترتيب الفريمات حسب الطلب:
+    # العمود الأول (1-5): M1, M2, M3, M5, M10
+    # العمود الثاني (6-10): M15, M30, H1, H4, D1
+    # العمود الثالث (11-14): S5, S10, S15, S30
+    _TF_DISPLAY_ORDER = [
+        # (idx, mt4_period, seconds, short_label, full_label)
+        (1,  1,    60,    "M1",  "1 minute"),
+        (2,  2,    120,   "M2",  "2 minutes"),
+        (3,  3,    180,   "M3",  "3 minutes"),
+        (4,  5,    300,   "M5",  "5 minutes"),
+        (5,  10,   600,   "M10", "10 minutes"),
+        (6,  15,   900,   "M15", "15 minutes"),
+        (7,  30,   1800,  "M30", "30 minutes"),
+        (8,  60,   3600,  "H1",  "1 hour"),
+        (9,  240,  14400, "H4",  "4 hours"),
+        (10, 1440, 86400, "D1",  "1 day"),
+        (11, 1,    5,     "S5",  "5 seconds"),
+        (12, 1,    10,    "S10", "10 seconds"),
+        (13, 1,    15,    "S15", "15 seconds"),
+        (14, 1,    30,    "S30", "30 seconds"),
+    ]
+    # خريطة (idx → is_subsecond)
+    _TF_SUBSEC = {11: True, 12: True, 13: True, 14: True}
+
+    print()
+    print(f"{Colors.BOLD}  Select Timeframe{Colors.RESET}")
+    print(f"  {Colors.DIM}{'═' * 55}{Colors.RESET}")
+    # عرض القائمة في 3 أعمدة × 5 صفوف
+    # صف 0: idx 1,6,11 | صف 1: 2,7,12 | صف 2: 3,8,13 | صف 3: 4,9,14 | صف 4: 5,10,—
+    _ROWS = [
+        (1, 6, 11),   # M1   M15   S5
+        (2, 7, 12),   # M2   M30   S10
+        (3, 8, 13),   # M3   H1    S15
+        (4, 9, 14),   # M5   H4    S30
+        (5, 10, None),# M10  D1    —
+    ]
+    _tf_lookup = {row[0]: row for row in _TF_DISPLAY_ORDER}
+    # ثوابت المحاذاة: كل عمود 17 حرف ظاهر، فجوة 2 حرف بين الأعمدة
+    # → كل صف = 2 (indent) + 17*3 + 2*2 = 57 حرف (مطابق لخط ═ 55 + 2 indent)
+    # الصيغة: "XX - XXXXX - XXX" = 2 + 3 + 5 + 3 + 4 = 17 حرف ظاهر لكل خلية
+    _TF_COL_WIDTH = 17
+    _TF_GAP = "  "  # فجوة صغيرة بين الأعمدة (قرّب الأعمدة من بعضها)
+    for row in _ROWS:
+        cells = []
+        for idx in row:
+            if idx is None:
+                # ملء بمسافات بنفس عرض العمود (يحافظ على تساوي طول الصف)
+                cells.append(" " * _TF_COL_WIDTH)
+                continue
+            entry = _tf_lookup[idx]
+            sec = entry[2]      # seconds (int)
+            label = entry[3]    # short_label (M1, S30, ...)
+            # التنسيق: idx(يمين 2) + " - " + sec(يسار 5) + " - " + label(يسار 4) = 17 حرف
+            # Cyan = لون الشعار (بدل Yellow)
+            cells.append(f"{Colors.CYAN}{idx:>2}{Colors.RESET} - {sec:<5} - {label:<4}")
+        print(f"  {cells[0]}{_TF_GAP}{cells[1]}{_TF_GAP}{cells[2]}")
+    print(f"  {Colors.DIM}{'═' * 55}{Colors.RESET}")
+    while True:
+        try:
+            tf_choice = input(f"{Colors.CYAN}  Choose 1-14 (default=1 for M1): {Colors.RESET}").strip()
+            if not tf_choice:
+                _chosen_idx = 1
+            else:
+                _chosen_idx = int(tf_choice)
+                if not (1 <= _chosen_idx <= 14):
+                    print(f"{Colors.RED}  Invalid choice (1-14).{Colors.RESET}")
+                    continue
+            break
+        except (ValueError, KeyboardInterrupt):
+            print(f"{Colors.RED}  Invalid input.{Colors.RESET}")
+        except EOFError:
+            _chosen_idx = 1
+            break
+    _tf_entry = _tf_lookup[_chosen_idx]
+    PERIOD, PERIOD_SECONDS = _tf_entry[1], _tf_entry[2]
+    _tf_short = _tf_entry[2]
+    _tf_full = _tf_entry[3]
+    _is_subsecond = _TF_SUBSEC.get(_chosen_idx, False)
+    globals()['PERIOD'] = PERIOD
+    globals()['PERIOD_SECONDS'] = PERIOD_SECONDS
+    if PERIOD_SECONDS < 60:
+        globals()['IS_SUBSECOND'] = True
+        globals()['SUBSECOND_SECONDS'] = PERIOD_SECONDS
+        _subsec_label = f"{PERIOD_SECONDS}S"
+        globals()['SUBSECOND_LABEL'] = _subsec_label
+        print(f"{Colors.GREEN}  Using timeframe: {_tf_short} - {_tf_full}{Colors.RESET}")
+        print(f"{Colors.DIM}  Sub-minute: fetches period=1 history + aggregates locally{Colors.RESET}\n")
+    else:
+        globals()['IS_SUBSECOND'] = False
+        globals()['SUBSECOND_SECONDS'] = 0
+        globals()['SUBSECOND_LABEL'] = ""
+        print(f"{Colors.GREEN}  Using timeframe: {_tf_short} - {_tf_full}{Colors.RESET}\n")
+
+    # ════════════════════════════════════════════════════════════════════
+    # STAGE 3: Select History Size
+    # للفريمات الفرعية (subsecond) نستخدم قيمة ثابتة ولا نسأل المستخدم
+    # لأن النظام يجلب period=1 ويُجمّع محلياً — عدد الأيام غير ذي معنى هنا
+    # ════════════════════════════════════════════════════════════════════
+    if PERIOD_SECONDS < 60:
+        # الفريمات الفرعية (5S/10S/15S/30S): قيمة ثابتة بدون سؤال
+        INITIAL_CANDLES = SUBSECOND_HISTORY_CANDLES
+        HISTORY_DAYS = (INITIAL_CANDLES * PERIOD_SECONDS) / 86400.0 * 1.15
+        FETCH_DURATION_SECONDS = int(86400 * HISTORY_DAYS)
+        globals()['INITIAL_CANDLES'] = INITIAL_CANDLES
+        globals()['HISTORY_DAYS'] = HISTORY_DAYS
+        globals()['FETCH_DURATION_SECONDS'] = FETCH_DURATION_SECONDS
+        # رسالة قصيرة بدل قائمة كاملة
+        print(f"{Colors.DIM}  Sub-second timeframe: auto history ({INITIAL_CANDLES} candles, {HISTORY_DAYS:.2f} days){Colors.RESET}\n")
+    else:
+        # الفريمات 60s+: نسأل المستخدم عن عدد الأيام
+        _default_days = (1000 * PERIOD_SECONDS) / 86400.0 * 1.15  # +15% margin
+        print(f"{Colors.BOLD}  Select History Size{Colors.RESET}")
+        print(f"  {Colors.DIM}Default: 1000 candles ({_default_days:.2f} days). Or enter days manually.{Colors.RESET}")
+        while True:
+            try:
+                days_input = input(f"{Colors.CYAN}  Days (default={_default_days:.2f}): {Colors.RESET}").strip()
+                if not days_input:
+                    INITIAL_CANDLES = 1000
+                    HISTORY_DAYS = _default_days
+                else:
+                    days_val = float(days_input)
+                    if days_val <= 0:
+                        print(f"{Colors.RED}  Must be positive.{Colors.RESET}")
+                        continue
+                    HISTORY_DAYS = days_val * 1.15
+                    INITIAL_CANDLES = max(int((days_val * 86400) / PERIOD_SECONDS), 100)
+                FETCH_DURATION_SECONDS = int(86400 * HISTORY_DAYS)
+                globals()['INITIAL_CANDLES'] = INITIAL_CANDLES
+                globals()['HISTORY_DAYS'] = HISTORY_DAYS
+                globals()['FETCH_DURATION_SECONDS'] = FETCH_DURATION_SECONDS
+                break
+            except (ValueError, KeyboardInterrupt):
+                print(f"{Colors.RED}  Invalid input.{Colors.RESET}")
+            except EOFError:
+                INITIAL_CANDLES = 1000
+                HISTORY_DAYS = _default_days
+                FETCH_DURATION_SECONDS = int(86400 * HISTORY_DAYS)
+                globals()['INITIAL_CANDLES'] = INITIAL_CANDLES
+                globals()['HISTORY_DAYS'] = HISTORY_DAYS
+                globals()['FETCH_DURATION_SECONDS'] = FETCH_DURATION_SECONDS
+                break
+        print(f"{Colors.GREEN}  Using history: {HISTORY_DAYS:.2f} days = {INITIAL_CANDLES} candles{Colors.RESET}\n")
+
+    # (تم حذف كتلة Dashboard بناءً على طلب المستخدم — الترحيب + القوائم كافية)
+
+    # ════════════════════════════════════════════════════════════════════
+    # STAGE 4: Select Domain — عنوان + قائمة مختصرة + سطر إدخال
+    # ════════════════════════════════════════════════════════════════════
+    saved_host = session_manager.get_saved_host()
+    print()
+    print(f"{Colors.BOLD}  Select Domain{Colors.RESET}")
+    for i, (host, label) in enumerate(DOMAINS, 1):
+        marker = f" {Colors.GREEN}(saved){Colors.RESET}" if host == saved_host else ""
+        print(f"  {Colors.CYAN}{i}{Colors.RESET} - {label}{marker}")
+    _saved_idx = next((i for i, (h, l) in enumerate(DOMAINS) if h == saved_host), 0)
+    _default_choice = str(_saved_idx + 1)
+    while True:
+        try:
+            choice = input(f"{Colors.CYAN}  Choose 1-{len(DOMAINS)} (default={_default_choice}): {Colors.RESET}").strip()
+            if not choice:
+                QX_HOST = saved_host if saved_host else DOMAINS[0][0]
+            else:
+                idx = int(choice) - 1
+                if 0 <= idx < len(DOMAINS):
+                    QX_HOST = DOMAINS[idx][0]
+                else:
+                    print(f"{Colors.RED}  Invalid choice.{Colors.RESET}")
+                    continue
+            break
+        except (ValueError, KeyboardInterrupt):
+            print(f"{Colors.RED}  Invalid input.{Colors.RESET}")
+        except EOFError:
+            QX_HOST = saved_host if saved_host else DOMAINS[0][0]
+            break
+    globals()['QX_HOST'] = QX_HOST
+    print(f"{Colors.GREEN}  Using domain: {QX_HOST}{Colors.RESET}\n")
+
+    # ════════════════════════════════════════════════════════════════════
+    # STAGE 5: تسجيل دخول Quotex
+    # ════════════════════════════════════════════════════════════════════
+    # Wipe the sessions table on every launch so the app always starts from a
+    # clean state — no stale cookies/token from a previous run. The saved
+    # credentials (email + password) live in app_state, which is intentionally
+    # preserved so the user does not have to retype them.
+    session_manager.delete_session_file()
+    session_manager.delete_browser_dir()
+    should_force = session_manager.should_force_fresh()
+    saved_email = session_manager.get_saved_email()
+    saved_password = session_manager.get_saved_password()
+    success = False
+    # Case 1: both email and password are saved AND the previous login was
+    # healthy (not too old, not too many failed attempts) → auto-login with
+    # force_fresh=True (the sessions table is already empty).
+    if saved_email and saved_password and not should_force:
+        print(f"{Colors.GREEN}Found saved credentials: {saved_email}{Colors.RESET}")
+        fut = asyncio.run_coroutine_threadsafe(connect_quotex(saved_email, saved_password, force_fresh=True, max_attempts=3), ASYNC_LOOP)
+        success = fut.result(timeout=180)
+    # Case 2: saved email only (no password on file) → ask for the password.
+    if not success and saved_email and not should_force:
+        print(f"{Colors.GREEN}Found saved email: {saved_email}{Colors.RESET}")
+        PASSWORD_INPUT = input(f"{Colors.CYAN} Password: {Colors.RESET}").strip()
+        fut = asyncio.run_coroutine_threadsafe(connect_quotex(saved_email, PASSWORD_INPUT, force_fresh=True, max_attempts=3), ASYNC_LOOP)
+        success = fut.result(timeout=180)
+    # Case 3: no usable saved credentials → prompt for both email and password.
+    if not success:
+        print()
+        EMAIL_INPUT = input(f"{Colors.CYAN}Email: {Colors.RESET}").strip()
+        PASSWORD_INPUT = input(f"{Colors.CYAN}Password: {Colors.RESET}").strip()
+        fut = asyncio.run_coroutine_threadsafe(connect_quotex(EMAIL_INPUT, PASSWORD_INPUT, force_fresh=True, max_attempts=3), ASYNC_LOOP)
+        success = fut.result(timeout=300)
+    if not success:
+        print(f"\n{Colors.RED}[FAILED] Could not connect after all attempts.{Colors.RESET}")
+        sys.exit(1)
+        
+    # (FIX D) "Connected successfully!" —
+    if WINAPI_AVAILABLE:
+        time.sleep(1)
+        find_mt4_window()
+
+    # (FIX D) HST —
+    try:
+        os.makedirs(MT4_HISTORY_PATH, exist_ok=True)
+    except Exception:
+        pass
+
+    total_assets = len(ASSET_LIST)
+    # ===== FIX 8: 1 — =====
+    print(f"\n{Colors.CYAN}{'═'*60}{Colors.RESET}")
+    print(f"{Colors.BOLD}  SECTION 1: CANDLE FETCHING ({total_assets} assets, {INITIAL_CANDLES} candles each){Colors.RESET}")
+    print(f"{Colors.CYAN}{'═'*60}{Colors.RESET}\n")
+
+    all_assets = []
+    total_loaded = 0
+    consecutive_disconnects = 0
+    for idx, symbol in enumerate(ASSET_LIST, 1):
+        # ===== FIX 3: =====
+        # auto_reconnect .
+        # ASYNC_LOOP run_coroutine_threadsafe
+        # main async.
+        if not CONNECTION_ALIVE or CLIENT is None or CLIENT.api is None:
+            logmsg(f"[fetch_loop] connection dead before asset {idx}/{total_assets}; waiting for reconnect...")
+            async def _wait_reconnect(timeout=30.0):
+                try:
+                    await wait_until(
+                        lambda: CONNECTION_ALIVE and CLIENT is not None and CLIENT.api is not None,
+                        timeout=timeout,
+                        poll_interval=0.5,
+                    )
+                    return True
+                except asyncio.TimeoutError:
+                    return False
+            reconnected = asyncio.run_coroutine_threadsafe(_wait_reconnect(30.0), ASYNC_LOOP).result(timeout=35)
+            if reconnected:
+                consecutive_disconnects = 0
+            else:
+                consecutive_disconnects += 1
+                logmsg(f"[fetch_loop] reconnect failed within 30s (streak={consecutive_disconnects})")
+                if consecutive_disconnects >= MAX_RECONNECTS_DURING_FETCH:
+                    logmsg(f"[fetch_loop] giving up after {consecutive_disconnects} failed reconnects")
+                    break
+                continue
+        asset = Asset(symbol)
+        display = pretty_asset_name(symbol)
+        all_assets.append(asset)
+        ALL_STREAMING_ASSETS.append(asset)
+        start_time = time.time()
+        # Use 1.0s delay between assets for sub-minute (server sensitive to period=1)
+        # 0.1s for 60s+ timeframes (normal speed)
+        _asset_delay = 1.0 if PERIOD_SECONDS < 60 else FETCH_ASSET_DELAY
+        # Start realtime_stream FIRST (before historical fetch)
+        # This way the stream collects live ticks DURING the fetch, closing the gap
+        # between historical last candle and live first candle
+        asset.stream_task = asyncio.run_coroutine_threadsafe(realtime_stream(asset), ASYNC_LOOP)
+        # Small delay to let stream subscribe before fetch
+        time.sleep(0.1)
+        # Now fetch historical candles (stream is collecting live ticks in parallel)
+        fut = asyncio.run_coroutine_threadsafe(fetch_candles_with_retry(asset, max_retries=MAX_FETCH_RETRIES, idx=idx, total=total_assets), ASYNC_LOOP)
+        try:
+            candles_count, attempts = fut.result(timeout=180)
+            elapsed = time.time() - start_time
+            if candles_count >= MIN_CANDLES_THRESHOLD:
+                total_loaded += candles_count
+                consecutive_disconnects = 0
+                attempts_str = "" if attempts == 1 else f" ({attempts} attempts)"
+                print(f"\r{Colors.CLEAR_LINE}  {Colors.CYAN}{display:<25}{Colors.RESET} {Colors.GREEN}{candles_count} candles in {elapsed:.1f}s{attempts_str}{Colors.RESET} Streaming")
+            else:
+                print(f"\r{Colors.CLEAR_LINE}  {Colors.CYAN}{display:<25}{Colors.RESET} {Colors.RED}Only {candles_count} candles{Colors.RESET} Streaming")
+        except Exception as e:
+            print(f"\r{Colors.CLEAR_LINE}  {Colors.CYAN}{display:<25}{Colors.RESET} {Colors.RED}Error: {str(e)[:30]}{Colors.RESET}")
+            if "Connection" in str(e) or "closed" in str(e).lower():
+                consecutive_disconnects += 1
+                if consecutive_disconnects >= MAX_RECONNECTS_DURING_FETCH:
+                    logmsg(f"[fetch_loop] too many disconnects ({consecutive_disconnects}); aborting fetch")
+                    break
+        # Merge: any live ticks collected during fetch are already in asset.candles
+        # fetch_candles_with_retry overwrites asset.candles with historical only.
+        # To preserve live ticks, merge them back after fetch.
+        # (handled inside realtime_stream which appends to asset.candles)
+        # ===== FIX 7: cooldown — =====
+        # . keepalive_loop .
+        if FETCH_COOLDOWN_EVERY > 0 and idx > 0 and idx % FETCH_COOLDOWN_EVERY == 0 and idx < total_assets:
+            logmsg(f"[fetch_loop] cooldown {FETCH_COOLDOWN_DURATION}s after {idx}/{total_assets} assets")
+            time.sleep(FETCH_COOLDOWN_DURATION)
+        else:
+            # Use 1.0s for sub-minute (server sensitive to period=1), 0.1s for 60s+
+            time.sleep(_asset_delay)
+
+    # NOTE: gap filler runs automatically on its interval (every GAP_FILL_REFRESH_INTERVAL).
+    # First cycle waits 60s, then runs periodically. Not forced at startup.
+    # Gap fill respects the user's chosen timeframe via dynamic _align_time/_fill_missing_slots.
+
+    asyncio.run_coroutine_threadsafe(health_monitor(), ASYNC_LOOP)
+    asyncio.run_coroutine_threadsafe(auto_reconnect(), ASYNC_LOOP)
+    asyncio.run_coroutine_threadsafe(keepalive_loop(), ASYNC_LOOP)
+    asyncio.run_coroutine_threadsafe(stale_message_watchdog(), ASYNC_LOOP)
+    # start the automatic gap filler loop (runs every GAP_FILL_REFRESH_INTERVAL)
+    asyncio.run_coroutine_threadsafe(mt4_gap_filler(), ASYNC_LOOP)
+    
+    # ===== FIX 8: dashboard — 3 =====
+    # 1: ( )
+    # 2: ( status line )
+    # 3: ( mt4_gap_filler)
+    print(f"\n{Colors.GREEN}{'═'*60}{Colors.RESET}")
+    print(f"{Colors.BOLD}  All assets loaded and streaming!{Colors.RESET}")
+    print(f"  Total: {total_loaded} candles for {len(all_assets)} assets")
+    print(f"  History window: {HISTORY_DAYS} day (optimized, fast fetch)")
+    print(f"  Writer Thread: ACTIVE (every {WRITE_INTERVAL}s)")
+    print(f"  Refresh: BATCHED (every {REFRESH_INTERVAL}s)")
+    print(f"  Stream Poll: {STREAM_POLL_INTERVAL}s")
+    print(f"  Health Monitor: ACTIVE (Lenient: ignores websocket flickers)")
+    print(f"  Keepalive Ping: ACTIVE (every {KEEPALIVE_PING_INTERVAL}s, multi-type)")
+    print(f"  Stale Watchdog: ACTIVE (recycles if silent > {STALE_MESSAGE_TIMEOUT}s)")
+    print(f"  Auto-Reconnect: instant detect + exponential backoff (never gives up)")
+    print(f"  Internal Watchdog: ACTIVE (recycles stale connections > 90s)")
+    print(f"  Fetch: {FETCH_MAX_WORKERS} workers, {FETCH_CHUNK_SIZE}c/batch, {FETCH_BATCH_DELAY}s delay, {FETCH_ASSET_DELAY}s between assets")
+    print(f"  Retry: {MAX_FETCH_RETRIES} attempts, backoff {RETRY_BACKOFF_BASE}-{RETRY_BACKOFF_MAX}s")
+    print(f"{Colors.GREEN}{'═'*60}{Colors.RESET}\n")
+
+    # ===== FIX E/F/G: — =====
+    # FIX E: ( 6)
+    # FIX F: ( print() )
+    # FIX G: ( / ) +
+    # FIX H: (columns/rows) —
+
+    import shutil as _shutil
+    def _get_term_size():
+        try:
+            s = _shutil.get_terminal_size((80, 24))
+            return s.columns, s.lines
+        except Exception:
+            return 80, 24
+
+    def _fmt_price(p):
+        if p <= 0: return "—"
+        if p >= 1000: return f"{p:.3f}"
+        if p >= 100:  return f"{p:.3f}"
+        if p >= 1:    return f"{p:.5f}"
+        return f"{p:.5f}"
+
+    def _draw_live_table(first_draw=False):
+        cols, rows = _get_term_size()
+        # ===== FIX H: — =====
+        # : 25 chars (name=12 + price=10 + )
+        # : 50 chars (name=25 + price=15 + status=8 + )
+        cols = max(25, cols)
+        if cols >= 55:
+            name_w, price_w = 25, 15
+            show_status = True
+        elif cols >= 40:
+            name_w, price_w = 20, 12
+            show_status = True
+        elif cols >= 30:
+            name_w, price_w = 15, 10
+            show_status = False
+        else:
+            name_w, price_w = 12, 8
+            show_status = False
+        bar_w = max(20, min(70, cols - 2))
+        # ( )
+        header_lines = 3
+        data_lines = len(all_assets) + 1  # +1
+        gap_lines = 0
+        if GAP_FILL_SUMMARY:
+            gap_lines = 3  # ===, summary, ===
+        # status messages lines (queued log messages)
+        msg_lines_count = min(len(_STATUS_MESSAGES_QUEUE), 3)
+        msg_lines = msg_lines_count + (1 if msg_lines_count > 0 else 0)  # +1 for separator
+        total_lines = header_lines + data_lines + gap_lines + msg_lines
+        if not first_draw:
+            sys.stdout.write(f"\033[{total_lines}A")
+        # ===== =====
+        sys.stdout.write(f"\033[2K{Colors.CYAN}{'═'*bar_w}{Colors.RESET}\n")
+        sys.stdout.write(f"\033[2K{Colors.BOLD}  LIVE PRICES{Colors.RESET}\n")
+        sys.stdout.write(f"\033[2K{Colors.CYAN}{'═'*bar_w}{Colors.RESET}\n")
+        # ===== =====
+        for asset in all_assets:
+            display = pretty_asset_name(asset.api_symbol)
+            # name_w
+            if len(display) > name_w:
+                display = display[:name_w-1] + "~"
+            # FIX G:
+            name_visible = f"{display:<{name_w}}"
+            name_colored = f"{Colors.BLUE}{name_visible}{Colors.RESET}"
+            # FIX G: ( / )
+            price_str = _fmt_price(asset.price)
+            if asset.previous_price > 0 and asset.price > 0:
+                if asset.price > asset.previous_price:
+                    price_colored = f"{Colors.GREEN}{price_str:<{price_w}}{Colors.RESET}"
+                elif asset.price < asset.previous_price:
+                    price_colored = f"{Colors.RED}{price_str:<{price_w}}{Colors.RESET}"
+                else:
+                    price_colored = f"{price_str:<{price_w}}"
+            else:
+                price_colored = f"{price_str:<{price_w}}"
+
+            if show_status:
+                if asset.updates > 0:
+                    status_str = f"{Colors.GREEN}LIVE{Colors.RESET}"
+                else:
+                    status_str = f"{Colors.RED}WAIT{Colors.RESET}"
+                sys.stdout.write(f"\033[2K  {name_colored} {price_colored} {status_str}\n")
+            else:
+                sys.stdout.write(f"\033[2K  {name_colored} {price_colored}\n")
+
+        if CONNECTION_ALIVE:
+            conn_status = f"{Colors.GREEN}CONNECTED{Colors.RESET}"
+        else:
+            conn_status = f"{Colors.RED}RECONNECTING...{Colors.RESET}"
+        if show_status:
+            sys.stdout.write(f"\033[2K  {Colors.BLUE}{'Connection':<{name_w}}{Colors.RESET} {'':<{price_w}} {conn_status}\n")
+        else:
+            sys.stdout.write(f"\033[2K  {Colors.BLUE}{'Connection':<{name_w}}{Colors.RESET} {conn_status}\n")
+        # ===== FIX F: ( ) =====
+        if GAP_FILL_SUMMARY:
+            summary = GAP_FILL_SUMMARY
+            # bar_w-4
+            max_len = bar_w - 4
+            if len(summary) > max_len:
+                summary = summary[:max_len-3] + "..."
+            # :
+            if "ABORTED" in GAP_FILL_SUMMARY or "Failed:" in GAP_FILL_SUMMARY and "0 failed" not in GAP_FILL_SUMMARY:
+                summary_colored = f"{Colors.RED}{summary}{Colors.RESET}"
+            elif "COMPLETE" in GAP_FILL_SUMMARY:
+                summary_colored = f"{Colors.GREEN}{summary}{Colors.RESET}"
+            elif GAP_FILL_ACTIVE:
+                summary_colored = f"{Colors.CYAN}{summary}{Colors.RESET}"
+            else:
+                summary_colored = summary
+            sys.stdout.write(f"\033[2K{Colors.CYAN}{'═'*bar_w}{Colors.RESET}\n")
+            sys.stdout.write(f"\033[2K  {summary_colored}\n")
+            sys.stdout.write(f"\033[2K{Colors.CYAN}{'═'*bar_w}{Colors.RESET}\n")
+        # Display queued log messages (last 3)
+        if _STATUS_MESSAGES_QUEUE:
+            sys.stdout.write(f"\033[2K{Colors.DIM}{'─'*bar_w}{Colors.RESET}\n")
+            for msg in _STATUS_MESSAGES_QUEUE[-3:]:
+                # truncate to bar_w-4
+                if len(msg) > bar_w - 4:
+                    msg = msg[:bar_w-7] + "..."
+                sys.stdout.write(f"\033[2K  {Colors.DIM}{msg}{Colors.RESET}\n")
+        sys.stdout.flush()
+
+    # Initial draw
+    _draw_live_table(first_draw=True)
+    print()
+    print(f"{Colors.CYAN}Live streaming active. Press Enter for menu, Ctrl+C to stop.{Colors.RESET}")
+    print()
+
+    # Interactive menu state
+    stop_requested = False
+    reinit_requested = False
+    _enter_pressed = threading.Event()
+
+    def _stdin_listener():
+        while not stop_requested and not reinit_requested:
+            try:
+                line = sys.stdin.readline()
+                if line == '' or line is None:
+                    time.sleep(0.5)
+                    continue
+                _enter_pressed.set()
+                while _enter_pressed.is_set() and not stop_requested and not reinit_requested:
+                    time.sleep(0.1)
+            except (KeyboardInterrupt, EOFError):
+                time.sleep(0.5)
+            except Exception:
+                time.sleep(0.5)
+
+    _stdin_thread = threading.Thread(target=_stdin_listener, daemon=True, name="StdinListener")
+    _stdin_thread.start()
+
+    def _show_interactive_menu():
+        print()
+        print(f"{Colors.CYAN}{'═'*70}{Colors.RESET}")
+        print(f"{Colors.BOLD}  MENU{Colors.RESET}")
+        print(f"{Colors.CYAN}{'═'*70}{Colors.RESET}")
+        print(f"  {Colors.CYAN}1{Colors.RESET} - Change Timeframe (current: {_current_period_label()})")
+        print(f"  {Colors.CYAN}2{Colors.RESET} - Change History days (current: {HISTORY_DAYS:.2f}d = {INITIAL_CANDLES} candles)")
+        print(f"  {Colors.CYAN}3{Colors.RESET} - Change both timeframe and history days")
+        print(f"  {Colors.CYAN}4{Colors.RESET} - Resume streaming (continue)")
+        print(f"  {Colors.CYAN}5{Colors.RESET} - Exit program")
+        print(f"{Colors.CYAN}{'═'*70}{Colors.RESET}")
+        while True:
+            try:
+                c = input(f"{Colors.CYAN}Choose 1-5: {Colors.RESET}").strip()
+                if c in ('1', '2', '3', '4', '5'):
+                    return int(c)
+                print(f"{Colors.RED}Invalid choice.{Colors.RESET}")
+            except (ValueError, KeyboardInterrupt):
+                print(f"{Colors.RED}Invalid input.{Colors.RESET}")
+            except EOFError:
+                return 4
+
+    def _choose_timeframe():
+        # نفس تنسيق القائمة الأولية: 3 أعمدة × 5 صفوف
+        # The cell layout must match Stage 2 exactly: "XX - SSSSS - LLLL" (17 chars).
+        # The current item is highlighted in GREEN instead of an inline asterisk,
+        # so column widths stay perfectly aligned with the initial menu.
+        print()
+        print(f"{Colors.BOLD}  Select Timeframe{Colors.RESET}")
+        print(f"  {Colors.DIM}{'═' * 55}{Colors.RESET}")
+        _ROWS_LOCAL = [
+            (1, 6, 11), (2, 7, 12), (3, 8, 13), (4, 9, 14), (5, 10, None),
+        ]
+        _TF_COL_WIDTH = 17
+        _TF_GAP = "  "
+        for row in _ROWS_LOCAL:
+            cells = []
+            for idx in row:
+                if idx is None:
+                    cells.append(" " * _TF_COL_WIDTH)
+                    continue
+                tf_tuple = TIMEFRAMES[idx - 1]
+                mt4_p = tf_tuple[0]
+                secs = tf_tuple[1]
+                full_label = tf_tuple[2]            # e.g. "M1  - 1 minute"
+                short_label = full_label.split()[0]   # e.g. "M1"
+                is_current = (mt4_p == PERIOD and secs == PERIOD_SECONDS)
+                cell_color = Colors.GREEN if is_current else Colors.CYAN
+                # Identical layout to Stage 2: "XX - SSSSS - LLLL" = 17 visible chars
+                cells.append(f"{cell_color}{idx:>2}{Colors.RESET} - {secs:<5} - {short_label:<4}")
+            print(f"  {cells[0]}{_TF_GAP}{cells[1]}{_TF_GAP}{cells[2]}")
+        print(f"  {Colors.DIM}{'═' * 55}{Colors.RESET}")
+        print(f"  {Colors.DIM}(green = current){Colors.RESET}")
+        while True:
+            try:
+                tf_choice = input(f"{Colors.CYAN}  Choose 1-14 (default=1 for M1): {Colors.RESET}").strip()
+                if not tf_choice:
+                    return TIMEFRAMES[0]
+                tf_idx = int(tf_choice) - 1
+                if 0 <= tf_idx < len(TIMEFRAMES):
+                    return TIMEFRAMES[tf_idx]
+                print(f"{Colors.RED}  Invalid choice (1-14).{Colors.RESET}")
+            except (ValueError, KeyboardInterrupt):
+                print(f"{Colors.RED}  Invalid input.{Colors.RESET}")
+            except EOFError:
+                return TIMEFRAMES[0]
+
+    def _choose_history_days():
+        # للفريمات الفرعية: لا نسأل، نُرجع قيمة ثابتة (نفس سلوك Initial Setup)
+        if PERIOD_SECONDS < 60:
+            _auto_days = (SUBSECOND_HISTORY_CANDLES * PERIOD_SECONDS) / 86400.0 * 1.15
+            print(f"{Colors.DIM}  Sub-second timeframe: auto history ({SUBSECOND_HISTORY_CANDLES} candles){Colors.RESET}")
+            return _auto_days, SUBSECOND_HISTORY_CANDLES
+        # للفريمات 60s+: نسأل المستخدم
+        print(f"{Colors.CYAN}{'═'*70}{Colors.RESET}")
+        print(f"{Colors.BOLD}  Select History Size:{Colors.RESET}")
+        print(f"{Colors.CYAN}{'═'*70}{Colors.RESET}")
+        _default_days_local = (1000 * PERIOD_SECONDS) / 86400.0 * 1.15  # +15% margin
+        print(f"  {Colors.CYAN}Enter number of days (e.g., 1, 2, 3, 4...)")
+        print(f"   Or press Enter for default 1000 candles ({_default_days_local:.2f} days){Colors.RESET}")
+        print(f"{Colors.CYAN}{'═'*70}{Colors.RESET}")
+        while True:
+            try:
+                days_input = input(f"{Colors.CYAN}Days: {Colors.RESET}").strip()
+                if not days_input:
+                    return _default_days_local, 1000
+                days_val = float(days_input)
+                if days_val <= 0:
+                    print(f"{Colors.RED}Must be positive.{Colors.RESET}")
+                    continue
+                # Apply 15% margin to user-specified days too
+                days_with_margin = days_val * 1.15
+                candles = max(int((days_val * 86400) / PERIOD_SECONDS), 100)
+                return days_with_margin, candles
+            except (ValueError, KeyboardInterrupt):
+                print(f"{Colors.RED}Invalid input.{Colors.RESET}")
+            except EOFError:
+                return _default_days_local, 1000
+
+    # status update loop with interactive menu support
+    while not stop_requested:
+        try:
+            while True:
+                if _enter_pressed.is_set() or stop_requested or reinit_requested:
+                    break
+                _draw_live_table(first_draw=False)
+                time.sleep(STATUS_REFRESH_INTERVAL)
+            if stop_requested:
+                break
+            if reinit_requested:
+                break
+            action = _show_interactive_menu()
+            _enter_pressed.clear()
+            if action == 4:
+                _draw_live_table(first_draw=True)
+                continue
+            elif action == 5:
+                stop_requested = True
+                break
+            elif action in (1, 2, 3):
+                new_period = PERIOD
+                new_period_seconds = PERIOD_SECONDS
+                if action in (1, 3):
+                    _new_tf = _choose_timeframe()
+                    new_period = _new_tf[0]
+                    new_period_seconds = _new_tf[1]
+                new_days = HISTORY_DAYS
+                new_candles = INITIAL_CANDLES
+                # للفريمات الفرعية: _choose_history_days يُرجع قيمة ثابتة تلقائياً
+                # للفريمات 60s+: يسأل المستخدم
+                if action in (2, 3):
+                    new_days, new_candles = _choose_history_days()
+                # Update globals BEFORE the live re-fetch — refetch_all_candles()
+                # reads IS_SUBSECOND / SUBSECOND_SECONDS to decide which stream
+                # function (subsecond_stream vs realtime_stream) to restart.
+                globals()['PERIOD'] = new_period
+                globals()['PERIOD_SECONDS'] = new_period_seconds
+                if new_period_seconds < 60:
+                    globals()['IS_SUBSECOND'] = True
+                    globals()['SUBSECOND_SECONDS'] = new_period_seconds
+                    globals()['SUBSECOND_LABEL'] = f"{new_period_seconds}S"
+                else:
+                    globals()['IS_SUBSECOND'] = False
+                    globals()['SUBSECOND_SECONDS'] = 0
+                    globals()['SUBSECOND_LABEL'] = ""
+                globals()['HISTORY_DAYS'] = new_days
+                globals()['INITIAL_CANDLES'] = new_candles
+                globals()['FETCH_DURATION_SECONDS'] = int(86400 * new_days) if new_days > 0 else 0
+                print(f"\n{Colors.GREEN}Switching to {_current_period_label()}, {new_days:.2f} days = {new_candles} candles...{Colors.RESET}")
+                # ===== LIVE SWITCH (no restart) =====
+                # Instead of os.execv() (which kills the process and forces the
+                # user to re-enter license / timeframe / domain / login), we
+                # stop the existing streams, clear the candles for every asset,
+                # re-fetch with the new timeframe and restart the streams —
+                # all in-place. The status loop simply continues afterwards.
+                if not (CONNECTION_ALIVE and CLIENT is not None and CLIENT.api is not None):
+                    print(f"{Colors.YELLOW}  Connection is currently down — waiting for auto-reconnect to apply the new timeframe.{Colors.RESET}")
+                    # The auto_reconnect loop will pick up the new globals on
+                    # its next iteration and re-fetch with the new timeframe.
+                else:
+                    try:
+                        print(f"{Colors.DIM}  Re-fetching all assets live (no restart)...{Colors.RESET}")
+                        refetch_fut = asyncio.run_coroutine_threadsafe(refetch_all_candles(), ASYNC_LOOP)
+                        refetch_fut.result(timeout=900)  # up to 15 minutes for 41 assets
+                    except Exception as e:
+                        print(f"{Colors.RED}  Live re-fetch error: {e}{Colors.RESET}")
+                _enter_pressed.clear()
+                _draw_live_table(first_draw=True)
+                continue
+        except KeyboardInterrupt:
+            stop_requested = True
+            break
+        except Exception as e:
+            log_exception("main status loop", e)
+            try:
+                print(f"\n{Colors.CYAN}ain loop] recovered from error: {e}{Colors.RESET}", flush=True)
+            except Exception:
+                pass
+            time.sleep(1)
+
+    # If reinit was requested: نُعيد تشغيل البرنامج بشكل نظيف
+    # ملاحظة: هذا إعادة بناء كاملة (full re-init) لكنها أسرع من إغلاق الترمنال
+    # لأن البرنامج يبدأ مباشرة من نقطة الترخيص المحفوظ (لا يسأل المستخدم ثانية)
+    if reinit_requested:
+        print(f"\n{Colors.CYAN}Applying new timeframe settings...{Colors.RESET}")
+        print(f"{Colors.DIM}  (Saved license will auto-apply on restart){Colors.RESET}")
+        sys.stdout.flush()
+        time.sleep(1.0)
+        # إعادة تنفيذ البرنامج بشكل نظيف — saved_license سيُفعّل تلقائياً
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
+    # graceful shutdown
+    cols, rows = _get_term_size()
+    gap_lines = 3 if GAP_FILL_SUMMARY else 0
+    total_lines_now = 3 + len(all_assets) + 1 + gap_lines
+    sys.stdout.write(f"\033[{total_lines_now}B\n")
+    sys.stdout.flush()
+    print(f"{Colors.RED}Stopped{Colors.RESET}")
+    print(f"{Colors.CYAN}Total updates: {sum(a.updates for a in all_assets):,}{Colors.RESET}")
+    print(f"{Colors.CYAN}Total candles stored: {sum(len(a.candles) for a in all_assets):,}{Colors.RESET}")
+    print()
+    writer_thread.running = False
