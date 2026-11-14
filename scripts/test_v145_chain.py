@@ -60,7 +60,7 @@ class FakeAsyncio:
 
 ns = {"time": time, "asyncio": FakeAsyncio, "_qx_module": _qx_module_global}
 app_methods = {}
-for m in ["_qx_chain_push_message", "_qx_seal_gaps", "_fmt_engine_candles"]:
+for m in ["_qx_chain_push_message", "_qx_seal_gaps", "_fmt_engine_candles", "_qx_gap_holes"]:
     code = extract_method(APP, "Backend", m)
     exec(compile(code, APP, "exec"), ns)
     app_methods[m] = ns[m]
@@ -95,6 +95,10 @@ class QxStub:
     ASSET_MAX_CANDLES = 45000
     PERIOD = 1
     ASYNC_LOOP = None   # الهيكل الوهمي — الكود الحقيقي يستخدم حلقة الخادم
+    @staticmethod
+    def _align_time(raw_ts, period_seconds=None):
+        # v14.6 أضاف نداء qx._align_time في دمج الدفعات — الهيكل الوهمي يوفره
+        return int(raw_ts) // 60 * 60
     def __init__(self, asset):
         self._asset = asset
         self.MT4_WRITER = Writer()
@@ -143,6 +147,7 @@ class Backend:
         self.emits.append(obj)
     candlesChanged = Sig()
     _fmt_engine_candles = staticmethod(app_methods["_fmt_engine_candles"])
+    _qx_gap_holes = staticmethod(app_methods["_qx_gap_holes"])
     _qx_chain_push_message = app_methods["_qx_chain_push_message"]
     _qx_seal_gaps = app_methods["_qx_seal_gaps"]
 

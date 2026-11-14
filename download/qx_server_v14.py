@@ -22,7 +22,7 @@ import configparser
 import contextlib
 from pathlib import Path
 from datetime import datetime, timedelta
-from collections import OrderedDict, defaultdict
+from collections import OrderedDict, defaultdict, deque as _v14_deque
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Any, Awaitable, Callable, Dict, Generic, Hashable, List, Literal, Mapping, Optional, Tuple, TypeVar
@@ -638,7 +638,16 @@ class WebsocketClient:
 
             if isinstance(message, dict):
                 asset = message.get("asset")
-                if asset and (message.get("candles") or message.get("data") or message.get("history")):
+                # v14.8 (تقرير الفحص): الرد الفارغ (candles: []) ردٌّ حقيقي
+                # من الخادم عند فجوة أو عطلة نهاية أسبوع — يُرفع الحدث له
+                # أيضاً حتى لا ينتظر الجالب 30 ثانية كاملة ثم يفشل الجلب
+                # كلها بعد 3 فشلات متتالية وتبقى فجوات في التاريخ.
+                _payload_key = None
+                for _k in ("candles", "data", "history"):
+                    if _k in message:
+                        _payload_key = _k
+                        break
+                if asset and _payload_key is not None:
                     self.api.candle_v2_data[asset] = message
                     self.api.candles.candles_data = message.get("candles") or message.get("data") or message.get("history")
 
@@ -705,6 +714,17 @@ class WebsocketClient:
             if isinstance(message, list) and len(message) > 0 and isinstance(message[0], list) and len(message[0]) == 4:
                 asset = message[0][0]
                 self.api.realtime_candles[asset] = message[0]
+                # v14.8 (تقرير الفحص — سبب «أجسام الشموع صغيرة وقممها تضيع»):
+                # كل تيكات الرسالة تُحفظ في قائمة انتظار لكل عملة — التيكات
+                # التي تصل بين قراءتين لا تضيع بعد الآن والبث يقرؤها كلها
+                # (الشرط القديم message[0] كان يتجاهل بقية التيكات).
+                try:
+                    _tq = self.api._tick_queue.setdefault(asset, _v14_deque(maxlen=4096))
+                    for _tk in message:
+                        if isinstance(_tk, list) and len(_tk) == 4:
+                            _tq.append(_tk)
+                except Exception:
+                    pass
         except Exception as e:
             logger.debug(f"Error processing message: {e}")
 
@@ -830,6 +850,10 @@ class QuotexAPI:
         # وموجّه الرسائل يستخدمه لمنع لقطات البث الحي من سرقة حدث
         # candles_ready_<asset> قبل وصول رد history/load الحقيقي.
         self._history_pending: Dict[str, tuple] = {}
+        # v14.8 (تقرير الفحص): قائمة انتظار التيكات لكل عملة — كل تيك يُحفظ
+        # ويُعالَج، والتيكات بين قراءتين لا تضيع فتبقى قمم الشموع وقيعانها.
+        self._tick_queue: Dict[str, _v14_deque] = {}
+        self._tick_last_done: Dict[str, tuple] = {}
         self._history_reply_count: int = 0
         self._history_stolen_suppressed: int = 0
         # ===== STALE-WATCHDOG ADDITION =====
@@ -1326,15 +1350,37 @@ class Quotex:
     async def get_candles(self, asset, end_from_time, offset, period, progressive=False, timeout=30, use_cache=False):
         if self.api is None: return None
         if end_from_time is None: end_from_time = time.time()
-        index = calendar.timegm(time.gmtime())
+        # v14.8 (تقرير الفحص): رقم الطلب فريد من عدّاد الطلبات — طلبان في
+        # الثانية نفسها لم يكنا يحملان الرقم نفسه فيتداخل ردّاهما، وكل نداء
+        # ينتظر ردَّه هو فقط عبر الحدث المفهرس (نفس توجيه _fetch_historical_batch).
+        index = next(_request_counter)
         self.api.candles.candles_data = None
-        await self.api.event_registry.clear_event(f'candles_ready_{asset}')
-        await self.start_candles_stream(asset, period)
+        _indexed_event = f'candles_ready_{asset}_{index}'
+        await self.api.event_registry.clear_event(_indexed_event)
+        # v14.8: لا إعادة اشتراك في كل نداء — إعادة الاشتراك كانت تغيّر فترة
+        # البث الحي وتتسابق مع رد التاريخ. يُشترَك فقط إذا لم يكن البث الحي
+        # يعمل لهذه العملة أصلاً.
+        try:
+            _already_streaming = False
+            for _sa in ALL_STREAMING_ASSETS:
+                if getattr(_sa, "api_symbol", None) == asset and getattr(_sa, "streaming", False):
+                    _already_streaming = True
+                    break
+        except Exception:
+            _already_streaming = False
+        if not _already_streaming:
+            await self.start_candles_stream(asset, period)
         self.api.get_candles_ws(asset, index, int(end_from_time), offset, period)
         try:
-            history_data = await self.api.event_registry.wait_event(f'candles_ready_{asset}', timeout=timeout)
+            history_data = await self.api.event_registry.wait_event(_indexed_event, timeout=timeout)
         except Exception:
-            return None
+            history_data = None
+        if history_data is None:
+            # تراجع آمن: الحدث العام (يُرفع دائماً لأي رد يحمل index)
+            try:
+                history_data = await self.api.event_registry.wait_event(f'candles_ready_{asset}', timeout=3)
+            except Exception:
+                return None
         if history_data is None: return None
         candles = self.prepare_candles(asset, period, history_data)
         if progressive: return self.api.historical_candles.get("data", {})
@@ -3313,13 +3359,16 @@ async def fetch_candles_with_retry(asset: Asset, max_retries=3, idx=1, total=1):
         if len(candles) >= threshold:
             # Merge historical candles with any live ticks collected during fetch
             # (realtime_stream may have appended live candles to asset.candles)
-            live_candles = []
-            if asset.candles:
-                hist_times = set(c['time'] for c in candles)
-                for c in asset.candles:
-                    if c['time'] not in hist_times and c['time'] > (candles[-1]['time'] if candles else 0):
-                        live_candles.append(c)
-            asset.candles = candles + live_candles
+            # v14.8 (سبب «تختفي شموعها»): الدفعة القصيرة لا تمحو التاريخ
+            # المجلوب — كل شمعة أقدم من الدفعة تبقى في الذاكرة كما هي
+            # (لا فقدان للشموع أبداً) والجديد يُدمج فقط.
+            _old_all = list(asset.candles or [])
+            _btimes = set(c['time'] for c in candles)
+            _b_lo = min(c['time'] for c in candles) if candles else 0
+            _b_hi = max(c['time'] for c in candles) if candles else 0
+            _kept_old = [c for c in _old_all if c['time'] < _b_lo and c['time'] not in _btimes]
+            _live_c2 = [c for c in _old_all if c['time'] > _b_hi and c['time'] not in _btimes]
+            asset.candles = sorted(_kept_old + list(candles) + _live_c2, key=lambda x: x['time'])
             if asset.candles: asset.price = asset.candles[-1]['close']
             asset.write(force=True)
             # Update MT4_WRITER.sync_state with the full historical + live candles
@@ -3333,15 +3382,18 @@ async def fetch_candles_with_retry(asset: Asset, max_retries=3, idx=1, total=1):
             return len(asset.candles), attempt
 
         # Merge even for low counts
-        live_candles = []
-        if asset.candles:
-            hist_times = set(c['time'] for c in candles)
-            for c in asset.candles:
-                if c['time'] not in hist_times and c['time'] > (candles[-1]['time'] if candles else 0):
-                    live_candles.append(c)
-        asset.candles = candles + live_candles
-        if asset.candles: asset.price = asset.candles[-1]['close']
-        asset.write(force=True)
+        # v14.8 (سبب «تختفي شموعها»): الرد الفارغ أو القصير لا يمحو الذاكرة —
+        # الشموع الموجودة تبقى كما هي ولا يُستبدل التاريخ بشيء أقل منه.
+        if candles:
+            _old_all = list(asset.candles or [])
+            _btimes = set(c['time'] for c in candles)
+            _b_lo = min(c['time'] for c in candles)
+            _b_hi = max(c['time'] for c in candles)
+            _kept_old = [c for c in _old_all if c['time'] < _b_lo and c['time'] not in _btimes]
+            _live_c2 = [c for c in _old_all if c['time'] > _b_hi and c['time'] not in _btimes]
+            asset.candles = sorted(_kept_old + list(candles) + _live_c2, key=lambda x: x['time'])
+            if asset.candles: asset.price = asset.candles[-1]['close']
+            asset.write(force=True)
         # Update sync_state even for low counts
         if asset.candles:
             MT4_WRITER.sync_state[asset.symbol] = {
@@ -3934,8 +3986,28 @@ async def realtime_stream(asset: Asset):
                 await asyncio.sleep(0.2)
                 continue
             candle = None
-            if not candle and hasattr(CLIENT, 'api') and CLIENT.api:
-                candle = CLIENT.api.realtime_candles.get(internal)
+            if hasattr(CLIENT, 'api') and CLIENT.api:
+                # v14.8 (تقرير الفحص): تُقرأ كل التيكات المتراكمة من قائمة
+                # الانتظار لكل عملة — لا تيك يضيع بين قراءتين فتبقى قمم
+                # الشموع وقيعانها كاملة.
+                try:
+                    _tq = CLIENT.api._tick_queue.get(internal)
+                    candle = _tq.popleft() if _tq else None
+                except Exception:
+                    candle = None
+                if candle is None:
+                    _rc = CLIENT.api.realtime_candles.get(internal)
+                    try:
+                        _sig = (int(_rc[1]), float(_rc[2])) if isinstance(_rc, list) and len(_rc) >= 3 else None
+                    except Exception:
+                        _sig = None
+                    if _rc is not None and _sig is not None:
+                        try:
+                            _done = CLIENT.api._tick_last_done.get(internal)
+                        except Exception:
+                            _done = None
+                        if _done != _sig:
+                            candle = _rc
             if candle:
                 consecutive_errors = 0
                 if isinstance(candle, list) and len(candle) >= 3:
@@ -3947,6 +4019,10 @@ async def realtime_stream(asset: Asset):
                     await asyncio.sleep(STREAM_POLL_INTERVAL)
                     continue
                 if price > 0 and ts > 0:
+                    try:
+                        CLIENT.api._tick_last_done[internal] = (ts, price)
+                    except Exception:
+                        pass
                     # ===== FIX 10: MT4_WRITER.update_candle asset.mark_dirty =====
                     # HST MT4Writer.write_to_file ( )
                     # MT4_WRITER.update_candle sync_state[derived_symbol] + HST 200ms
@@ -4930,7 +5006,21 @@ class MT4Writer:
         try:
             is_filled, _last_at = self.candle_store.is_gap_filled(derived_symbol)
             if is_filled:
-                return    # frozen - keep candles exactly as they were
+                # v14.8 (تقرير الفحص): لا تجميد ما دامت في الخط شموع اصطناعية
+                # (volume=0 خارج الشمعة الحية) — السد الحقيقي يبقى محاولاً
+                # حتى تُستبدل كل الشموع الاصطناعية بشموع حقيقية، فلا تبقى
+                # عملة مجمّدة بثغراتها للأبد.
+                _has_artificial = False
+                try:
+                    _cps = _align_time(int(time.time()))
+                    for _fc in (asset_obj.candles or []):
+                        if _fc.get('time', 0) < _cps and int(_fc.get('volume', 1) or 0) == 0:
+                            _has_artificial = True
+                            break
+                except Exception:
+                    _has_artificial = False
+                if not _has_artificial:
+                    return    # frozen - keep candles exactly as they were
         except Exception:
             pass
 
@@ -4962,7 +5052,26 @@ class MT4Writer:
 
         try:
             # Fetch last GAP_FILL_CANDLES (10) recent candles to replace incomplete ones
-            small_days = (GAP_FILL_CANDLES * PERIOD_SECONDS) / 86400.0
+            # v14.8 (تقرير الفحص): النافذة تمتد حتى أقدم شمعة اصطناعية في
+            # الخط (بحد أقصى 200 شمعة) — أي ثغرة أقدم من 10 شموع كانت
+            # مستحيلة الإصلاح في النسخة السابقة لأن السدّ يجلب آخر 10 شموع فقط.
+            _oldest_artificial = 0
+            try:
+                _cps0 = _align_time(int(time.time()))
+                for _fc in state['candles']:
+                    if _fc.get('time', 0) < _cps0 and int(_fc.get('volume', 1) or 0) == 0:
+                        if _oldest_artificial == 0 or _fc['time'] < _oldest_artificial:
+                            _oldest_artificial = _fc['time']
+            except Exception:
+                _oldest_artificial = 0
+            _window_candles = GAP_FILL_CANDLES
+            if _oldest_artificial:
+                try:
+                    _span = int((time.time() - _oldest_artificial) // PERIOD_SECONDS) + 2
+                    _window_candles = min(200, max(GAP_FILL_CANDLES, _span))
+                except Exception:
+                    _window_candles = GAP_FILL_CANDLES
+            small_days = (_window_candles * PERIOD_SECONDS) / 86400.0
             # v14.2 (طلب المستخدم حرفياً: «ضعها كما هي هنا») — النداء الأصلي
             # عاد كما هو في الكود المرجعي: client.get_candles مباشرة
             # (نفس طريقة الجلب الرسمية دون أي بوابة فوقها).
@@ -4974,11 +5083,10 @@ class MT4Writer:
                 state['candles'] = merged
                 self.write_to_file(derived_symbol, period, merged)
                 asset_obj.candles = merged
-                self._gap_filled[derived_symbol] = True
-                self._gap_filled_at[derived_symbol] = now_ts
                 self.save_snapshot(derived_symbol, merged)
-                # mark as permanently filled in the DB so the next cycle skips
-                self.candle_store.set_gap_filled(derived_symbol, True, now_ts)
+                # v14.8 (تقرير الفحص): الرد الفارغ ليس نجاحاً — لا علامة
+                # تجميد هنا (كانت تُثبَّت حتى عند فشل الجلب أو رد فارغ فتبقى
+                # العملة مجمّدة حتى بعد إعادة التشغيل ولا تُسدّ ثغراتها أبداً).
                 return
 
             # Build candle_map: replace incomplete closed candles with real API data
@@ -5033,15 +5141,26 @@ class MT4Writer:
                 asset_obj.price = merged[-1]['close']
 
             # 9) mark gap as filled
-            self._gap_filled[derived_symbol] = True
-            self._gap_filled_at[derived_symbol] = now_ts
-            # 10) persist candles to the SQLite store (so the next restart
-            # loads them from the DB instead of re-fetching from the API).
+            # v14.8 (تقرير الفحص): علامة التجميد تُثبَّت فقط إذا خرج الخط من
+            # الشموع الاصطناعية — ما دامت فيه شموع مسطحة (volume=0) يبقى السد
+            # الحقيقي محاولاً في الدورات التالية حتى تُستبدل كلها.
+            _still_artificial = False
+            try:
+                _cps2 = _align_time(int(time.time()))
+                for _fc in merged:
+                    if _fc.get('time', 0) < _cps2 and int(_fc.get('volume', 1) or 0) == 0:
+                        _still_artificial = True
+                        break
+            except Exception:
+                _still_artificial = False
             self.save_snapshot(derived_symbol, merged)
-            # 11) set the permanent freeze flag - subsequent fill_gap_once
-            # calls for this asset will return immediately without touching
-            # the candles. This is the entire fix for the 'flicker' symptom.
-            self.candle_store.set_gap_filled(derived_symbol, True, now_ts)
+            if not _still_artificial:
+                self._gap_filled[derived_symbol] = True
+                self._gap_filled_at[derived_symbol] = now_ts
+                # 11) set the permanent freeze flag - subsequent fill_gap_once
+                # calls for this asset will return immediately without touching
+                # the candles. This is the entire fix for the 'flicker' symptom.
+                self.candle_store.set_gap_filled(derived_symbol, True, now_ts)
         except Exception as e:
             err_str = str(e).lower()
             if not any(x in err_str for x in ['winerror', 'permission', 'access', 'closed', 'connection']):
