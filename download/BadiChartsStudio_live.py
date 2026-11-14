@@ -9463,14 +9463,14 @@ def _apply_candles_to_asset(asset, unique):
         pass
 
 async def ensure_asset_loaded(api):
-    """عملة فُتح شارتها — v15.3: أسلوب الأصل الأصلي حرفياً (طلب المستخدم:
-    «لماذا غيرت طريقة جلب الشموع قلت يجب ان تستخدم مثل هنا في هذا الكود يجلب
-    يسد الثغرات ولا ينام الكود» و«من المفترض لجلب 1000 شمعة 4 ثواني»):
+    """عملة فُتح شارتها — v15.4: طريقة الجلب الأصلية حرفياً كما هي بلا أي
+    تغيير (طلب المستخدم: «طريقة جلب الشموع قلنا لا تغيرها ... لماذا تغيرها»
+    و«يجب ان تستخدم مثل هنا في هذا الكود يجلب يسد الثغرات ولا ينام الكود»):
     1) البث الحي أولاً (realtime_stream الأصلية كما هي)
-    2) seed_history الأصلية كما هي — طلب **واحد** get_candles بمدى الأيام
-       كاملاً (اللقطة المحفوظة إن كانت طازجة تُعرض فوراً بلا أي طلب) —
-       هي نفسها التي تجلب 1000+ شمعة في ~4 ثوانٍ في الأصل
-    3) إذا فشل الجلب: الاحتياط الأصلي fetch_candles_with_retry بمحاولة واحدة
+    2) fetch_candles_with_retry الأصلية كما هي — نفس نداء الخادم الأصلي حرفياً
+       (fetch_candles_once → get_historical_candles المتوازية + جسر آخر 15
+       شمعة + دمج التيكات الحية) وهي نفسها التي تجلب 1000 شمعة في ~4 ثوانٍ
+       في الخادم الأصلي — بلا أي نوم مضاف وبلا أي طلب بديل.
     تعيد عدد الشموع في الذاكرة."""
     if CLIENT is None or CLIENT.api is None:
         return 0
@@ -9493,30 +9493,9 @@ async def ensure_asset_loaded(api):
     if len(asset.candles) >= MIN_CANDLES_THRESHOLD:
         return len(asset.candles)
     try:
-        days = max(0.5, float(QX_HISTORY_DAYS))
-    except Exception:
-        days = 0.80
-    ok = False
-    try:
-        ok = bool(await MT4_WRITER.seed_history(CLIENT, asset, PERIOD, days))
+        await fetch_candles_with_retry(asset, max_retries=MAX_FETCH_RETRIES, idx=1, total=1)
     except Exception as e:
-        logmsg(f"[seed:{api}] seed_history failed: {e}")
-    # لقطة محفوظة قديمة: آخر شمعة أقدم مما تصلح له آلة السد الأصلية نفسها
-    # (GAP_FILL_CANDLES شمعة فقط) — نتجاهلها ونجلب تاريخاً حقيقياً كاملاً
-    # بدل عرض خط قديم مثقوب
-    try:
-        if ok and asset.candles:
-            last_t = int(asset.candles[-1].get("time", 0) or 0)
-            stale_after = max(1800, int(GAP_FILL_CANDLES * PERIOD_SECONDS * 3))
-            if last_t and (time.time() - last_t) > stale_after:
-                ok = False
-    except Exception:
-        pass
-    if not ok or len(asset.candles) < MIN_CANDLES_THRESHOLD:
-        try:
-            await fetch_candles_with_retry(asset, max_retries=1, idx=1, total=1)
-        except Exception as e:
-            logmsg(f"[seed:{api}] fetch fallback failed: {e}")
+        logmsg(f"[ensure:{api}] fetch failed: {e}")
     return len(asset.candles)
 
 # ═══ 6) جسور الجلب — نفس دوال الأصل حرفياً ═══
@@ -13078,13 +13057,15 @@ class Backend(QObject):
             # يبدأ فارغاً وينتظر بيانات الخادم الحقيقية فقط (لا شموع وهمية).
             self._candles = []
             self._qx_feed_key = ("", "")
-            # v15.2 (طلب المستخدم): «عندما نفتح العملة من قائمة العملات» —
-            # دائرة تحميل تظهر عند بداية جلب الشموع وتبقى حتى ينتهي الجلب
-            # فيظهر الشارت. لا تحميل خلفي — الجلب عند الفتح فقط.
+            # v15.4 (طلب المستخدم): «نريد دائرة تحميل لكل عملة» + «لا نريد
+            # ارسال الشموع الى الشارت حتا يكتمل جلب شموع تلك العملة ويكتمل
+            # سد الثغرات» — الدائرة تُشعَل عند بداية فتح العملة وتبقى فوق
+            # الشارت حتى يكتمل الجلب الأصلي والسد الأصلي، حينها تُدفع الشموع
+            # وتُطفأ الدائرة فيظهر الشارت مكتملاً (عبر عامل الجلب). الدائرة
+            # تُطفأ هنا مباشرة فقط لو كان غذاء هذا الفريم جاهزاً فعلاً
+            # (عملة أُكمل جلبها وسدّها سابقاً أو تيكات فريمات الثواني).
             self._qx_loading_arm()
             self._qx_load_feed(force=True)
-            # الجلب اكتمل فوراً (شموع العملة في ذاكرة المحرك أو تيكات جاهزة) —
-            # الدائرة تُطفأ في نفس اللحظة
             if self._qx_feed_key == (self._asset, self._tf) and self._candles:
                 self._qx_loading_clear()
         self._save_cfg()
@@ -13260,6 +13241,11 @@ class Backend(QObject):
                 return                      # في الطابور بالفعل — لا تكرار
             self._qx_load_pending.add(api)
             self._qx_loadq.append(api)
+        # v15.4 (طلب المستخدم حرفياً: «نريد دائرة تحميل لكل عملة لماذا لا توجد»):
+        # دائرة التحميل تُشعَل من هذه النقطة نفسها — أي مسار يبدأ جلب شموع عملة
+        # (النقر من القائمة، غياب الشموع أثناء البث، فريم أعلى/أدنى) يُظهر
+        # الدائرة فوق الشارت فوراً حتى يكتمل الجلب والسد ويُدفع الشارت.
+        self._qx_loading_arm()
         self._log("info", f"chart opened with no candles — loading {api} now (queued)")
         self._qx_start_load_worker()
 
@@ -13290,19 +13276,21 @@ class Backend(QObject):
                     qx.ensure_asset_loaded(api), qx.ASYNC_LOOP)
                 n = fut.result(timeout=120)
                 if n:
-                    self._log("ok", f"{api}: {n} candles seeded (history/load) + live stream ON")
+                    self._log("ok", f"{api}: {n} candles loaded (original fetch) + live stream ON")
                     self._qx_ensure_fail[api] = 0
                     self._qx_last_sig = None   # المضخة تدفع الغذاء الجديد فوراً
-                    # v15.3 (طلب المستخدم: «نحن عندما نضغط على العملة هو يبدا
-                    # بجلب الشموع تضهر دائرة تحميل لاكتمال التحميل») — الشموع
-                    # تُدفع إلى الشارت فور اكتمال الجلب والدائرة تُطفأ فيظهر
-                    # الشارت، ثم آلة سد الثغرات الأصلية للعملة المفتوحة فقط في
-                    # الخلفية (بلا أي جلب خلفي لعملة لم تُفتح — طلب المستخدم).
+                    # v15.4 (طلب المستخدم حرفياً: «لا نريد ارسال الشموع الى
+                    # الشارت حتا يكتمل جلب شموع تلك العملة ويكتمل سد الثغرات»):
+                    # سد الثغرات — آلة الأصل نفسها fill_gap_once كما هي بلا أي
+                    # تغيير — يُكتمل هنا **قبل** أي دفع للشارت، ثم تُدفع الشموع
+                    # وتُطفأ دائرة التحميل فيظهر الشارت مكتملاً (جلب + سد).
+                    try:
+                        if (api, "1m") not in getattr(self, "_qx_sealed", set()):
+                            self._qx_sealed.add((api, "1m"))
+                            self._qx_seal_gaps(api)
+                    except Exception:
+                        pass
                     self._qx_push_feed_now(api)
-                    if (api, "1m") not in getattr(self, "_qx_sealed", set()):
-                        self._qx_sealed.add((api, "1m"))
-                        threading.Thread(target=self._qx_seal_gaps, args=(api,),
-                                         daemon=True, name="qxSeal").start()
                 else:
                     self._qx_ensure_fail[api] = self._qx_ensure_fail.get(api, 0) + 1
             except Exception as e:
@@ -13365,7 +13353,8 @@ class Backend(QObject):
             except Exception:
                 pass
         self._log("ok", T[self._lang].get("batchSaved", "Batch candles saved"))
-        # v15.3: أعد جلب العملة الحالية بأسلوب الأصل (طلب واحد) بالمدى الجديد
+        # v15.4: أعد جلب العملة الحالية بالجلب الأصلي fetch_candles_with_retry
+        # بالمدى الجديد ثم سد الأصل قبل الدفع للشارت
         self._qx_force_reload_current()
 
     @Property(bool, notify=histChainChanged)
@@ -13399,14 +13388,16 @@ class Backend(QObject):
             except Exception:
                 pass
         self._log("ok", T[self._lang].get("histSaved", "History days saved"))
-        # v15.3: أعِد جلب العملة الحالية بأسلوب الأصل (طلب واحد) بالمدى الجديد
+        # v15.4: أعِد جلب العملة الحالية بالجلب الأصلي fetch_candles_with_retry
+        # بالمدى الجديد ثم سد الأصل قبل الدفع للشارت
         self._qx_force_reload_current()
 
     def _qx_force_reload_current(self):
-        """v15.3: إعادة جلب عملة الفتح الحالية من جذورها (بعد تغيير أيام
+        """v15.4: إعادة جلب عملة الفتح الحالية من جذورها (بعد تغيير أيام
         التاريخ أو حجم الدفعة في الإعدادات) — نفس مسار فتح العملة حرفياً:
-        دائرة التحميل تظهر، طلب واحد seed_history بالمدى الجديد، ثم الدفع
-        والإخفاء فيظهر الشارت."""
+        دائرة التحميل تظهر، الجلب الأصلي fetch_candles_with_retry بالمدى
+        الجديد، ثم سد الأصل fill_gap_once يكتمل، ثم الدفع والإخفاء فيظهر
+        الشارت (لا شموع قبل اكتمال الجلب والسد — طلب المستخدم)."""
         api = self._qx_symbols.get(self._asset) or self._api_from_display(self._asset)
         if not api:
             return
@@ -13427,6 +13418,12 @@ class Backend(QObject):
                 pass
             try:
                 self._qx_ensure_fail[api] = 0   # تغيير إعدادات = محاولة جديدة فوراً
+            except Exception:
+                pass
+            # v15.4: المدى الجديد = سد جديد — العملة تعود لآلة السد الأصلية
+            # بعد الجلب قبل عرضها (الدائرة تبقى حتى يكتمل الاثنان)
+            try:
+                self._qx_sealed.discard((api, "1m"))
             except Exception:
                 pass
         self._candles = []
@@ -13880,17 +13877,22 @@ class Backend(QObject):
         tf_sec = self._tf_sec()
         key = (self._asset, self._tf)
         if tf_sec == 60:
-            # فريم الدقيقة: شموع الخادم في الذاكرة (جاهزة من التحميل المسبق + البث الحي)
+            # فريم الدقيقة: شموع الخادم في الذاكرة (جاهزة من البث الحي + الجلب)
             candles = self._qx_engine_candles(api)
             if candles and (force or not self._candles or self._qx_feed_key != key):
-                self._candles = candles[-self._QX_FEED_CAP:]
-                self._qx_feed_key = key
-                # v15.3: seed_history الأصلية تجلب مدى الأيام كاملاً بطلب واحد
-                # (1000+ شمعة في ~4 ثوانٍ كما في الأصل) — لا سلسلة دفعات بعد
-                # الآن: كانت تعيد جلب نفس المدى فوق الجلب الأول فتتأخر الشموع
-                # دقيقة كاملة قبل الرسم («تاخر 1 دقيقة ولم يرسم الشموع»)
+                # v15.4 (طلب المستخدم حرفياً: «لا نريد ارسال الشموع الى الشارت
+                # حتا يكتمل جلب شموع تلك العملة ويكتمل سد الثغرات»): العملة التي
+                # لم يكتمل جلبها وسد ثغراتها في هذه الجلسة لا تُدفع من الذاكرة
+                # مباشرة — تمر عبر عامل الجلب (الجلب الأصلي ثم سد الأصلي ثم
+                # الدفع وإخفاء الدائرة). العملة المكتملة سابقاً تُعرض فوراً.
+                if (api, "1m") in getattr(self, "_qx_sealed", set()):
+                    self._candles = candles[-self._QX_FEED_CAP:]
+                    self._qx_feed_key = key
+                else:
+                    self._qx_ensure_asset(api)
             elif not candles:
-                # v13.1: لا شموع بعد (لم يصل دور التحميل المسبق) — جلب فوري أمامي
+                # لا شموع بعد — جلب فوري أمامي (عامل الجلب: جلب الأصل + سد
+                # الأصل ثم الدفع للشارت وإخفاء الدائرة)
                 self._qx_ensure_asset(api)
         elif tf_sec < 60:
             # فريمات الثواني: تُبنى من تيكات الخادم الحية (نافذة 5 دقائق — سياسة الخادم)
@@ -14208,14 +14210,20 @@ class Backend(QObject):
                     self._log("info", msg)
         except Exception:
             pass
-        # 4) v15.2 (طلب المستخدم): دائرة تحميل الشموع عند فتح العملة — تُطفأ
-        #    فور وصول شموع العملة الحالية (الشارت يظهر بعد انتهاء الجلب)، مع
-        #    مهلة أمان 60 ثانية حتى لا تبقى الدائرة عالقة أبداً.
+        # 4) v15.4 (طلب المستخدم): دائرة تحميل الشموع لكل عملة — تُطفأ فور
+        #    اكتمال الجلب والسد وتُدفع الشموع (الشارت يظهر بعد اكتمالهما)، مع
+        #    مهلة أمان 120 ثانية حتى لا تبقى الدائرة عالقة أبداً. الحالة تُبث
+        #    للصفحة دورياً هنا أيضاً — لو فاتها الحدث الأول (بداية الجلب) تظهر
+        #    الدائرة في أول نبضة، فلا عملة تفوتها الدائرة مهما كان مسار الفتح.
         try:
             if getattr(self, "_qx_loading", False):
+                if _now - getattr(self, "_qx_loading_echo_at", 0.0) >= 1.0:
+                    self._qx_loading_echo_at = _now
+                    self._emit_qx({"type": "chartload", "active": True,
+                                   "asset": self._asset})
                 _ready = (self._qx_feed_key == (self._asset, self._tf)
                           and bool(self._candles))
-                if _ready or (_now - getattr(self, "_qx_loading_at", 0.0)) > 60.0:
+                if _ready or (_now - getattr(self, "_qx_loading_at", 0.0)) > 120.0:
                     if not _ready:
                         self._log("info", "candles loading timeout — spinner hidden")
                     self._qx_loading_clear()
@@ -14223,13 +14231,18 @@ class Backend(QObject):
             pass
 
     def _qx_push_feed_now(self, api):
-        """v15.3 (طلب المستخدم: «حتا ينتهي يضهر الشارت»): بعد اكتمال جلب شموع
-        العملة تُدفع إلى الشارت فوراً وتُطفأ دائرة التحميل فيظهر الشارت —
+        """v15.4 (طلب المستخدم: «لا نريد ارسال الشموع الى الشارت حتا يكتمل
+        جلب شموع تلك العملة ويكتمل سد الثغرات»): بعد اكتمال الجلب **والسد**
+        تُدفع الشموع إلى الشارت فوراً وتُطفأ دائرة التحميل فيظهر الشارت —
         بلا انتظار نبضة المضخة. إذا كان المستخدم قد فتح عملة أخرى أثناء
-        الجلب تبقى الدائرة لعملتها الجديدة (لا دائرة ولا دفع لعملة خلفية)."""
+        الجلب تبقى الدائرة لعملتها الجديدة (لا دائرة ولا دفع لعملة خلفية).
+        فريمات أعلى/أدنى من الدقيقة تجلب غذاءها من مسارها الخاص ولا تُعرض
+        عليها شموع الدقيقة — الدائرة هناك تُطفأ عند وصول غذاء الفريم نفسه."""
         try:
             cur_api = self._qx_symbols.get(self._asset) or self._api_from_display(self._asset)
             if cur_api != api:
+                return
+            if self._tf != "1m":
                 return
             candles = self._qx_engine_candles(api)
             if candles:
@@ -14265,6 +14278,12 @@ class Backend(QObject):
         tf_sec = self._tf_sec()
         key = (self._asset, self._tf)
         if tf_sec == 60:
+            # v15.4 (طلب المستخدم حرفياً: «لا نريد ارسال الشموع الى الشارت حتا
+            # يكتمل جلب شموع تلك العملة ويكتمل سد الثغرات»): أثناء دائرة التحميل
+            # لا يُدفع أي شيء للشارت — لا شموع جزئية ولا تحديث حي — الشارت
+            # يظهر مرة واحدة مكتملاً بعد الجلب والسد (عبر _qx_push_feed_now).
+            if getattr(self, "_qx_loading", False) and self._qx_feed_key != key:
+                return
             candles = self._qx_engine_candles(api)
             if candles:
                 # v14.9 (لقطة «مهذه المشاكل»): السد العميق استبدل شرطات قديمة
@@ -14455,8 +14474,8 @@ class Backend(QObject):
                 self.savedEmailChanged.emit()
             except Exception:
                 pass
-            # v15.3: إعدادات الأيام وحجم الدفعة تُطبَّق على المحرك **قبل**
-            # بدء الجلب — طلب seed_history الواحد يقرأ الأيام لحظة التنفيذ
+            # v15.4: إعدادات الأيام وحجم الدفعة تُطبَّق على المحرك **قبل**
+            # بدء الجلب — الجلب الأصلي fetch_candles_with_retry يقرأ الأيام لحظة التنفيذ
             try:
                 qx.QX_HISTORY_DAYS = self._hist_days_cfg()
                 qx.apply_history_days(self._hist_days_cfg())   # آلية قائمة الأصل نفسها
@@ -14479,9 +14498,10 @@ class Backend(QObject):
                 qx.reset_gap_flags()
             except Exception:
                 pass
-            # v15.3: لا سلسلة دفعات عند الدخول — _qx_load_feed أعلاه يجلب شموع
-            # عملة الفتح بطلب واحد عبر seed_history الأصلية (مدى الأيام كاملاً
-            # في ~4 ثوانٍ) ثم يرفعها إلى الشارت فوراً ويُطفئ دائرة التحميل
+            # v15.4: لا سلسلة دفعات عند الدخول — _qx_load_feed أعلاه يجلب شموع
+            # عملة الفتح بالجلب الأصلي fetch_candles_with_retry (الجلب + الجسر
+            # + الدمج — 1000 شمعة في ~4 ثوانٍ كما في الأصل)، ثم يُكمل سد الأصل
+            # fill_gap_once، ثم يرفع الشارت فوراً ويُطفئ دائرة التحميل
             self._log("ok", "QX server connected — " + host + " | opener: " + str(qx.PRELOAD_FIRST_SYMBOL))
             self._emit_qx({"type": "login", "state": "ok"})
         except Exception as e:
