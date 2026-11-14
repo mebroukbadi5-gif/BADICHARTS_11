@@ -729,3 +729,46 @@
 {"t":1794617062.359,"iso":"2026-11-14 00:44:22","seq":39,"event":"gate_worker_start"}
 {"t":1794617062.359,"iso":"2026-11-14 00:44:22","seq":1,"event":"gate_done","asset":"LIVE_GATE_TEST","label":"","exec_s":0.0,"wait_s":0.0}
 {"t":1794617062.359,"iso":"2026-11-14 00:44:22","seq":41,"event":"smoke_test","ملاحظة":"اختبار دخاني"}
+{"t":1794617447.868,"iso":"2026-11-14 00:50:47","seq":1,"event":"breaker","name":"selftest","state":"OPEN"}
+{"t":1794617447.928,"iso":"2026-11-14 00:50:47","seq":2,"event":"breaker","name":"selftest","state":"HALF_OPEN"}
+{"t":1794617447.929,"iso":"2026-11-14 00:50:47","seq":3,"event":"breaker","name":"selftest","state":"CLOSED"}
+{"t":1794617447.929,"iso":"2026-11-14 00:50:47","seq":1,"event":"gate_submit","asset":"BG_PRELOAD_TEST","prio":3,"label":"selftest","seconds":60}
+{"t":1794617447.929,"iso":"2026-11-14 00:50:47","seq":2,"event":"gate_submit","asset":"FG_OPENING_TEST","prio":0,"label":"selftest","seconds":60}
+{"t":1794617447.929,"iso":"2026-11-14 00:50:47","seq":6,"event":"gate_worker_start"}
+{"t":1794617447.939,"iso":"2026-11-14 00:50:47","seq":2,"event":"gate_done","asset":"FG_OPENING_TEST","label":"selftest","exec_s":0.01,"wait_s":0.0}
+{"t":1794617448.003,"iso":"2026-11-14 00:50:48","seq":1,"event":"gate_done","asset":"BG_PRELOAD_TEST","label":"selftest","exec_s":0.01,"wait_s":0.01}
+{"t":1794617448.003,"iso":"2026-11-14 00:50:48","seq":1,"event":"gate_submit","asset":"DEDUPE_TEST","prio":0,"label":"","seconds":60}
+{"t":1794617448.003,"iso":"2026-11-14 00:50:48","seq":10,"event":"gate_worker_start"}
+{"t":1794617448.053,"iso":"2026-11-14 00:50:48","seq":1,"event":"gate_done","asset":"DEDUPE_TEST","label":"","exec_s":0.05,"wait_s":0.0}
+{"t":1794617448.054,"iso":"2026-11-14 00:50:48","seq":1,"event":"gate_submit","asset":"EXPIRE_TEST","prio":0,"label":"","seconds":60}
+{"t":1794617448.354,"iso":"2026-11-14 00:50:48","seq":13,"event":"gate_worker_start"}
+{"t":1794617448.354,"iso":"2026-11-14 00:50:48","seq":14,"event":"gate_expired","asset":"EXPIRE_TEST","label":"","waited_s":0.3}
+{"t":1794617448.354,"iso":"2026-11-14 00:50:48","seq":1,"event":"gate_submit","asset":"CHAIN_TEST_0","prio":3,"label":"","seconds":60}
+{"t":1794617448.354,"iso":"2026-11-14 00:50:48","seq":2,"event":"gate_submit","asset":"CHAIN_TEST_1","prio":3,"label":"","seconds":60}
+{"t":1794617448.354,"iso":"2026-11-14 00:50:48","seq":3,"event":"gate_submit","asset":"CHAIN_TEST_2","prio":3,"label":"","seconds":60}
+{"t":1794617448.355,"iso":"2026-11-14 00:50:48","seq":4,"event":"gate_submit","asset":"CHAIN_TEST_3","prio":3,"label":"","seconds":60}
+{"t":1794617448.355,"iso":"2026-11-14 00:50:48","seq":19,"event":"gate_worker_start"}
+{"t":1794617448.385,"iso":"2026-11-14 00:50:48","seq":1,"event":"gate_done","asset":"CHAIN_TEST_0","label":"","exec_s":0.03,"wait_s":0.0}
+{"t":1794617449.021,"iso":"2026-11-14 00:50:49","seq":2,"event":"gate_done","asset":"CHAIN_TEST_1","label":"","exec_s":0.03,"wait_s":0.03}
+{"t":1794617450.262,"iso":"2026-11-14 00:50:50","seq":3,"event":"gate_done","asset":"CHAIN_TEST_2","label":"","exec_s":0.03,"wait_s":0.667}
+{"t":1794617451.52,"iso":"2026-11-14 00:50:51","seq":4,"event":"gate_done","asset":"CHAIN_TEST_3","label":"","exec_s":0.03,"wait_s":1.907}
+{"t":1794617451.521,"iso":"2026-11-14 00:50:51","seq":24,"event":"loop_start","loop":"selftest_dying","run":1}
+{"t":1794617451.541,"iso":"2026-11-14 00:50:51","seq":25,"event":"loop_crash","loop":"selftest_dying","run":1,"attempt":1,"error":"RuntimeError: simulated crash for selftest"}
+{"t":1794617452.685,"iso":"2026-11-14 00:50:52","seq":26,"event":"loop_start","loop":"selftest_dying","run":2}
+{"t":1794617452.706,"iso":"2026-11-14 00:50:52","seq":27,"event":"loop_crash","loop":"selftest_dying","run":2,"attempt":2,"error":"RuntimeError: simulated crash for selftest"}
+{"t":1794617454.791,"iso":"2026-11-14 00:50:54","seq":28,"event":"loop_start","loop":"selftest_dying","run":3}
+{"t":1794617454.812,"iso":"2026-11-14 00:50:54","seq":29,"event":"loop_returned","loop":"selftest_dying"}
+{"t":1794617454.831,"iso":"2026-11-14 00:50:54","seq":30,"event":"loop_cancelled","loop":"selftest_dying"}
+{"t":1794617454.831,"iso":"2026-11-14 00:50:54","seq":31,"event":"selftest","passed":11,"total":11}
+{"t":1794617454.831,"iso":"2026-11-14 00:50:54","seq":32,"event":"ticks_subscribe","handle":1,"symbols":["TEST_USD_otc"]}
+{"t":1794617454.831,"iso":"2026-11-14 00:50:54","seq":33,"event":"tick_pump_start"}
+{"t":1794617455.132,"iso":"2026-11-14 00:50:55","seq":34,"event":"hook_installed","hook":"_cache_tick"}
+{"t":1794617455.132,"iso":"2026-11-14 00:50:55","seq":35,"event":"hook_installed","hook":"ensure_asset_loaded"}
+{"t":1794617455.132,"iso":"2026-11-14 00:50:55","seq":36,"event":"hook_installed","hook":"fetch_older_batch"}
+{"t":1794617455.132,"iso":"2026-11-14 00:50:55","seq":37,"event":"hook_installed","hook":"preload_one_asset"}
+{"t":1794617455.132,"iso":"2026-11-14 00:50:55","seq":38,"event":"v14_hooks_installed"}
+{"t":1794617455.133,"iso":"2026-11-14 00:50:55","seq":1,"event":"gate_submit","asset":"LIVE_GATE_TEST","prio":0,"label":"","seconds":60}
+{"t":1794617455.133,"iso":"2026-11-14 00:50:55","seq":40,"event":"gate_worker_start"}
+{"t":1794617455.133,"iso":"2026-11-14 00:50:55","seq":1,"event":"gate_done","asset":"LIVE_GATE_TEST","label":"","exec_s":0.0,"wait_s":0.0}
+{"t":1794617455.133,"iso":"2026-11-14 00:50:55","seq":42,"event":"smoke_test","ملاحظة":"اختبار دخاني"}
+{"t":1794617455.958,"iso":"2026-11-14 00:50:55","seq":1,"event":"gap_fill_done","asset":"TESTV147_otc","reason":"test","exec_s":0.027}

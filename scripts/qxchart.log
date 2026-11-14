@@ -192,3 +192,4 @@ AssertionError: v14_gap_fill_for_asset should succeed
 [00:15:49] [v14-gap] gap fill done for TESTV147_otc (test) in 0.0s — original method untouched
 [00:39:15] [v14-gap] gap fill done for TESTV147_otc (test) in 0.0s — original method untouched
 [00:44:14] [v14-gap] gap fill done for TESTV147_otc (test) in 0.0s — original method untouched
+[00:50:55] [v14-gap] gap fill done for TESTV147_otc (test) in 0.0s — original method untouched
