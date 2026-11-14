@@ -9338,7 +9338,10 @@ import itertools as _v14_itertools
 import json as _v14_json
 import os as _v14_os
 import random as _v14_random
-import resource as _v14_resource  # noqa: F401  (غير متاح على ويندوز — مستخدم بحذر أدناه)
+if os.name != "nt":                     # resource غير متاح على ويندوز — لينكس/ماك فقط
+    import resource as _v14_resource  # noqa: F401
+else:
+    _v14_resource = None               # لا يُستخدم في أي مكان آخر — استيراد ميت
 import shutil as _v14_shutil
 import socket as _v14_socket
 import statistics as _v14_statistics
