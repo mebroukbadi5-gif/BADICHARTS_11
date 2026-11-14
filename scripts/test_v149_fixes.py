@@ -346,9 +346,11 @@ except SyntaxError as e:
 check("embedded engine in single file parses (syntax OK)", eng_tree_ok)
 check("embedded engine has deep seal + honest detector + worker hardening",
       "async def v14_deep_gap_seal" in eng_src and
-      "def _v14_is_synth_flat" in eng_src and
-      eng_src.count("_v14_is_synth_flat(_fc)") == 3 and
-      "_same_anchor_tries" in eng_src and
+      # v15+: المحرك = الأصل بايت ببايت والسد العميق في طبقة الربط بكاشفها
+      # الصادق الذاتي (volume==0 للشموع الاصطناعية) — علامات qx_server_v14
+      # القديمة (_v14_is_synth_flat/_same_anchor_tries) كانت لنسخة الخادم
+      # المستقلة ولم تعد جزءاً من ملف التطبيق الواحد
+      eng_src.count('int(c.get("volume", 1) or 0) == 0') >= 2 and
       "V14_DEEP_REPAIRED" in eng_src)
 
 # طبقة التطبيق: السد في نهاية السلسلة + تحديث الغذاء عند الإصلاح العميق

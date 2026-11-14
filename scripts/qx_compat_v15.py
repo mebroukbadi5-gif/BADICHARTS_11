@@ -355,9 +355,15 @@ def _apply_candles_to_asset(asset, unique):
         pass
 
 async def ensure_asset_loaded(api):
-    """عملة فُتح شارتها: البث الحي فوراً (realtime_stream الأصلية) ثم الجلب
-    المباشر الأصلي fetch_candles_with_retry (كل ما يجلب فيه الأصل من تاريخ +
-    جسر + سد فجوات + كتابة HST كما هي حرفياً). تعيد عدد الشموع في الذاكرة."""
+    """عملة فُتح شارتها — v15.3: أسلوب الأصل الأصلي حرفياً (طلب المستخدم:
+    «لماذا غيرت طريقة جلب الشموع قلت يجب ان تستخدم مثل هنا في هذا الكود يجلب
+    يسد الثغرات ولا ينام الكود» و«من المفترض لجلب 1000 شمعة 4 ثواني»):
+    1) البث الحي أولاً (realtime_stream الأصلية كما هي)
+    2) seed_history الأصلية كما هي — طلب **واحد** get_candles بمدى الأيام
+       كاملاً (اللقطة المحفوظة إن كانت طازجة تُعرض فوراً بلا أي طلب) —
+       هي نفسها التي تجلب 1000+ شمعة في ~4 ثوانٍ في الأصل
+    3) إذا فشل الجلب: الاحتياط الأصلي fetch_candles_with_retry بمحاولة واحدة
+    تعيد عدد الشموع في الذاكرة."""
     if CLIENT is None or CLIENT.api is None:
         return 0
     asset = _get_or_create_asset(api)
@@ -379,9 +385,30 @@ async def ensure_asset_loaded(api):
     if len(asset.candles) >= MIN_CANDLES_THRESHOLD:
         return len(asset.candles)
     try:
-        await fetch_candles_with_retry(asset, max_retries=MAX_FETCH_RETRIES, idx=1, total=1)
+        days = max(0.5, float(QX_HISTORY_DAYS))
+    except Exception:
+        days = 0.80
+    ok = False
+    try:
+        ok = bool(await MT4_WRITER.seed_history(CLIENT, asset, PERIOD, days))
     except Exception as e:
-        logmsg(f"[ensure:{api}] fetch failed: {e}")
+        logmsg(f"[seed:{api}] seed_history failed: {e}")
+    # لقطة محفوظة قديمة: آخر شمعة أقدم مما تصلح له آلة السد الأصلية نفسها
+    # (GAP_FILL_CANDLES شمعة فقط) — نتجاهلها ونجلب تاريخاً حقيقياً كاملاً
+    # بدل عرض خط قديم مثقوب
+    try:
+        if ok and asset.candles:
+            last_t = int(asset.candles[-1].get("time", 0) or 0)
+            stale_after = max(1800, int(GAP_FILL_CANDLES * PERIOD_SECONDS * 3))
+            if last_t and (time.time() - last_t) > stale_after:
+                ok = False
+    except Exception:
+        pass
+    if not ok or len(asset.candles) < MIN_CANDLES_THRESHOLD:
+        try:
+            await fetch_candles_with_retry(asset, max_retries=1, idx=1, total=1)
+        except Exception as e:
+            logmsg(f"[seed:{api}] fetch fallback failed: {e}")
     return len(asset.candles)
 
 # ═══ 6) جسور الجلب — نفس دوال الأصل حرفياً ═══
