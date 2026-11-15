@@ -1,2 +1,8 @@
-skills/
-node_modules/
+# Runtime artifacts & workspace-sync junk — never part of the app delivery
+*.db
+*.db-journal
+*.log
+__pycache__/
+*.pyc
+tool-results/
+upload/

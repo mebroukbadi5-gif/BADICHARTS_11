@@ -24,6 +24,9 @@ folder sync.
 ## Features
 - **Candle countdown**: the native counter of the BADI-CHARTS-V2 library (v2.17.1) next to
   the live candle — used exactly as shipped (no page-side override), toggleable from Settings.
+- **Go-to-live-edge arrow**: the chart pans/zooms freely like TradingView — the empty space to the
+  right of the candles is the future area and stays after a pan. An icon-only arrow appears when
+  the view drifts away from the live candle and one click snaps back to it, keeping the zoom level.
 - **BadiCharts folder on disk**: every indicator or tool the user creates is saved as a
   real file in `BadiCharts/Indicators` (indicators .js/.py) or `BadiCharts/Tools`
   (tools .js), loaded at app boot and when the editor opens. The user can drop files

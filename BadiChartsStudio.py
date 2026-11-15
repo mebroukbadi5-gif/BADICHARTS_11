@@ -25,6 +25,9 @@
 #   • Chart library v2.17.1 loads directly from the official CDN link instead of embedding its code (owner request)
 #   • The countdown beside the live candle is the library's own counter, used as-is — the page-side
 #     replacement and its color override were removed (owner request)
+#   • Go-to-live-edge arrow (icon-only): the chart pans/zooms freely so the empty right side stays
+#     after a pan — the arrow appears when the view drifts from the live candle and one click snaps
+#     it back without touching the zoom level
 #   • Signals panel with two tabs: Signals (running now) + History (finished with their result)
 #   • The encrypted indicator (.badi) runs internally only: never opened in the editor, never saved,
 #     and its card on the chart has no edit button — its signals work like any indicator
@@ -136,6 +139,13 @@ svg{vertical-align:middle;flex-shrink:0}
 .pane-pay{font-size:9.5px;font-weight:800;color:var(--ok);flex-shrink:0}
 .pane-cv{position:relative;flex:1;min-height:0}
 .pane-cv canvas{position:absolute;inset:0;display:block;width:100%;height:100%}
+/* Go-to-live-edge arrow — the chart pans/zooms freely (like TradingView) so the empty space on the
+   right is the "future"; this icon-only arrow appears when the view is away from the live candle
+   and snaps it back in one click WITHOUT touching the zoom level (user request) */
+.golive{position:absolute;right:78px;bottom:42px;width:30px;height:30px;border-radius:9999px;display:grid;place-items:center;background:var(--bg);border:1px solid var(--border2);color:var(--t-mid);cursor:pointer;z-index:4;padding:0}
+.golive:hover{border-color:var(--accent);color:var(--accent-t)}
+.golive svg{width:15px;height:15px;display:block}
+.golive[hidden]{display:none}
 /* Countdown next to the live candle — the native countdown feature of the
    BADI-CHARTS v2.17.1 library, used as-is (owner request): drawn inside the chart with the library's
    own coordinates and adaptive format, with no HTML element and no page-side override */
@@ -1723,14 +1733,59 @@ function addPane() {
     countdown: { enabled: !!(window.__BADI_UI__ && window.__BADI_UI__.cd) }
   });
   const p = { el: el, head: el.querySelector(".pane-head"), cv: cv, chart: chart, asset: name, tf: "1m", dataArr: [], tick: 0 };
+  /* Go-to-live-edge arrow (user request): hidden while the chart hugs the live candle,
+     shown as soon as the view is panned/zoomed away from it — one click snaps back */
+  const gl = document.createElement("button");
+  gl.className = "golive";
+  gl.hidden = true;
+  gl.title = "Back to the live edge";
+  gl.setAttribute("data-golive", "");
+  gl.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h12"/><path d="M10 7l5 5-5 5"/><path d="M19 5v14"/></svg>';
+  el.querySelector(".pane-cv").appendChild(gl);
+  p.gl = gl;
   setupChart(chart, p);
   chart.start();
   p.dataArr = generateCandles(cfg, p.tf, 620);
   chart.setData(p.dataArr);
   renderPaneHead(i);
   panes.push(p);
+  gl.addEventListener("click", function () { paneGoLive(p); });
   return p;
 }
+
+/* ═══ Go-to-live-edge (user request) ═══
+   The library pans/zooms freely — the empty space on the right of the candles is the "future"
+   area, and after a pan/zoom the last candle stays fixed at that distance from the axis, so the
+   gap never closes by itself. paneGoLive() snaps the view back to the newest candle while keeping
+   the zoom level untouched: it prefers the library's own goToRealtime() when the owner ships one,
+   otherwise it restores the default right offset through the chart's own helpers. */
+function paneGoLive(p) {
+  try {
+    const ch = p && p.chart;
+    if (!ch) return;
+    if (typeof ch.goToRealtime === "function") { ch.goToRealtime(); return; }
+    ch.rightOffset = 4;
+    if (typeof ch.constrainRightOffset === "function") ch.constrainRightOffset();
+    if (typeof ch.invalidateTimeMarks === "function") ch.invalidateTimeMarks();
+    if (typeof ch.autoScale === "function") ch.autoScale();
+    if (typeof ch.invalidate === "function") ch.invalidate();
+  } catch (e) {}
+}
+/* The arrow is visible only when the chart is actually away from the live edge
+   (default position = 4 bars from the right; more than 3 bars of drift shows it —
+   this covers both panning into the past and the empty future space) */
+setInterval(function () {
+  try {
+    (typeof panes !== "undefined" && panes.forEach ? panes : []).forEach(function (p) {
+      try {
+        if (!p || !p.gl || !p.chart) return;
+        const ro = (typeof p.chart.rightOffset === "number") ? p.chart.rightOffset : 0;
+        const away = Math.abs(ro - 4) > 3;
+        if (p.gl.hidden === away) p.gl.hidden = !away;
+      } catch (e) {}
+    });
+  } catch (e) {}
+}, 500);
 
 /** Select a pane — it gets the light border and becomes the editor's target */
 function setPaneActive(i) {
