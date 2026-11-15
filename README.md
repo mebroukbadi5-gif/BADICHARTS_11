@@ -1,7 +1,7 @@
 # BadiCharts Studio — Desktop (Python)
 
 A desktop application for programming indicators and drawing tools and sending Telegram
-signals. The chart and the editor are the same HTML web app (**BADI-CHARTS-V2 v2.16.0**
+signals. The chart and the editor are the same HTML web app (**BADI-CHARTS-V2 v2.17.1**
 chart + the **Monaco** editor) running inside the app window through QtWebEngine —
 not rebuilt in Python.
 
@@ -17,11 +17,13 @@ python BadiChartsStudio.py
 an explanatory banner after the coding line — automated checks prove both copies produce
 the byte-identical page and engine. The chart library itself is not embedded in either
 file: the page loads it **directly from the official CDN link** (owner request):
-`https://cdn.jsdelivr.net/gh/salahbadi19/BADI-CHARTS-V2@v2.16.0/chart.js`.
+`https://cdn.jsdelivr.net/gh/salahbadi19/BADI-CHARTS-V2@v2.17.1/chart.js`.
 Everything lives in one file: the UI, the engine, BADI encryption, and the indicator
 folder sync.
 
 ## Features
+- **Candle countdown**: the native counter of the BADI-CHARTS-V2 library (v2.17.1) next to
+  the live candle — used exactly as shipped (no page-side override), toggleable from Settings.
 - **BadiCharts folder on disk**: every indicator or tool the user creates is saved as a
   real file in `BadiCharts/Indicators` (indicators .js/.py) or `BadiCharts/Tools`
   (tools .js), loaded at app boot and when the editor opens. The user can drop files
@@ -49,7 +51,7 @@ folder sync.
   button + a BADI section (key fingerprint + BadiCharts folder path) — clicking a color
   swatch opens a **free color picker dialog** (ColorDialog with the alpha channel).
 - **The logo in one place only**: the full BadiCharts logo in the app top bar (clicking
-  it returns to the chart page) + a BADI STUDIO v2.16.0 line under it + the app icon in
+  it returns to the chart page) + a BADI STUDIO v2.17.1 line under it + the app icon in
   the title bar and taskbar.
 - **Splash screen = the same logo reveal animation**: the icon drawn stroke by stroke →
   pulse → letters rising → the shine → the CHARTING ENGINE line — on a black background

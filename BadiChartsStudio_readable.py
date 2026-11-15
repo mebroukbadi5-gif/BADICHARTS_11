@@ -5,9 +5,9 @@
 #
 #  This file is identical to BadiChartsStudio.py (generated literally from it).
 #  Every component is readable here: the studio page, the desktop app, and QML.
-#  The BADI-CHARTS-V2 v2.16.0 chart library loads directly from the official CDN
+#  The BADI-CHARTS-V2 v2.17.1 chart library loads directly from the official CDN
 #  link (owner request) — no embedded code in either copy:
-#    https://cdn.jsdelivr.net/gh/salahbadi19/BADI-CHARTS-V2@v2.16.0/chart.js
+#    https://cdn.jsdelivr.net/gh/salahbadi19/BADI-CHARTS-V2@v2.17.1/chart.js
 #
 #  Run:  pip install PySide6   then   python BadiChartsStudio_readable.py
 #  Exactly the same result — only the presentation differs.
@@ -23,7 +23,7 @@
 #             (chart, code editor, indicators, drawing tools, label dialog)
 #
 #    PART 2 — CHART LIBRARY: loaded directly from the official CDN link (owner request)
-#             https://cdn.jsdelivr.net/gh/salahbadi19/BADI-CHARTS-V2@v2.16.0/chart.js
+#             https://cdn.jsdelivr.net/gh/salahbadi19/BADI-CHARTS-V2@v2.17.1/chart.js
 #             a <script> tag in the page points straight to the link — no embedded code
 #
 #    PART 3 — THE DESKTOP APP (Python + QML)
@@ -33,8 +33,10 @@
 #  Run:  pip install PySide6   then   python BadiChartsStudio.py
 #  (or BadiChartsStudio_readable.py — exactly the same result)
 #
-#  Latest updates (v2.16.0):
-#   • The chart library loads directly from the official v2.16.0 CDN link instead of embedding its code (owner request)
+#  Latest updates (v2.17.1):
+#   • Chart library v2.17.1 loads directly from the official CDN link instead of embedding its code (owner request)
+#   • The countdown beside the live candle is the library's own counter, used as-is — the page-side
+#     replacement and its color override were removed (owner request)
 #   • Signals panel with two tabs: Signals (running now) + History (finished with their result)
 #   • The encrypted indicator (.badi) runs internally only: never opened in the editor, never saved,
 #     and its card on the chart has no edit button — its signals work like any indicator
@@ -63,8 +65,8 @@ STUDIO_HTML = r'''<!DOCTYPE html>
 <meta name="color-scheme" content="dark"/>
 <link rel="icon" href="data:,"/>
 <title>Chart Studio — Chart + Indicator Editor & Drawing Tools</title>
-<!-- ═══ BADI-CHARTS-V2 v2.16.0 chart library ═══ -->
-<script src="https://cdn.jsdelivr.net/gh/salahbadi19/BADI-CHARTS-V2@v2.16.0/chart.js"></script>
+<!-- ═══ BADI-CHARTS-V2 v2.17.1 chart library ═══ -->
+<script src="https://cdn.jsdelivr.net/gh/salahbadi19/BADI-CHARTS-V2@v2.17.1/chart.js"></script>
 <!-- ═══ Monaco code editor — lazy-loaded on first editor open (light startup) ═══ -->
 <style>
 :root{
@@ -146,9 +148,9 @@ svg{vertical-align:middle;flex-shrink:0}
 .pane-pay{font-size:9.5px;font-weight:800;color:var(--ok);flex-shrink:0}
 .pane-cv{position:relative;flex:1;min-height:0}
 .pane-cv canvas{position:absolute;inset:0;display:block;width:100%;height:100%}
-/* Countdown next to the live candle — now the native countdown feature of the
-   BADI-CHARTS v2.16.0 library: drawn inside the chart using its own coordinates, keeping its
-   distance from the candle at any zoom, with no HTML element and no private requestAnimationFrame loop */
+/* Countdown next to the live candle — the native countdown feature of the
+   BADI-CHARTS v2.17.1 library, used as-is (owner request): drawn inside the chart with the library's
+   own coordinates and adaptive format, with no HTML element and no page-side override */
 #libLoading{position:absolute;inset:0;display:grid;place-items:center;background:var(--bg);z-index:5}
 .loadbox{display:flex;flex-direction:column;align-items:center;gap:12px}
 .spin{height:32px;width:32px;border-radius:9999px;border:2px solid var(--border2);border-top-color:var(--accent-h);animation:spin 1s linear infinite}
@@ -443,7 +445,7 @@ svg{vertical-align:middle;flex-shrink:0}
       </div>
       <!-- ═══ Simple info bar under the chart: online · timezone · time · FPS (no currency name — user request) ═══ -->
       <div id="statusBar">
-        <span id="stBrand" class="mono">BADI STUDIO v2.16.0</span>
+        <span id="stBrand" class="mono">BADI STUDIO v2.17.1</span>
         <span class="st-sep">·</span>
         <span id="stDot" class="st-dot"></span><span id="stConn">Connected</span>
         <span class="grow"></span>
@@ -537,7 +539,7 @@ svg{vertical-align:middle;flex-shrink:0}
 "use strict";
 /* ═══════════════════════════════════════════════════════════════
    Chart Studio — single self-contained HTML file
-   chart + indicator editor and drawing tools on top of BADI-CHARTS-V2 v2.16.0
+   chart + indicator editor and drawing tools on top of BADI-CHARTS-V2 v2.17.1
    No indicator runs automatically — everything waits for the user to press ▶.
    ═══════════════════════════════════════════════════════════════ */
 
@@ -1728,9 +1730,9 @@ function addPane() {
     symbol: { label: cfg.label, priceScale: 100, decimals: cfg.decimals },
     timeframe: { label: "1m", ms: tfMs("1m") },
     theme: window.__BADI_CHART_THEME__ || { drawing: "#38bdf8", drawingActive: "#7dd3fc" },
-    /* The native library countdown next to the live candle (user request): two digits only,
-       no frame or background, fixed offset (14px) from the candle edge at any zoom */
-    countdown: { enabled: !!(window.__BADI_UI__ && window.__BADI_UI__.cd), format: "ss", fontSize: 13, offsetX: 14, offsetY: 0, color: "#22E08A" }
+    /* The native library countdown next to the live candle (owner request): the library's counter
+       runs exactly as shipped with its own defaults — the page passes only the on/off state from Settings */
+    countdown: { enabled: !!(window.__BADI_UI__ && window.__BADI_UI__.cd) }
   });
   const p = { el: el, head: el.querySelector(".pane-head"), cv: cv, chart: chart, asset: name, tf: "1m", dataArr: [], tick: 0 };
   setupChart(chart, p);
@@ -1864,7 +1866,6 @@ function liveTick() {
         p.dataArr[p.dataArr.length - 1] = sc;
         p.chart.update(sc);
       }
-      syncCdColor(p);
     }
   }
   sigLocalResolve();
@@ -1884,90 +1885,10 @@ function sigExpireSweep() {
 }
 
 /* ═══ Countdown next to the live candle (user request) ═══
-   We use the native countdown feature of the library (v2.16.0): drawn inside the chart using its own
-   coordinates — two digits only, no frame or background, fixed offset (14px) from the live candle edge
-   at any zoom. We redefine drawCountdown on the library prototype with three fixes:
-   1) The library passes the requestAnimationFrame timestamp (performance.now) into drawCountdown
-      while candle times are in real seconds — so the count used to drop and return in wrong seconds.
-      We compute time from Date.now() so the count stays aligned to candle boundaries in real time.
-   2) The library hides the number entirely when there is no room between the candle and the price
-      axis (zooming with the candle hugging the axis) — it looked like it stopped. Alternative: draw
-      it above the candle itself (centered above its wick) with clear spacing — no clash with any
-      candle or with the axis.
-   3) The number color = live candle direction color (green/red) — updated on every tick (syncCdColor). */
-(function () {
-  try {
-    if (window.BadiCharts && BadiCharts.prototype) {
-      BadiCharts.prototype.drawCountdown = function () {
-        try {
-          const cd = this._countdown;
-          if (!cd || !cd.enabled) return;
-          const candles = this.sim.candles, N = candles.length;
-          if (N === 0) return;
-          const last = candles[N - 1];
-          if (!last || !last.time) return;
-          const tfMs = this.timeframe.ms || 6e4;
-          const closeSec = last.time + Math.round(tfMs / 1e3);
-          /* Real wall-clock time, not the draw timestamp — full alignment with timeframe boundaries */
-          const nowSec = Math.floor(Date.now() / 1000);
-          let rem = closeSec - nowSec;
-          if (rem < 0) rem = 0;
-          const value = Math.min(99, Math.max(0, rem % 60));   /* Always two digits only */
-          const text = (value < 10 ? "0" : "") + value;
-          const y = this.priceToY(last.close) + (cd.offsetY || 0);
-          if (!isFinite(y) || y < this.priceTop - 6 || y > this.priceBottom + 6) return;
-          const ctx = this.ctx;
-          ctx.save();
-          ctx.font = (cd.fontSize || 11) + "px -apple-system, Segoe UI, Roboto, sans-serif";
-          ctx.fillStyle = cd.color || this.theme.textDim;
-          ctx.textAlign = "left";
-          ctx.textBaseline = "middle";
-          const tw = ctx.measureText(text).width;
-          const off = (cd.offsetX != null) ? cd.offsetX : 6;
-          const slotEdge = this.indexToX(N - 1) + this.barSpacing / 2;
-          /* Flexible offset: the number stays beside the candle at the default zoom (the space up to
-             the price axis is tight at small zoom) — and it moves above the candle only when jammed */
-          const avail = (this.chartRight - 4) - slotEdge;
-          let x = slotEdge + off;
-          if (!isFinite(x)) { ctx.restore(); return; }
-          if (x + tw > this.chartRight - 4) {
-            if (avail >= tw + 8) {
-              /* There is room for a smaller offset — squeeze it rather than leave the candle */
-              x = slotEdge + Math.max(6, avail - tw - 2);
-            }
-            if (x + tw > this.chartRight - 4) {
-              /* No room at all to the right of the candle → above the candle, centered above its wick */
-              const yTop = this.priceToY(last.high) - (cd.fontSize || 11);
-              if (isFinite(yTop) && yTop - (cd.fontSize || 11) / 2 > this.priceTop + 2) {
-                ctx.textAlign = "center";
-                ctx.fillText(text, Math.round(this.indexToX(N - 1)), Math.round(yTop));
-              }
-              ctx.restore();
-              return;
-            }
-          }
-          if (x < this.chartLeft + 4) { ctx.restore(); return; }
-          ctx.fillText(text, Math.floor(x), Math.floor(y));
-          ctx.restore();
-        } catch (e) {}
-      };
-    }
-  } catch (e) {}
-})();
-/* Sync the countdown color with the last candle direction (updates on every tick / theme change) */
-function syncCdColor(p) {
-  try {
-    const ch = p.chart;
-    if (!ch || !ch._countdown || typeof ch.setCountdown !== "function") return;
-    const arr = (ch.sim && ch.sim.candles && ch.sim.candles.length) ? ch.sim.candles : (p.dataArr || []);
-    const last = arr[arr.length - 1];
-    if (!last) return;
-    const th = window.__BADI_CHART_THEME__ || {};
-    const col = last.close >= last.open ? (th.bull || "#22E08A") : (th.bear || "#FF4D5E");
-    if (ch._countdown.color !== col) ch.setCountdown({ color: col });
-  } catch (e) {}
-}
-
+   The native countdown of the BADI-CHARTS v2.17.1 library is used as-is: the owner built the counter
+   into the library itself (real Unix time, adaptive format, drawn beside the live candle with the
+   library's own coordinates). The page keeps no replacement and applies no overrides — Settings only
+   toggles it through the official setCountdown API. */
 function showLibError(msg) {
   const box = $("libLoading");
   box.hidden = false;
@@ -2765,7 +2686,7 @@ document.addEventListener("DOMContentLoaded", boot);
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  PART 2 — CHART LIBRARY: loaded directly from the official CDN link (owner request)
-#  https://cdn.jsdelivr.net/gh/salahbadi19/BADI-CHARTS-V2@v2.16.0/chart.js
+#  https://cdn.jsdelivr.net/gh/salahbadi19/BADI-CHARTS-V2@v2.17.1/chart.js
 #  A <script> tag inside the page points straight to the link — no embedded code, no local copy.
 #  Without internet the page shows an error panel with a Retry button (showLibError).
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2779,7 +2700,7 @@ document.addEventListener("DOMContentLoaded", boot);
 """
 BadiCharts Studio — desktop indicator studio (Python + PySide6/QML)
 Splash + login (same BadiCharts logo & flow) → studio:
-  • the chart & editor are the embedded HTML app (BADI-CHARTS-V2 v2.16.0 chart
+  • the chart & editor are the embedded HTML app (BADI-CHARTS-V2 v2.17.1 chart
     + Monaco editor) rendered inside the window with QtWebEngine
   • program indicators & tools in JavaScript or Python (Python runs in the
     desktop engine and its values are pushed into the chart)
@@ -4567,8 +4488,8 @@ GUIDE_JS = """/* ═════════════════════
        • The signal time shows in the left corner of the card.
        • The card disappears automatically when the timeframe candle ends, and the result
          (WIN/LOSS) is recorded in the History tab.
-       • The countdown beside the live candle (two digits only, no frame) is automatic —
-         it shows the seconds left until the current candle closes.
+       • The countdown beside the live candle is the library's own counter — automatic,
+         it shows the time left until the current candle closes (seconds/minutes adaptive).
 
    ── 5) Free drawing — the chart accepts drawing anything (full Canvas 2D) ──
      render(ctx, values, h, s) is optional — without it the results are drawn as lines automatically.
@@ -6438,7 +6359,7 @@ class Backend(QObject):
         return "data:image/svg+xml;utf8," + urllib.parse.quote(svg)
 # ---------------------------------------------------------------- UI (QML)
 # ---------------------------------------------------------------- Embedded web UI (HTML inside the app)
-# The chart here is the BADI-CHARTS-V2 v2.16.0 library itself and the editor is Monaco — both inside an HTML page
+# The chart here is the BADI-CHARTS-V2 v2.17.1 library itself and the editor is Monaco — both inside an HTML page
 # written next to the app at boot and displayed inside the window through QtWebEngine.
 
 
@@ -6561,7 +6482,7 @@ html.embedded .modal-opts{grid-template-columns:repeat(2,1fr)}</style>"""
 # Injected after the page script: the Python ↔ page bridge
 BRIDGE_POST = r"""<script>
 /* ═══════════════ BadiCharts Studio — desktop bridge (post) ═══════════════
-   connects the HTML page (BADI-CHARTS v2.16.0 chart + Monaco editor) to the Python engine:
+   connects the HTML page (BADI-CHARTS v2.17.1 chart + Monaco editor) to the Python engine:
    • candles are pushed from Python (setCandles / pushTick) instead of local simulation
    • Python indicators are drawn through pyMeta / setPy
    • user files sync with the app through BADI::files
@@ -7109,7 +7030,7 @@ function applyAppTheme(t) {
   /* Chart color = app color: applied immediately to every open panel (and a new panel inherits it when created) */
   try {
     if (typeof panes !== "undefined" && panes && panes.forEach)
-      panes.forEach(function (p) { try { if (p.chart && typeof p.chart.setTheme === "function") p.chart.setTheme(ct); } catch (e) {} try { syncCdColor(p); } catch (e) {} });
+      panes.forEach(function (p) { try { if (p.chart && typeof p.chart.setTheme === "function") p.chart.setTheme(ct); } catch (e) {} });
   } catch (e) {}
   window.__BADI_MONACO_THEME__ = t.dark ? "badi-app-dark" : "badi-app-light";
   try {
@@ -7173,7 +7094,6 @@ function defineBadiApp() {
         if (!pr) return;
         pr.dataArr = normArr(arr || []);
         pr.chart.setData(pr.dataArr);
-        syncCdColor(pr);
         runSignals();
       } catch (e) { console.log("BADI::dbg setCandles ERR " + e); }
     },
@@ -7191,7 +7111,6 @@ function defineBadiApp() {
           } else pr.dataArr[pr.dataArr.length - 1] = k;
         }
         pr.chart.update(k);
-        syncCdColor(pr);
         runSignals();
       } catch (e) {}
     },
@@ -8924,7 +8843,7 @@ ApplicationWindow {
                 anchors.horizontalCenter: parent.horizontalCenter
                 spacing: 10
                 opacity: loginPage.ease(2.5)
-                Label { text: "BADI STUDIO v2.16.0"; font.pixelSize: 10; font.bold: true
+                Label { text: "BADI STUDIO v2.17.1"; font.pixelSize: 10; font.bold: true
                         font.letterSpacing: 1.4; color: backend.c.sub }
                 Label { text: "·"; font.pixelSize: 10; color: backend.c.border }
                 Label { text: "© BadiCharts"; font.pixelSize: 10; color: backend.c.sub }
@@ -9209,7 +9128,7 @@ ApplicationWindow {
                 currentIndex: win.page
 '''
 QML += r'''
-                // ═══════ 0 — The studio: embedded HTML page (BADI-CHARTS v2.16.0 chart + Monaco editor) ═══════
+                // ═══════ 0 — The studio: embedded HTML page (BADI-CHARTS v2.17.1 chart + Monaco editor) ═══════
                 Item {
                     WebEngineView {
                         id: webView
